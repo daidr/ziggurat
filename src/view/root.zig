@@ -676,6 +676,23 @@ pub const Preferences = struct {
     /// Backdrop effects draw opaque fills.
     reduce_transparency: bool = false,
     high_contrast: bool = false,
+    /// What the pointing devices can do, as Media Queries 4's `pointer`,
+    /// `any-pointer`, `hover` and `any-hover`, whose zero is a mouse's:
+    /// how accurately the primary one points and the most accurate of all,
+    /// and that the primary one, or every one, cannot hover. A touch-first
+    /// layout gives a coarse pointer larger targets, and shows on hover
+    /// alone only what a pointer that hovers can reach. The application
+    /// gives them from `system.desktop.Preferences`.
+    pointer: z.PointerAccuracy = .fine,
+    any_pointer: z.PointerAccuracy = .fine,
+    no_hover: bool = false,
+    no_any_hover: bool = false,
+    pub fn hover(self: Preferences) bool {
+        return !self.no_hover;
+    }
+    pub fn anyHover(self: Preferences) bool {
+        return !self.no_any_hover;
+    }
 };
 pub const LoadingKind = ui.loading.Kind;
 /// How a loading indicator looks and moves; see `View.loadingIndicator`.

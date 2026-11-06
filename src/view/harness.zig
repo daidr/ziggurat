@@ -51,6 +51,10 @@ pub const Config = struct {
     /// same key, which share one state, with error.DuplicateKey; the
     /// mistake is in `Harness.issue`. A window notes it in the inspector.
     strict: bool = true,
+    /// The desktop's preferences, which the first frame follows, as a
+    /// window's do once its application sets them: a view built under
+    /// reduced motion starts no animation in its first frames.
+    preferences: view.Preferences = .{},
 };
 
 /// A semantic node as `Harness.accessible` reads it: `entry` holds its
@@ -116,6 +120,7 @@ pub const Harness = struct {
         built.tooltip_delay = config.options.tooltip_delay;
         built.layout_direction = config.options.direction;
         built.icons = config.options.icons;
+        built.preferences = config.preferences;
         return .{ .view = built, .build = view.Build.bind(state, build), .config = config };
     }
 
@@ -139,6 +144,12 @@ pub const Harness = struct {
         self.setFocus(id);
     }
 
+    /// Follow other desktop preferences from the next frame, as
+    /// `Host.setPreferences` does.
+    pub fn setPreferences(self: *Harness, value: view.Preferences) anyerror!void {
+        self.view.preferences = value;
+        try self.render();
+    }
     /// Build and arrange the current state, as a paint would.
     pub fn render(self: *Harness) anyerror!void {
         const tools = self.config.options.tools();

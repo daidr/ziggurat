@@ -1037,6 +1037,18 @@ body>.ziggurat-window{position:fixed}
           // Outside a copy event the page asks the browser, which may refuse.
           if (!rt.inCopy && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(rt.clipboardText).catch(() => {});
         },
+        zw_clipboard_write_then: (ptr, len, token) => {
+          rt.clipboardText = rt.string(ptr, len);
+          rt.clipboardHeld = true;
+          // The page keeps the text for its own pastes either way; the app
+          // learns whether the system clipboard took it.
+          const settle = (ok) => rt.call(() => (rt.exports.ziggurat_clipboard_written(token, ok ? 1 : 0), 0));
+          if (!navigator.clipboard || !navigator.clipboard.writeText) return void Promise.resolve().then(() => settle(false));
+          navigator.clipboard.writeText(rt.clipboardText).then(
+            () => settle(true),
+            () => settle(false),
+          );
+        },
         zw_clipboard_read: (ptr, capacity) => {
           if (!rt.clipboardHeld) return -1;
           const bytes = encoder.encode(rt.clipboardText);
@@ -1261,6 +1273,13 @@ body>.ziggurat-window{position:fixed}
           dv.setFloat32(out + 12, 1, true);
           dv.setInt32(out + 16, -1, true);
           dv.setInt32(out + 20, flag("(prefers-reduced-transparency: reduce)"), true);
+          // The pointing devices, as Media Queries 4's interaction features:
+          // 0 fine, 1 coarse, 2 none; a page that answers none stays fine.
+          const accuracy = (name) => (flag(`(${name}: coarse)`) === 1 ? 1 : flag(`(${name}: none)`) === 1 ? 2 : 0);
+          dv.setInt32(out + 24, accuracy("pointer"), true);
+          dv.setInt32(out + 28, accuracy("any-pointer"), true);
+          dv.setInt32(out + 32, flag("(hover: none)") === 1 ? 1 : 0, true);
+          dv.setInt32(out + 36, flag("(any-hover: none)") === 1 ? 1 : 0, true);
           return 0;
         },
         zsd_monitors: (out, capacity, count) => {
@@ -1303,7 +1322,7 @@ body>.ziggurat-window{position:fixed}
             target.addEventListener(type, fn);
             undo.push(() => target.removeEventListener(type, fn));
           };
-          for (const q of ["(prefers-color-scheme: dark)", "(prefers-contrast: more)", "(forced-colors: active)", "(prefers-reduced-motion: reduce)", "(prefers-reduced-transparency: reduce)"]) on(query(q), "change", () => fire(2));
+          for (const q of ["(prefers-color-scheme: dark)", "(prefers-contrast: more)", "(forced-colors: active)", "(prefers-reduced-motion: reduce)", "(prefers-reduced-transparency: reduce)", "(pointer: coarse)", "(any-pointer: coarse)", "(hover: none)", "(any-hover: none)"]) on(query(q), "change", () => fire(2));
           if (typeof MutationObserver !== "undefined") {
             const observer = new MutationObserver(() => fire(2));
             observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-ziggurat-theme"] });

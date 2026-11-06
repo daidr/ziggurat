@@ -192,3 +192,26 @@ test "an area tells what presses it and how hard" {
     try h.release(pad.x + 20, pad.y + 10);
     try testing.expect(app.pens >= 2);
 }
+
+const Touch = struct {
+    size: f32 = 0,
+    hover_tip: bool = false,
+    fn build(self: *Touch, v: *View) anyerror!void {
+        const p = v.preferences;
+        self.size = if (p.pointer == .coarse) 44 else 28;
+        self.hover_tip = p.hover();
+        _ = try v.button("x", .{ .width = self.size, .height = self.size, .name = "Delete" });
+    }
+};
+
+test "a tester starts with the desktop's preferences, the pointer's among them" {
+    var storage: Storage = .{};
+    var app: Touch = .{};
+    var h = Harness.init(&app, Touch.build, storage.buffers(), .{ .preferences = .{ .pointer = .coarse, .any_pointer = .coarse, .no_hover = true, .no_any_hover = true } });
+    try h.render();
+    try testing.expectEqual(@as(f32, 44), app.size);
+    try testing.expect(!app.hover_tip);
+    try h.setPreferences(.{});
+    try testing.expectEqual(@as(f32, 28), app.size);
+    try testing.expect(app.hover_tip);
+}

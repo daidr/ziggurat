@@ -18,7 +18,8 @@ enum { ZSD_OK = 0, ZSD_UNSUPPORTED = 1, ZSD_FAILED = 2, ZSD_CAPACITY = 3, ZSD_NO
 
 typedef struct ZsdRect { int32_t x, y; uint32_t width, height; } ZsdRect;
 typedef struct ZsdMonitor { ZsdRect bounds, work; float scale; uint32_t primary, refresh_millihz; } ZsdMonitor;
-typedef struct ZsdPreferences { int32_t scheme; uint32_t high_contrast, reduce_motion; float text_scale; int32_t accent, reduce_transparency; } ZsdPreferences;
+/* pointer and any_pointer: 0 fine, 1 coarse, 2 none. */
+typedef struct ZsdPreferences { int32_t scheme; uint32_t high_contrast, reduce_motion; float text_scale; int32_t accent, reduce_transparency, pointer, any_pointer, no_hover, no_any_hover; } ZsdPreferences;
 typedef struct ZsdPower { int32_t source, percent, saver; } ZsdPower;
 typedef struct ZsdNetwork { int32_t state, metered; } ZsdNetwork;
 typedef void (*ZsdChanged)(void *owner, uint32_t bits);
@@ -88,6 +89,33 @@ static gboolean contains(const char *text, const char *needle) {
    here, which would be a blocking D-Bus call on the UI thread: the core reads
    and watches it asynchronously and brings a dark one to prefer-dark while
    the app follows the desktop. */
+/* What the default seat's pointing devices can do, as Media Queries 4's
+   interaction features: a mouse, a touchpad, a trackpoint or a pen points
+   finely and hovers, a touch screen coarsely without hovering. The primary
+   one is the finest, as Chromium takes it. A seat GDK tells nothing of
+   stays a mouse's. */
+static void pointing(ZsdPreferences *out) {
+    GdkDisplay *display = gdk_display_get_default();
+    GdkSeat *seat = display ? gdk_display_get_default_seat(display) : NULL;
+    if (!seat) return;
+    GList *devices = gdk_seat_get_slaves(seat, GDK_SEAT_CAPABILITY_ALL_POINTING);
+    gboolean fine = FALSE, coarse = FALSE;
+    for (GList *at = devices; at; at = at->next) {
+        switch (gdk_device_get_source(GDK_DEVICE(at->data))) {
+        case GDK_SOURCE_TOUCHSCREEN: coarse = TRUE; break;
+        case GDK_SOURCE_KEYBOARD: case GDK_SOURCE_TABLET_PAD: break;
+        default: fine = TRUE; break;
+        }
+    }
+    g_list_free(devices);
+    if (!fine && !coarse) {
+        /* No pointing device at all, as a kiosk with a keyboard alone. */
+        if (gdk_seat_get_pointer(seat) == NULL) { out->pointer = out->any_pointer = 2; out->no_hover = out->no_any_hover = 1; }
+        return;
+    }
+    out->pointer = out->any_pointer = fine ? 0 : 1;
+    out->no_hover = out->no_any_hover = fine ? 0 : 1;
+}
 int zsd_preferences(ZsdPreferences *out) {
     GtkSettings *settings = gtk_settings_get_default();
     if (!settings) return ZSD_UNSUPPORTED;
@@ -105,6 +133,7 @@ int zsd_preferences(ZsdPreferences *out) {
     out->reduce_motion = animations ? 0u : 1u;
     out->text_scale = dpi > 0 ? (float)dpi / (96.0f * 1024.0f) : 1.0f;
     g_free(theme);
+    pointing(out);
     return ZSD_OK;
 }
 
@@ -236,6 +265,7 @@ static void watch_mark(ZsdWatch *watch, uint32_t bits) {
 static void on_screen(GdkScreen *screen, gpointer data) { (void)screen; watch_mark(data, ZSD_MONITORS); }
 static void on_monitor(GdkDisplay *display, GdkMonitor *monitor, gpointer data) { (void)display; (void)monitor; watch_mark(data, ZSD_MONITORS); }
 static void on_preference(GObject *object, GParamSpec *spec, gpointer data) { (void)object; (void)spec; watch_mark(data, ZSD_PREFERENCES); }
+static void on_seat_device(GdkSeat *seat, GdkDevice *device, gpointer data) { (void)seat; (void)device; watch_mark(data, ZSD_PREFERENCES); }
 static void on_power(GObject *object, GParamSpec *spec, gpointer data) { (void)object; (void)spec; watch_mark(data, ZSD_POWER); }
 static void on_network(GNetworkMonitor *monitor, gboolean available, gpointer data) { (void)monitor; (void)available; watch_mark(data, ZSD_NETWORK); }
 static void on_network_property(GObject *object, GParamSpec *spec, gpointer data) { (void)object; (void)spec; watch_mark(data, ZSD_NETWORK); }
@@ -295,6 +325,13 @@ int zsd_watch_start(uint32_t kinds, void *owner, ZsdChanged changed, void **out)
         watch_connect(watch, settings, "notify::gtk-enable-animations", G_CALLBACK(on_preference));
         watch_connect(watch, settings, "notify::gtk-xft-dpi", G_CALLBACK(on_preference));
         watch_connect(watch, settings, "notify::gtk-decoration-layout", G_CALLBACK(on_preference));
+        /* The pointing devices come and go. */
+        GdkDisplay *pointing_display = gdk_display_get_default();
+        GdkSeat *seat = pointing_display ? gdk_display_get_default_seat(pointing_display) : NULL;
+        if (seat) {
+            watch_connect(watch, seat, "device-added", G_CALLBACK(on_seat_device));
+            watch_connect(watch, seat, "device-removed", G_CALLBACK(on_seat_device));
+        }
     }
     if (kinds & ZSD_POWER) {
         GObject *monitor = power_profile_monitor();

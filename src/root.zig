@@ -119,6 +119,10 @@ pub const ClickSample = pointer_press.Position;
 pub const ClickPolicy = pointer_clicks.Policy;
 pub const PointerPressSnapshot = pointer_press.Snapshot;
 pub const PointerDisposition = pointer_press.Disposition;
+/// How accurately a pointing device points, as Media Queries 4's
+/// `pointer`: `fine` for a mouse, a touchpad or a pen, `coarse` for a
+/// touch screen, `none` for none.
+pub const PointerAccuracy = enum(u8) { fine, coarse, none };
 /// What points, as Pointer Events' `pointerType`: a mouse or a touchpad, a
 /// pen on a tablet or a screen, or a finger on a touchscreen.
 pub const PointerDevice = enum(u8) { mouse, pen, touch };
