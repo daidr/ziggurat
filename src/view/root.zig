@@ -6385,7 +6385,7 @@ pub const View = struct {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .self_clip };
                 scope_depth += 1;
             }
-            const opened = try self.openEffects(target, style, bounds);
+            const opened = try self.openEffectsInked(target, style, bounds, if (style.blur > 0) inkBounds(all, at) else bounds);
             for (0..opened.effects) |_| {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .effect };
                 scope_depth += 1;
@@ -6863,7 +6863,51 @@ pub const View = struct {
     /// opacity inside them: each drawing of the subtree fades by itself,
     /// as if its colors were multiplied by the opacity, rather than the
     /// subtree fading as one layer; an effect inside fades as one drawing.
+    /// What the node at `index` and those inside it paint at most: their
+    /// boxes, and how far the shadows and strokes of their text reach past
+    /// them; a blur's layer spans it, so that what reaches out of the box
+    /// is not cut at the layer's edge.
+    fn inkBounds(all: []const Node, index: usize) Rect {
+        const node = &all[index];
+        var x0 = node.bounds.x;
+        var y0 = node.bounds.y;
+        var x1 = node.bounds.x + node.bounds.width;
+        var y1 = node.bounds.y + node.bounds.height;
+        var at = index + 1;
+        while (at < node.end) {
+            const inner = &all[at];
+            if (inner.concealed or inner.hidden() or inner.floats()) {
+                at = if (inner.isContainer()) inner.end else at + 1;
+                continue;
+            }
+            var box = inner.bounds;
+            if (inner.kind == .text) {
+                const decorations = textDecorations(all, at);
+                var reach: f32 = 0;
+                if (decorations.stroke) |stroke| reach = stroke.width / 2;
+                if (decorations.shadow) |shadow| {
+                    const spread = shadow.blur * 1.5;
+                    box = .{ .x = box.x + @min(0, shadow.x) - spread, .y = box.y + @min(0, shadow.y) - spread, .width = box.width + @abs(shadow.x) + 2 * spread, .height = box.height + @abs(shadow.y) + 2 * spread };
+                }
+                box = .{ .x = box.x - reach, .y = box.y - reach, .width = box.width + 2 * reach, .height = box.height + 2 * reach };
+            }
+            if (box.width > 0 and box.height > 0) {
+                x0 = @min(x0, box.x);
+                y0 = @min(y0, box.y);
+                x1 = @max(x1, box.x + box.width);
+                y1 = @max(y1, box.y + box.height);
+            }
+            // What a clipping container holds stays within it.
+            at = if (inner.isContainer() and inner.clips()) inner.end else at + 1;
+        }
+        return .{ .x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0 };
+    }
     fn openEffects(self: *const View, target: anytype, style: Style, bounds: Rect) !Opened {
+        return self.openEffectsInked(target, style, bounds, bounds);
+    }
+    /// `openEffects` with a blur's layer spanning `ink`, what the node
+    /// paints, rather than its box.
+    fn openEffectsInked(self: *const View, target: anytype, style: Style, bounds: Rect, ink: Rect) !Opened {
         var alpha: u8 = @intFromFloat(@round(style.opacity * 255));
         var opened: Opened = .{};
         if (self.effects) |library| if (style.pose) |pose| {
@@ -6876,7 +6920,7 @@ pub const View = struct {
         if (self.effects) |library| if (style.blur > 0) {
             var values: ui.shader.Values = undefined;
             if (try library.blur(&values, style.blur)) |effect| {
-                try target.beginEffect(bounds, effect, .{});
+                try target.beginEffect(ink, effect, .{});
                 opened.effects += 1;
             }
         };
