@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <wchar.h>
+#include <stdio.h>
 #include <math.h>
 #include <string.h>
 
@@ -35,7 +36,7 @@
 #define MIXED 1024
 /* A text box holding a password exposes no text pattern. */
 #define PASSWORD 2048
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU, ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT, ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING, ROLE_COUNT };
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU, ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT, ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING, ROLE_GRID, ROLE_TREE_GRID, ROLE_DELETION, ROLE_INSERTION, ROLE_COUNT };
 enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
 
 typedef struct Node {
@@ -45,17 +46,25 @@ typedef struct Node {
     double x, y, width, height, range_value;
     double range_minimum, range_maximum, range_small_change, range_large_change;
     uint32_t position, set_size, level;
-    /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED and
-       VERTICAL, then the popup kind (bits 8 to 10), current (11 to 13),
+    /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED,
+       VERTICAL, SEARCH and HORIZONTAL, then the popup kind (bits 8 to 10), current (11 to 13),
        sort (14, 15) and autocomplete (16, 17). */
     uint32_t states;
     uint32_t role_description_start, role_description_len, key_shortcuts_start, key_shortcuts_len;
-    uint32_t value_text_start, value_text_len, reserved0, reserved1;
+    /* Rows and columns of a table or grid, built or not (aria-rowcount,
+       aria-colcount); 0 for those built. */
+    uint32_t value_text_start, value_text_len, row_count, column_count;
     /* The node this one controls (aria-controls), 0 for none. */
     uint64_t controls;
+    /* A row's or cell's place among all rows and columns from 1
+       (aria-rowindex, aria-colindex); 0 when not given. */
+    uint32_t row_index, column_index;
+    /* The nodes describing it (aria-describedby) and holding its error
+       message (aria-errormessage), 0 for none. */
+    uint64_t described_by, error_message;
 } Node;
-_Static_assert(sizeof(Node) == 184, "semantic node ABI");
-enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16 };
+_Static_assert(sizeof(Node) == 208, "semantic node ABI");
+enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16, SEARCH = 32, HORIZONTAL = 64 };
 enum { POPUP_NONE, POPUP_MENU, POPUP_LIST_BOX, POPUP_TREE, POPUP_GRID, POPUP_DIALOG };
 enum { CURRENT_NONE, CURRENT_ITEM, CURRENT_PAGE, CURRENT_STEP, CURRENT_LOCATION, CURRENT_DATE, CURRENT_TIME };
 enum { SORT_NONE, SORT_ASCENDING, SORT_DESCENDING, SORT_OTHER };
@@ -239,7 +248,7 @@ static BOOL toggle_role(uint32_t role) { return role == ROLE_CHECKBOX || role ==
 /* Tabs and list box options select like radios: one selected item per
    chooser container. Trees and tables may allow several (MULTIPLE). */
 static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || role == ROLE_LIST_ITEM || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
-static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE; }
+static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE || role == ROLE_GRID || role == ROLE_TREE_GRID; }
 static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK || role == ROLE_COLUMN_HEADER || role == ROLE_COLOR_WELL || role == ROLE_MENU_ITEM; }
 /* A combo box expands and collapses its list like a disclosure, and a
    color well its picker. */
@@ -550,6 +559,8 @@ static int control_type(uint32_t role) {
         case ROLE_OPTION: return UIA_ListItemControlTypeId;
         case ROLE_CELL: return UIA_DataItemControlTypeId;
         case ROLE_HEADING: return UIA_TextControlTypeId;
+        case ROLE_GRID: case ROLE_TREE_GRID: return UIA_DataGridControlTypeId;
+        case ROLE_DELETION: case ROLE_INSERTION: return UIA_TextControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }
@@ -571,6 +582,15 @@ static BSTR aria_properties(const State *s, const Node *n) {
     if (node_sort(n)) aria_add(out, &used, "sort", sort_names[node_sort(n)], NULL, 0);
     if (node_autocomplete(n)) aria_add(out, &used, "autocomplete", autocomplete_names[node_autocomplete(n)], NULL, 0);
     if (n->value_text_len) aria_add(out, &used, "valuetext", NULL, s->text + n->value_text_start, n->value_text_len);
+    char number[16];
+    const struct { const char *name; uint32_t value; } counts[] = { { "rowcount", n->row_count }, { "colcount", n->column_count }, { "rowindex", n->row_index }, { "colindex", n->column_index } };
+    for (size_t i = 0; i < sizeof counts / sizeof counts[0]; ++i) {
+        if (!counts[i].value) continue;
+        snprintf(number, sizeof number, "%u", counts[i].value);
+        aria_add(out, &used, counts[i].name, number, NULL, 0);
+    }
+    if (n->states & VERTICAL) aria_add(out, &used, "orientation", "vertical", NULL, 0);
+    else if (n->states & HORIZONTAL) aria_add(out, &used, "orientation", "horizontal", NULL, 0);
     return used ? SysAllocStringLen(out, (UINT)used) : NULL;
 }
 static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *iface, PROPERTYID id, VARIANT *out) {
@@ -591,6 +611,13 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_HelpTextPropertyId:
             if (n->description_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->description_start, n->description_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
             break;
+        /* Which way it runs, as the application tells (aria-orientation). */
+        case 30023 /* UIA_OrientationPropertyId */:
+            if (n->states & (VERTICAL | HORIZONTAL)) { out->vt = VT_I4; out->lVal = (n->states & VERTICAL) ? 2 /* OrientationType_Vertical */ : 1 /* OrientationType_Horizontal */; }
+            break;
+        case 30159 /* UIA_FullDescriptionPropertyId */:
+            if (n->description_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->description_start, n->description_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            break;
         case UIA_IsDataValidForFormPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & INVALID) ? VARIANT_FALSE : VARIANT_TRUE; break;
         case UIA_IsRequiredForFormPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & REQUIRED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_AutomationIdPropertyId: {
@@ -605,9 +632,9 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
                 if (!out->bstrVal) hr = E_OUTOFMEMORY;
                 break;
             }
-            if (n->role == ROLE_REGION || n->role == ROLE_LOG || n->role == ROLE_TIMER || n->role == ROLE_ALERT || n->role == ROLE_ARTICLE || n->role == ROLE_HEADING) {
+            if (n->role == ROLE_REGION || n->role == ROLE_LOG || n->role == ROLE_TIMER || n->role == ROLE_ALERT || n->role == ROLE_ARTICLE || n->role == ROLE_HEADING || n->role == ROLE_DELETION || n->role == ROLE_INSERTION || ((n->role == ROLE_TEXT_BOX) && (n->states & SEARCH))) {
                 out->vt = VT_BSTR;
-                out->bstrVal = SysAllocString(n->role == ROLE_REGION ? L"region" : n->role == ROLE_LOG ? L"log" : n->role == ROLE_TIMER ? L"timer" : n->role == ROLE_ALERT ? L"alert" : n->role == ROLE_ARTICLE ? L"article" : L"heading");
+                out->bstrVal = SysAllocString(n->role == ROLE_REGION ? L"region" : n->role == ROLE_LOG ? L"log" : n->role == ROLE_TIMER ? L"timer" : n->role == ROLE_ALERT ? L"alert" : n->role == ROLE_ARTICLE ? L"article" : n->role == ROLE_DELETION ? L"deletion" : n->role == ROLE_INSERTION ? L"insertion" : n->role == ROLE_TEXT_BOX ? L"search box" : L"heading");
                 if (!out->bstrVal) hr = E_OUTOFMEMORY;
                 break;
             }

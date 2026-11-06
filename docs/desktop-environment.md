@@ -27,6 +27,8 @@ Linux 使用启发式：`gtk-application-prefer-dark-theme` 为真，或主题�
 
 macOS：`color_scheme` 是应用 `effectiveAppearance` 最接近 Aqua 还是 Dark Aqua，因此应用用 `theme.apply`/`Follower` 强制外观时报告被强制的值（Follower 跟随桌面时先恢复系统外观再读）。accent 是按应用外观解析的 `controlAccentColor`（sRGB），`high_contrast`、`reduce_motion`、`reduce_transparency` 来自 `NSWorkspace.accessibilityDisplayShouldIncreaseContrast/ShouldReduceMotion/ShouldReduceTransparency`。没有系统级文字缩放，`text_scale` 恒为 1。
 
+指针能力：`pointer` 与 `any_pointer`（`z.PointerAccuracy`：`.fine`、`.coarse`、`.none`）、`no_hover` 与 `no_any_hover` 按 Media Queries 4 的 pointer、any-pointer、hover、any-hover 说明主指针和所有指针的精度以及能否悬停，零值是鼠标的；`hover()` 与 `anyHover()` 是正面读法，交给 `view.Preferences` 的同名字段。Linux 从 GDK 座位的从属设备判断：有鼠标或触控板即精细且能悬停，只有触屏时主指针粗糙且不能悬停，有笔时精细；设备插拔时 `watchPreferences` 照常通知。Windows 用 `GetSystemMetrics` 的 SM_MOUSEPRESENT、SM_DIGITIZER 与 SM_CONVERTIBLESLATEMODE：没有鼠标或笔而有触摸、或处于平板模式时主指针粗糙且不能悬停。macOS 总报鼠标的能力。浏览器读 `(pointer: …)`、`(any-pointer: …)`、`(hover: …)` 与 `(any-hover: …)` 媒体查询并在它们变化时通知。
+
 ### 电源
 
 Windows：`ACLineStatus` 0/1 映射 battery/ac，其余 unknown；无系统电池（`BatteryFlag & 128`）或 255 时百分比为 null；`saver` 取 `SystemStatusFlag` 的节电位。

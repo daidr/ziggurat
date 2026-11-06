@@ -301,6 +301,39 @@ pub const Style = struct {
     sort: ui.accessibility.Sort = .none,
     /// What a text input completes as one types, as aria-autocomplete.
     auto_complete: ui.accessibility.AutoComplete = .none,
+    /// Which way a slider, separator, splitter, toolbar, tab list or menu
+    /// of the application's own runs, as aria-orientation; null leaves the
+    /// platform's guess from its shape.
+    orientation: ?Orientation = null,
+    /// The node's value fails the application's validation, as aria-invalid
+    /// alone: a required field left empty on blur. `View.errorMessage`
+    /// names the node holding the message.
+    invalid: bool = false,
+    /// A text input for searching, as role=searchbox.
+    search: bool = false,
+    /// A list box, grid, tree or tree grid of the application's own whose
+    /// items can be chosen together, as aria-multiselectable.
+    multiselectable: bool = false,
+    /// Chosen or not, as aria-selected, for a tab, option, row, cell or
+    /// tree item that shows its choice its own way, without the accent a
+    /// selected built-in row paints; null says nothing.
+    access_selected: ?bool = null,
+    /// The place of an item of a list, list box, tree, menu or tab list of
+    /// the application's own among all of its set's, from 1, and the
+    /// size of that set, as aria-posinset and aria-setsize, for one built
+    /// only where it shows or laid out flat; 0 leaves either unset. It wins
+    /// over the place a built-in list counts from what it builds.
+    position_in_set: u32 = 0,
+    set_size: u32 = 0,
+    /// On a table, grid or tree grid: how many rows and columns it has,
+    /// built or not, header rows counted, as aria-rowcount and
+    /// aria-colcount; 0 for those built.
+    row_count: u32 = 0,
+    column_count: u32 = 0,
+    /// On a row or cell: which of all of the table's rows and columns it
+    /// is, from 1, header rows counted, as aria-rowindex and aria-colindex.
+    row_index: u32 = 0,
+    column_index: u32 = 0,
     /// Where content `View.presentColumn` takes out of this container in
     /// a build goes, in place of its transition's way out: a page of a
     /// wizard or a calendar stepping back goes the way of the step that
@@ -533,6 +566,21 @@ pub const AccessRole = enum {
     separator,
     /// A heading, as role=heading with `Style.font`'s level when it is one.
     heading,
+    /// A table whose cells take the focus and the arrow keys, as
+    /// role=grid: a spreadsheet the application draws.
+    grid,
+    /// A grid whose rows open and close, as role=treegrid.
+    tree_grid,
+    /// A row of a table, grid or tree grid of the application's own, as
+    /// role=row.
+    row,
+    /// A cell of such a row, as role=gridcell.
+    cell,
+    /// Content deleted, as a diff's removed line or a struck-out old price:
+    /// role=deletion.
+    deletion,
+    /// Content inserted, as a diff's added line: role=insertion.
+    insertion,
     fn semantic(self: AccessRole) ui.accessibility.Role {
         return switch (self) {
             .group => .group,
@@ -545,9 +593,17 @@ pub const AccessRole = enum {
             .status => .status,
             .separator => .separator,
             .heading => .heading,
+            .grid => .grid,
+            .tree_grid => .tree_grid,
+            .row => .table_row,
+            .cell => .cell,
+            .deletion => .deletion,
+            .insertion => .insertion,
         };
     }
 };
+/// Which way a control runs, for `Style.orientation`.
+pub const Orientation = enum { horizontal, vertical };
 
 /// How `Style.clip_inset` cuts a node's box: by `top`, `right`, `bottom`
 /// and `left` DIP from its edges, or percent of its height (top and bottom)
@@ -1437,6 +1493,12 @@ pub const Node = struct {
     label_for: u64 = 0,
     /// The node this one controls (`View.controls`), by id.
     controls: u64 = 0,
+    /// The nodes describing this one (`View.describedBy`) and holding the
+    /// message of its error (`View.errorMessage`), by id, and the
+    /// description they make, the message first while it is invalid.
+    described_by: u64 = 0,
+    error_message: u64 = 0,
+    access_description: []const u8 = "",
     /// A shared element flying (`Match.fly`) paints over the rest of its
     /// layer, out of the clips and opacity around it: 1 for the one a
     /// flight leaves, under 2 for the one flying in; 0 in place.
@@ -2431,6 +2493,49 @@ pub const View = struct {
         if (self.nodeById(controlled) == null) return error.InvalidValue;
         target.controls = controlled;
     }
+    /// The text of the node with id `hint`, a hint or help text the view
+    /// draws under or beside the control with id `control`, describes the
+    /// control after its name and value, as aria-describedby does, even
+    /// while the hint is hidden from assistive technology
+    /// (`Style.access_hidden`). Call it once both are built:
+    ///
+    ///     _ = try v.textInput(&app.password, .{});
+    ///     const field = v.lastNode().id;
+    ///     try v.text("At least 12 characters", .{ .access_hidden = true });
+    ///     try v.describedBy(field, v.lastNode().id);
+    pub fn describedBy(self: *View, control: u64, hint: u64) Error!void {
+        if (control == hint) return error.InvalidValue;
+        const target = self.nodeById(control) orelse return error.InvalidValue;
+        if (self.nodeById(hint) == null) return error.InvalidValue;
+        target.described_by = hint;
+        try self.describe(target);
+    }
+    /// The node with id `message` holds the message of the error of the
+    /// control with id `control`, as aria-errormessage: while the control
+    /// is invalid (`Style.invalid`, or its field's), assistive technology
+    /// reads the message first in its description and can move to it.
+    /// Call it once both are built.
+    pub fn errorMessage(self: *View, control: u64, message: u64) Error!void {
+        if (control == message) return error.InvalidValue;
+        const target = self.nodeById(control) orelse return error.InvalidValue;
+        if (self.nodeById(message) == null) return error.InvalidValue;
+        target.error_message = message;
+        try self.describe(target);
+    }
+    /// The description `describedBy` and `errorMessage` give `node`.
+    fn describe(self: *View, node: *Node) Error!void {
+        const hint = if (node.described_by != 0) self.labelText(node.described_by) orelse "" else "";
+        const invalid = node.style.invalid or self.annotationOf(node).invalid;
+        const message = if (node.error_message != 0 and invalid) self.labelText(node.error_message) orelse "" else "";
+        if (message.len == 0 or hint.len == 0) {
+            node.access_description = if (message.len > 0) message else hint;
+            return;
+        }
+        var both: [max_description]u8 = undefined;
+        const joined = std.fmt.bufPrint(&both, "{s}. {s}", .{ message, hint }) catch both[0..];
+        node.access_description = try self.copy(joined);
+    }
+    const max_description = 512;
     /// What a press on the label with `id` does (`labelledBy`): the
     /// control it focuses, and the one it clicks, a checkbox, switch or
     /// radio button. Null when `id` labels nothing.
@@ -6881,7 +6986,9 @@ pub const View = struct {
     /// semantic node its widget records, or null for nothing.
     fn extrasOf(self: *const View, node: *const Node) ?ui.NodeExtras {
         const style = node.style;
-        if (style.tab_stop and node.labelled_by == 0 and node.controls == 0 and !style.busy and style.current == .none and style.popup == null and style.sort == .none and style.auto_complete == .none and style.role_description.len == 0 and style.key_shortcuts.len == 0 and style.value_text.len == 0) return null;
+        // The text input of a search field is a search box.
+        const searching = style.search or (node.kind == .embed and node.parent != none and self.buffers.nodes[node.parent].kind == .search);
+        if (!searching and style.tab_stop and node.labelled_by == 0 and node.controls == 0 and node.described_by == 0 and node.error_message == 0 and !style.busy and style.current == .none and style.popup == null and style.sort == .none and style.auto_complete == .none and style.role_description.len == 0 and style.key_shortcuts.len == 0 and style.value_text.len == 0 and style.orientation == null and !style.invalid and !style.multiselectable and style.access_selected == null and style.position_in_set == 0 and style.set_size == 0 and style.row_count == 0 and style.column_count == 0 and style.row_index == 0 and style.column_index == 0) return null;
         return .{
             .id = node.id,
             .tab_stop = style.tab_stop,
@@ -6895,6 +7002,23 @@ pub const View = struct {
             .key_shortcuts = style.key_shortcuts,
             .value_text = style.value_text,
             .controls = if (node.controls != 0) self.focusTarget(node.controls) else 0,
+            .description = if (node.described_by != 0 or node.error_message != 0) node.access_description else null,
+            .described_by = node.described_by,
+            .error_message = node.error_message,
+            .invalid = style.invalid,
+            .search = searching,
+            .orientation = if (style.orientation) |way| switch (way) {
+                .horizontal => .horizontal,
+                .vertical => .vertical,
+            } else null,
+            .multiple = style.multiselectable,
+            .selected = style.access_selected,
+            .position = style.position_in_set,
+            .set_size = style.set_size,
+            .row_count = style.row_count,
+            .column_count = style.column_count,
+            .row_index = style.row_index,
+            .column_index = style.column_index,
         };
     }
     /// The text of the label with `id`, as `View.labelledBy` names by.

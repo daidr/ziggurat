@@ -3512,6 +3512,21 @@ pub const NodeExtras = struct {
     key_shortcuts: []const u8 = "",
     value_text: []const u8 = "",
     controls: u64 = 0,
+    /// The description in place of the widget's, as aria-describedby and
+    /// aria-errormessage give one.
+    description: ?[]const u8 = null,
+    described_by: u64 = 0,
+    error_message: u64 = 0,
+    invalid: bool = false,
+    search: bool = false,
+    orientation: ?enum { horizontal, vertical } = null,
+    multiple: bool = false,
+    position: u32 = 0,
+    set_size: u32 = 0,
+    row_count: u32 = 0,
+    column_count: u32 = 0,
+    row_index: u32 = 0,
+    column_index: u32 = 0,
     pub fn apply(self: NodeExtras, node: *accessibility.Node) void {
         if (self.name) |name| node.name = name;
         node.busy = node.busy or self.busy;
@@ -3524,6 +3539,29 @@ pub const NodeExtras = struct {
         if (self.key_shortcuts.len > 0) node.key_shortcuts = self.key_shortcuts;
         if (self.value_text.len > 0) node.value_text = self.value_text;
         if (self.controls != 0) node.controls = self.controls;
+        if (self.description) |description| if (description.len > 0) {
+            node.description = description;
+        };
+        if (self.described_by != 0) node.described_by = self.described_by;
+        if (self.error_message != 0) node.error_message = self.error_message;
+        node.invalid = node.invalid or self.invalid;
+        if (self.search and node.role == .text_box) node.search = true;
+        if (self.orientation) |way| {
+            node.vertical = way == .vertical;
+            node.horizontal = way == .horizontal;
+        }
+        node.multiple = node.multiple or self.multiple;
+        // A row, option, tab or tree item says it is chosen as it is checked.
+        if (self.selected) |chosen| switch (node.role) {
+            .list_item, .tree_item, .table_row, .option, .tab, .radio => node.checked = chosen,
+            else => {},
+        };
+        if (self.position > 0) node.position = self.position;
+        if (self.set_size > 0) node.set_size = self.set_size;
+        if (self.row_count > 0) node.row_count = self.row_count;
+        if (self.column_count > 0) node.column_count = self.column_count;
+        if (self.row_index > 0) node.row_index = self.row_index;
+        if (self.column_index > 0) node.column_index = self.column_index;
     }
 };
 
@@ -6880,4 +6918,15 @@ test "a hit test cuts a control's hits to its shape, plain or transformed" {
     context.input_state.commitFrame();
     try std.testing.expectEqual(@as(?u64, 1), context.input_state.hit(.{ .x = 8, .y = 40 }));
     try std.testing.expect(context.input_state.hit(.{ .x = 22, .y = 40 }) == null);
+}
+
+test "node extras make a text box a search box and say which way a node runs" {
+    var node: accessibility.Node = .{ .id = 1, .role = .text_box, .name = "Find", .bounds = .{ .x = 0, .y = 0, .width = 100, .height = 20 } };
+    (NodeExtras{ .id = 1, .search = true, .orientation = .vertical, .description = "Searches every file", .error_message = 3 }).apply(&node);
+    try std.testing.expect(node.search and node.vertical and !node.horizontal);
+    try std.testing.expectEqualStrings("Searches every file", node.description);
+    try std.testing.expectEqual(@as(u64, 3), node.error_message);
+    var button: accessibility.Node = .{ .id = 2, .role = .button, .name = "Go", .bounds = .{ .x = 0, .y = 0, .width = 10, .height = 10 } };
+    (NodeExtras{ .id = 2, .search = true }).apply(&button);
+    try std.testing.expect(!button.search);
 }

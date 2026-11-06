@@ -74,9 +74,13 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 - 对辅助技术隐藏：`access_hidden = true` 让节点及其中的一切照常绘制、照常接收指针与键盘，但不进入可访问性树，如同 HTML 的 aria-hidden：叠在下面的卡片、交叉淡化时画出的旧文字副本不会被读屏读到，它们的文字不计入外层控件的名称（见下文无外观控件），辅助技术的请求也到不了它们。锚定在其中的浮层、菜单、列表与提示一并隐藏。与 `ignore_input` 同时设置即为惰性（inert）；`presentColumn` 正在退出的内容就是这样。检查器把这样的节点的角色显示为 ignored。
 - 对辅助技术禁用：`access_disabled = true` 告诉辅助技术节点及其中的一切不可用，如同 HTML 的 aria-disabled，但它们保留指针、键盘焦点、Tab 顺序中的位置和外观：读屏仍能到达并读出它们（读作不可用，连同说明原因的描述），只是不会按下或编辑它们（`Context` 丢弃这些请求）。点击和按键照常交给应用，由应用在不可用时忽略。不变暗；`enabled = false` 才一次做完全部。
 - 不进 Tab 顺序：`tab_stop = false` 让可聚焦节点不被 Tab 经过，如同 tabindex=-1，按下、组内方向键和 `Host.focusNode` 仍能聚焦它。
-- 角色：`role` 让容器或文本在辅助技术面前不只是分组或一段文字：`.region`（地标区域，用 `name` 命名）、`.navigation`、`.article`、`.group`、`.log`（聊天记录，新增的内容会被礼貌地读出）、`.timer`、`.alert`（出现或改变的内容立即打断朗读）、`.status`、`.separator`、`.heading`（级别取自字体：`Font.heading1` 为 1 级，依此类推）。带角色的容器里的文本节点作为文本进入可访问性树，供实时区域朗读。
+- 角色：`role` 让容器或文本在辅助技术面前不只是分组或一段文字：`.region`（地标区域，用 `name` 命名）、`.navigation`、`.article`、`.group`、`.log`（聊天记录，新增的内容会被礼貌地读出）、`.timer`、`.alert`（出现或改变的内容立即打断朗读）、`.status`、`.separator`、`.heading`（级别取自字体：`Font.heading1` 为 1 级，依此类推）、`.grid`（单元格接收焦点与方向键的表格，如应用自绘的电子表格）、`.tree_grid`（行可展开的网格）、`.row` 与 `.cell`（这类表格的行与单元格）、`.deletion` 与 `.insertion`（差异视图里删去与加入的行、划掉的旧价格）。带角色的容器里的文本节点作为文本进入可访问性树，供实时区域朗读。
+- 表格与集合的位置：`row_count`、`column_count`（aria-rowcount/aria-colcount，表头行计入，0 表示按已构建的数）放在表格或网格上，`row_index`、`column_index`（aria-rowindex/aria-colindex，从 1 起）放在行或单元格上，供只构建可见部分的表格读出“第 41 行，共 1000 行”；`position_in_set` 与 `set_size`（aria-posinset/aria-setsize，从 1 起，0 不设）放在自建的列表、列表框、树、菜单或标签列表的条目上，优先于内置集合按已构建的条目数出的位置。虚拟表格自己报出全部行数、列数和行、列头的索引。`multiselectable`（aria-multiselectable）声明自建的列表框、网格、树或树网格可以多选；`access_selected`（aria-selected）把标签、选项、行、单元格或树条目报为选中或未选中，而不画内置选中行的强调色，供用自己方式显示选择的条目使用。
+- 校验、方向与搜索：`invalid`（aria-invalid）把值标为不合法而不带消息，例如失焦时仍为空的必填字段；`orientation`（`.horizontal` 或 `.vertical`，aria-orientation）告诉辅助技术自建的滑块、分隔线、分栏、工具栏、标签列表或菜单朝哪个方向排列，不设时平台按形状猜；`search`（role=searchbox）让文本输入成为搜索框，`search` 区域里的输入自动如此。
 - ARIA 属性：`role_description`（aria-roledescription）、`key_shortcuts`（aria-keyshortcuts，如 "Control+S"）、`value_text`（aria-valuetext，如 "5 星中的 3 星"）、`busy`（aria-busy）、`current`（aria-current）、`popup`（aria-haspopup，给自己构建弹出内容的按钮）、`sort`（aria-sort）、`auto_complete`（aria-autocomplete）。三个平台分别映射到 ATK 的状态与对象属性、NSAccessibility 的属性（含旧 API 的 AXEnabled 等）与 UI Automation 的属性（LocalizedControlType、AriaProperties、AcceleratorKey、LiveSetting、LandmarkType、HeadingLevel）。
-- 标签与控制关系：`v.labelledBy(control, label)` 用视图自己画出的标签文字给控件命名，代替控件自己的名称，如同 aria-labelledby；点击标签会把点击交给控件，如同 HTML 的 `<label for>`：聚焦它（或组里选中的那一项），并点击复选框、开关或单选按钮。`v.controls(control, controlled)` 声明一个节点控制另一个（aria-controls），例如按钮与它展开的面板。两者都在两个节点建好之后调用，id 由 `lastNode().id` 取得。
+- 标签与控制关系：`v.labelledBy(control, label)` 用视图自己画出的标签文字给控件命名，代替控件自己的名称，如同 aria-labelledby；点击标签会把点击交给控件，如同 HTML 的 `<label for>`：聚焦它（或组里选中的那一项），并点击复选框、开关或单选按钮。`v.controls(control, controlled)` 声明一个节点控制另一个（aria-controls），例如按钮与它展开的面板。两者都在两个节点建好之后调用，id 由 `lastNode().id` 取得。`v.describedBy(control, hint)`（aria-describedby）让视图画出的提示或帮助文字在控件的名称和值之后读出，即使提示本身对辅助技术隐藏；`v.errorMessage(control, message)`（aria-errormessage）指出保存错误消息的节点：控件不合法（`Style.invalid` 或所在字段的错误）期间，消息先于提示读出，辅助技术也能跳到它。两者同样在节点建好之后调用。
+
+三个平台对这些属性的映射：Linux ATK 用 table/tree table 角色与 xml-roles grid/treegrid/searchbox、content deletion/insertion 角色、rowcount/colcount/rowindex/colindex 属性、described-by/description-for 与 error-message/error-for 关系、vertical/horizontal 状态；macOS 用 AXTable、AXDeleteStyleGroup/AXInsertStyleGroup、AXSearchField 子角色、AXARIARowCount 等属性、AXErrorMessageElements、AXOrientation，旧 API 也回答 AXHelp，列表没有自己的大小时取其条目的 set_size 作为 AXRowCount；Windows 共享层把网格报为 DataGrid、删除与插入报为本地化类型 deletion/insertion 的文本、搜索框报为 search box 的编辑框，并给出 Orientation、FullDescription 与 AriaProperties 里的行列数与方向。
 - 焦点环：持有键盘焦点的控件画主题的焦点环：宽 `Metrics.focus_ring_width`（默认 2 DIP），内缘在控件边缘外 `Metrics.focus_ring_offset`（默认 1 DIP；0 落在边缘上，负数在边缘内），颜色为调色板的 `focus`。列表、树与表格的行、列头会被外层列表裁剪，默认画在行内。`Style.focus_ring_offset` 单独设置一个节点的偏移，例如外层容器裁剪越界内容时用负值把环画到里面；`Style.focus_ring_color` 单独设置颜色。
 - 滚动指示器：滚动容器的 `scrollbars = false` 不画滚动指示器，滚轮、按键和辅助技术照常滚动，适合自己绘制指示的表面。
 - 占位符：`search`、`tokenField` 与 `editableComboBox` 的 `placeholder` 与 `placeholder_color` 交给直接放在其中的文本输入，输入为空且没有输入法组合时显示（见下文 `TextField` 的同名选项）。
@@ -502,15 +506,24 @@ if (row.double_clicked) self.open(item);
 if (row.right_clicked) self.showMenu(item, row.bounds.?);
 ```
 
-- `hovered`：指针在它上面且没有被打开的列表或浮层盖住（嵌套的区域同时悬停）；`position` 是悬停时相对 `bounds` 的指针位置；`pressed`：按键在它上面按下且指针仍在其上。
+- `hovered`：指针在它上面且没有被打开的列表或浮层盖住（嵌套的区域同时悬停）；`position` 是悬停时相对 `bounds` 的指针位置；`pressed`：主键在它上面按下且指针仍在其上，`pressed_button` 是在它上面按住的键（主键、副键或中键，按下期间一直保留）。
+- `pressed_inside`：这一遍的按下落在区域里，即使按下属于里面的控件或更内层的区域，也在按下之后构建的第一遍报告一次，例如单元格看到 Alt+按下而所在行照常选中。`press_canceled`：在它上面的按下在这一遍被取消（系统收走指针、窗口失去焦点），区域借此放下按下的样子，不会把它当作单击。
+- `pointer`：悬停或按下时的指针样本 `z.PointerSample`：`device` 是鼠标、笔还是手指，`pressure` 是 0 到 1 的压力（没有压力的设备按下时为 0.5，否则为 0），画布用它画出粗细。Linux 从 GDK 的源设备与压力轴取得，macOS 从事件的子类型、压力与数位板事件取得，浏览器从 `PointerEvent.pointerType` 与 `pressure` 取得（只跟随主指针，按住一个键时按下另一个键作为和弦的按键变化送达，`pointercancel` 只取消而不算松开）；Windows 目前总报鼠标。`Window.pointerSample()` 给出窗口最近一次的样本。
 - `clicked` 与 `clicks`：主键在它上面按下、又在它上面松开，`clicks` 是这次按下的连击数（同一区域上 500 ms 内、相距 4 DIP 内的按下依次计为 2、3……）；`double_clicked` 在第二次按下时报告；`right_clicked` 与 `middle_clicked` 分别是副键与中键的单击，同样在松开时计数。`pressed_now` 是这一遍按下的键，`modifiers` 是按下时的修饰键。
 - 这些事件各自在单独的一遍交付，和控件返回 true 一样，应用在那一遍里处理；之后的绘制遍只保留 `hovered`、`pressed`、`position` 与 `bounds`。`bounds` 是上一次排列的窗口边界，第一帧之前为 null。
 - 按下先交给控件：落在区域内按钮上的按下属于按钮，副键与中键在控件上也不交给区域。最内层的区域得到按下。窗口失去焦点或捕获被取消时按下作废，不计为单击。禁用的区域只报告 `bounds`。
 - 区域在指针进入和离开时重绘；`AreaOptions.track` 让它随指针移动重绘，使 `position` 跟随。每遍最多 `max_pointer_areas`（32）个区域参与路由。
 
-`Style.cursor`（`view.Cursor`，即 `z.Cursor`）设置指针在节点及其后代上的形状。Host 从指针下最内层的节点向外找：第一个设置了形状的节点决定形状；先遇到没有设置形状的控件则显示默认箭头，因此按钮里不会出现外层的形状。链接默认显示 `pointer`，分栏的分隔条显示 `resize_ew`（左右排列）或 `resize_ns`（上下排列），`Embed.cursor` 回调让嵌入叶子按点回答（`ziggurat_view_text` 的文本字段显示 `text`，虚拟表格在列头右缘显示 `resize_ew`）。按下期间保持按下时的形状，松开后更新。Host 在指针移动、松开和每帧之后通过 `Window.setCursor` 设置，形状不变时不调用原生接口；Harness 用 `cursor()` 返回当前指针位置的形状。
+`Style.cursor`（`view.Cursor`，即 `z.Cursor`）设置指针在节点及其后代上的形状，除箭头、文本、指针、移动、缩放与禁止等之外还有 `progress`、`wait`、`help`、`cell`、`zoom_in`、`zoom_out`、`all_scroll` 与 `no_drop`（Linux 与浏览器用 CSS 名字，macOS 用系统光标，没有对应的回退到相近的形状，Windows 用系统光标）。Host 从指针下最内层的节点向外找：第一个设置了形状的节点决定形状；先遇到没有设置形状的控件则显示默认箭头，因此按钮里不会出现外层的形状。链接默认显示 `pointer`，分栏的分隔条显示 `resize_ew`（左右排列）或 `resize_ns`（上下排列），`Embed.cursor` 回调让嵌入叶子按点回答（`ziggurat_view_text` 的文本字段显示 `text`，虚拟表格在列头右缘显示 `resize_ew`）。按下期间保持按下时的形状，松开后更新。Host 在指针移动、松开和每帧之后通过 `Window.setCursor` 设置，形状不变时不调用原生接口；Harness 用 `cursor()` 返回当前指针位置的形状。
 
 `Style.hit_test`（`ui.HitTest{ context, func }`）让节点的控件只在应用给出的形状里接收指针：`func(context, x, y, box)` 收到指针位置与节点的盒子（都在控件录制时的坐标里，变换后的控件按变换反算），返回 true 时才算按在控件上，否则按下与悬停落到下面的内容。环形按钮只在环带上响应，饼图的扇区各管一块；路径可以用 `vector.Path.contains(allocator, point, rule, transform, tolerance)` 判断。它只作用于节点自己的控件，后代照常按盒子命中；嵌入叶子用 `Frame.setHitTest` 对它录制的控件设置同样的形状。
+
+## 焦点与观察输入
+
+- `v.focusWithin(id)` 告诉焦点是否在节点 `id` 本身或它里面（`:focus-within`），浮层、菜单和列表按它们锚定的节点算在里面；`v.focusLeft(id)` 在焦点刚从节点里离开（到了外面或窗口失去键盘）后构建的那一遍报告一次，例如表单在离开字段组时校验。焦点链来自上一遍的树，读过它们的帧在焦点移动后多构建一遍，使按焦点画出的样子随即更新。
+- `v.focusTakesText()` 告诉焦点是否接收文本输入：嵌入叶子用 `Embed.takes_text` 回答，文本字段在可编辑时、富文本编辑器在非只读时、终端总是为真。单键快捷键用它让位，命令面板里字段在打字时不抢字母键。
+- `observeInput(style)` 与 `end` 配对，开始一个观察其中输入但不拿走输入的列：焦点在它本身或里面时按下与松开的键（含按住重复）、输入的文本与输入法组合，以及在它上面按下与松开的指针键，各自以 `Observed` 在单独的一遍先于正常路由送达（外层的先），之后输入照常交给持有焦点的控件、快捷键与 Tab；其他遍返回 null。演示在第一次按键时停下，面板在其中的字段被输入后隐去提示。移动焦点的键（如 Tab）的松开在焦点到达处观察到。`v.observing()` 告诉上一遍是否有这样的列。
+- 延后出现的内容（`presentColumn` 的 `unseen` 阶段）里请求的焦点等内容出现后再给出，除非焦点期间已移到别处。打开列表或菜单并用方向键高亮条目时，提示跟随高亮项（aria-activedescendant），而不是持有焦点的输入框。
 
 ## 换行文本
 
@@ -553,10 +566,10 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 以下容器都按列排列，用 `end` 关闭；主键按下后移出 `drag_threshold`（4 DIP）才开始拖动，之前里面的按钮照常点击。拖动期间指针被捕获，移出窗口也继续跟随；松开结束，Escape、窗口失去焦点或捕获被取消则取消。滑块、分栏和接受按下的嵌入叶子保留自己的按下。
 
 - `draggable(&gesture, style)` 是一个拖动区域。应用持有地址稳定的 `Gesture`；每个阶段（`start`、`move`、`end`、`cancel`）在自己的事件遍里更新它并返回该阶段，其他遍返回 null。`gesture.translation()` 是相对起点的位移，`delta` 是相对上一次事件的位移，`modifiers` 是按下时的修饰键。区域不再被构建时拖动丢失，之后第一次构建返回一次 `.cancel`。
-- `dragSource(payload, style)` 在窗口内拖动一个 `Payload`（`kind` 像类型一样说明它是什么，`value` 说明是哪一个，例如条目 ID）。拖动时一份半透明副本跟随指针，返回 true 以便应用把原处画暗。
+- `dragSource(payload, style)` 在窗口内拖动一个 `Payload`（`kind` 像类型一样说明它是什么，`value` 说明是哪一个，例如条目 ID）。拖动时一份半透明副本跟随指针，返回 true 以便应用把原处画暗。`dragSourceState(payload, style)` 相同，返回 `DragSourceState{ dragging, missed }`：在没有接受它的目标处松开的那一遍，`missed` 是松开处的窗口坐标，例如把标签页拖到空处时开新窗口；Escape 与取消不算落空。
 - `dropTarget(accept, style)` 接受 `Accept` 列出的内容：指定 `kind` 的 Payload，以及其他应用拖入的文件或文本。指针下最内层接受该内容的目标在拖动经过时描边并返回 `.over`，松开所在的那一遍返回 `.dropped`（`Dropped` 为 Payload、文件或文本，以及窗口坐标）。
 - `reorder()` 在刚打开的表格、列表框或行/列容器上调用（要在加入任何条目之前），让指针把一项拖到其他项之间：副本跟随指针，一条线标出插入位置，松开所在的那一遍返回 `Move{from, to}`，表示原第 `from` 项移到原第 `to` 项之前（`to` 等于项数表示最后）；放回原处不产生移动，条目由应用重排。树不能重排；同一表格不能既 `reorder` 又 `dragSelect`。
-- `dragRows(kind)` 同样在刚打开的表格、列表框或行/列容器上调用（要在加入任何条目之前），让条目被拖出容器交给别处：按下条目移动超过阈值后拖动 `Payload{ .kind = kind, .value = i }`（`i` 是条目在容器里的序号，表格从第一行数起），副本跟随指针，指针下最内层接受该 `kind` 的 `dropTarget` 在松开时收到它，和 `dragSource` 一样。容器本身什么都不收，也不在条目之间画插入线，因此容器里的目标（比如文件列表里文件夹那一行）或容器外的目标都能在指针所在处收到。比如文件浏览器把文件拖进文件夹行。表格（带多选 `Selection`）里按下已选中的行时，拖动的是全部选中行：载荷仍是按下的那一行，应用在自己的 `Selection` 里找到其余行，指针旁用强调色小圆角标显示行数（`View.dragBadge()`）；没有修饰键按下已选中的行要等松开才只选中它，所以拖动保留选择。嵌入叶子（如虚拟表格）可通过 `Embed.drag` 在拖动超过阈值后返回 `EmbedDrag{payload, count, ghost, label}`，把拖动交给视图：叶子收到 `pointer_cancel`，之后与 `dragSource` 一样投放。树不能拖出行；同一容器不能既 `dragRows` 又 `reorder` 或 `dragSelect`。
+- `dragRows(kind)` 同样在刚打开的表格、列表框或行/列容器上调用（要在加入任何条目之前），让条目被拖出容器交给别处（返回 `?DragMiss`：在没有目标处松开的那一遍给出载荷与窗口坐标）：按下条目移动超过阈值后拖动 `Payload{ .kind = kind, .value = i }`（`i` 是条目在容器里的序号，表格从第一行数起），副本跟随指针，指针下最内层接受该 `kind` 的 `dropTarget` 在松开时收到它，和 `dragSource` 一样。容器本身什么都不收，也不在条目之间画插入线，因此容器里的目标（比如文件列表里文件夹那一行）或容器外的目标都能在指针所在处收到。比如文件浏览器把文件拖进文件夹行。表格（带多选 `Selection`）里按下已选中的行时，拖动的是全部选中行：载荷仍是按下的那一行，应用在自己的 `Selection` 里找到其余行，指针旁用强调色小圆角标显示行数（`View.dragBadge()`）；没有修饰键按下已选中的行要等松开才只选中它，所以拖动保留选择。嵌入叶子（如虚拟表格）可通过 `Embed.drag` 在拖动超过阈值后返回 `EmbedDrag{payload, count, ghost, label}`，把拖动交给视图：叶子收到 `pointer_cancel`，之后与 `dragSource` 一样投放。树不能拖出行；同一容器不能既 `dragRows` 又 `reorder` 或 `dragSelect`。
 - `dragSelect()` 在刚打开的树或表格上调用，让从一行开始的主键拖动像 Shift 加按下那样选中从该行到指针下一行的范围；按下时按住 Ctrl 则把范围加入已有选择。
 
 拖动经过或越过外层滚动容器的边缘 32 DIP 内时，`reorder`、`dragRows`、`dragSource` 与 `dragSelect` 随指针移动滚动它，越靠近边缘越快。每帧最多 32 个拖动区域/拖动源/放置目标、4 个可重排或可拖出条目的容器和 256 个这样的条目参与路由。
@@ -621,7 +634,7 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 - 事件遍若没有控件消费该事件（构建已不再产生这个节点），返回 `Stale`，不会静默忽略。成功的事件之后自动重新渲染，节点与 `frames` 反映新状态。
 - `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形，`view.divider(node)` 给出分栏的分隔条矩形。
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
-- `Config` 提供窗口边界、主题和 `Options`（根样式与测量回调），`resize` 改变边界并重新渲染。
+- `Config` 提供窗口边界、主题、`Options`（根样式与测量回调）和初始 `preferences`（第一帧就在减弱动态、粗指针等偏好下构建），`resize` 改变边界并重新渲染，`setPreferences(value)` 改变偏好并重新渲染。`key`、`keyUp`、`typeText`、`press` 与 `release` 和 Host 一样先经过 `observeInput` 的观察遍。
 - 树和表格的行：`click` 按下行的右端并单选，`clickWith(query, modifiers)` 带 Ctrl/Shift 按下，`toggleExpanded(query)` 按下树行的三角；`removeToken(query)` 按下标记的移除按钮。`click` 也接受列头、标记和组合框的展开按钮。`write` 的大纲带出行的层级、展开、选中与焦点行，以及列头的排序方向。
 
 - `attachInput(&context)` 把之后每次渲染记录进一个未连接窗口的 `ui.Context`，`key(KeyInput)` 按窗口相同的顺序路由按键：快捷键、Tab、范围键、分组方向键、空间方向键、Home/End，最后是 Enter/Space 激活。产生的动作或数值变化交给构建函数，随后重新渲染；返回值表示是否有控件处理该键。`focused()` 返回当前焦点节点。`keyUp(KeyInput)` 把松开交给持有焦点的嵌入叶子，`windowFocus(bool)` 模拟窗口得到或失去键盘，`windowHidden(bool)` 模拟窗口被隐藏（最小化）或重新显示。Context 由测试持有，不能已连接窗口。
@@ -638,13 +651,13 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 - 路由与方向：`mouseButton(.back)` 与 `mouseButton(.forward)` 像鼠标侧键那样在历史中移动，返回是否被处理；`setDirection(value)` 改变方向并重新渲染。`write` 的大纲为图片与 SVG 带出填充方式，为镜像的图标带出 `mirrored`。
 
-- 指针：`press(x, y, modifiers)`、`moveTo(x, y)`、`release(x, y)` 与 `cancelPointer()` 按 Host 相同的捕获规则重放一次按下，`drag(from_x, from_y, to_x, to_y, steps)` 把它们连起来；`systemDragOver(point, files, text)` 与 `systemDrop(point, data)` 模拟其他应用的拖放。
+- 指针：`usePointer(device, pressure)` 设定之后按下、移动与松开的指针样本（如笔与 0.6 的压力）；`press(x, y, modifiers)`、`moveTo(x, y)`、`release(x, y)` 与 `cancelPointer()` 按 Host 相同的捕获规则重放一次按下，`drag(from_x, from_y, to_x, to_y, steps)` 把它们连起来；`systemDragOver(point, files, text)` 与 `systemDrop(point, data)` 模拟其他应用的拖放。
 
 - 像素：`image(surface)` 把上一遍渲染按窗口的样子画出来（背景 `Options.background` 或主题背景，加上视图绘制的内容，打开时还有 inspector），由 `ui.offscreen.Surface` 按它的尺寸和缩放画成一张图片，用于截图比对和像素检查；需要 `attachInput`，返回的 `Snapshot` 由调用方关闭。离屏表面需要应用的主线程（`z.App`），所以它用在 smoke 与工具里，而不是单元测试中；`smoke-view` 用它检查面板与背景的颜色。
 
 带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt`、上面的指针、`wheel` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或原生捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
-`h.recordSemantics(&context)` 让之后每次渲染都像窗口一样记录可访问性树（需要 `-Daccessibility=true` 构建，否则跳过测试），`h.accessible(query)` 或 `h.accessibleId(id)` 读出辅助技术会得到的内容：`role()`、`name()`、`value()`、`description()`、`roleDescription()`、`keyShortcuts()`、`valueText()`、`parent()`，以及 `entry` 里的各状态（`enabled`、`focusable_disabled`、`focused`、`checked`、`expanded`、`selected`、`busy`、`current`、`popup`、`level`、`controls` 等）。`codeDown` 与 `codeUp` 按位置按下与放开键。
+`h.recordSemantics(&context)` 让之后每次渲染都像窗口一样记录可访问性树（需要 `-Daccessibility=true` 构建，否则跳过测试），`h.accessible(query)` 或 `h.accessibleId(id)` 读出辅助技术会得到的内容：`role()`、`name()`、`value()`、`description()`、`roleDescription()`、`keyShortcuts()`、`valueText()`、`parent()`，以及 `entry` 里的各状态（`enabled`、`focusable_disabled`、`focused`、`checked`、`expanded`、`selected`、`busy`、`current`、`popup`、`level`、`controls`、`invalid`、`search`、`vertical`/`horizontal`、`position`/`set_size`、`row_count`/`column_count`/`row_index`/`column_index`、`described_by`、`error_message` 等）。`codeDown` 与 `codeUp` 按位置按下与放开键。
 
 ## 背景效果
 
@@ -770,7 +783,7 @@ if (state.open == null) {
 
 ## 系统偏好
 
-`host.setPreferences(.{ .reduce_motion, .reduce_transparency, .high_contrast })` 由应用按桌面偏好设置并重绘：减少动态效果让加载动画停在静止姿态，减少透明度或高对比度让背景效果变成不透明填充。
+`host.setPreferences(.{ .reduce_motion, .reduce_transparency, .high_contrast })` 由应用按桌面偏好设置并重绘：减少动态效果让加载动画停在静止姿态，减少透明度或高对比度让背景效果变成不透明填充。`pointer` 与 `any_pointer`（`z.PointerAccuracy`：`.fine`、`.coarse` 或 `.none`）、`no_hover` 与 `no_any_hover` 对应 Media Queries 4 的 pointer、any-pointer、hover 与 any-hover，零值是鼠标的：触屏优先的布局给粗指针更大的目标，只在悬停时出现的内容只给能悬停的指针；`hover()` 与 `anyHover()` 是它们的正面读法。应用从 `system.desktop.Preferences` 的同名字段取得。
 
 ## 窗口隐藏
 

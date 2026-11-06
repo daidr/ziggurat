@@ -23,7 +23,8 @@ enum {
     ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW,
     ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU,
     ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT,
-    ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING, ROLE_COUNT
+    ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING,
+    ROLE_GRID, ROLE_TREE_GRID, ROLE_DELETION, ROLE_INSERTION, ROLE_COUNT
 };
 /* NativeNode flags, as accessibility.zig packs them. */
 enum {
@@ -40,17 +41,25 @@ typedef struct NativeNode {
     /* Place among all of the list's items from 1, how many a list has and
        a tree item's depth from 1; 0 when not given. */
     uint32_t position, set_size, level;
-    /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED and
-       VERTICAL, then the popup kind (bits 8 to 10), current (11 to 13),
+    /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED,
+       VERTICAL, SEARCH and HORIZONTAL, then the popup kind (bits 8 to 10), current (11 to 13),
        sort (14, 15) and autocomplete (16, 17). */
     uint32_t states;
     uint32_t role_description_start, role_description_len, key_shortcuts_start, key_shortcuts_len;
-    uint32_t value_text_start, value_text_len, reserved0, reserved1;
+    /* Rows and columns of a table or grid, built or not (aria-rowcount,
+       aria-colcount); 0 for those built. */
+    uint32_t value_text_start, value_text_len, row_count, column_count;
     /* The node this one controls (aria-controls), 0 for none. */
     uint64_t controls;
+    /* A row's or cell's place among all rows and columns from 1
+       (aria-rowindex, aria-colindex); 0 when not given. */
+    uint32_t row_index, column_index;
+    /* The nodes describing it (aria-describedby) and holding its error
+       message (aria-errormessage), 0 for none. */
+    uint64_t described_by, error_message;
 } NativeNode;
-_Static_assert(sizeof(NativeNode) == 184, "semantic node ABI");
-enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16 };
+_Static_assert(sizeof(NativeNode) == 208, "semantic node ABI");
+enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16, SEARCH = 32, HORIZONTAL = 64 };
 enum { POPUP_NONE, POPUP_MENU, POPUP_LIST_BOX, POPUP_TREE, POPUP_GRID, POPUP_DIALOG };
 enum { CURRENT_NONE, CURRENT_ITEM, CURRENT_PAGE, CURRENT_STEP, CURRENT_LOCATION, CURRENT_DATE, CURRENT_TIME };
 enum { SORT_NONE, SORT_ASCENDING, SORT_DESCENDING, SORT_OTHER };
@@ -138,7 +147,9 @@ static gboolean menu_item(uint32_t role) { return role == ROLE_MENU_ITEM || role
 static gboolean row(uint32_t role) { return role == ROLE_LIST_ITEM || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW || role == ROLE_OPTION; }
 /* Cells of a table, headers included. */
 static gboolean cell(uint32_t role) { return role == ROLE_CELL || role == ROLE_COLUMN_HEADER || role == ROLE_ROW_HEADER; }
-static gboolean rows_container(uint32_t role) { return role == ROLE_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE || role == ROLE_TAB_LIST; }
+static gboolean rows_container(uint32_t role) { return role == ROLE_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE ||
+        role == ROLE_GRID || role == ROLE_TREE_GRID || role == ROLE_TAB_LIST ||
+    role == ROLE_GRID || role == ROLE_TREE_GRID; }
 static gboolean item(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || row(role); }
 /* Roles whose activation is a press, as UI Automation's Invoke, Toggle,
    SelectionItem and ExpandCollapse are on Windows. */
@@ -209,6 +220,11 @@ static AtkRole atk_role_of(const NativeNode *n) {
     case ROLE_ARTICLE: return ATK_ROLE_ARTICLE;
     case ROLE_CELL: return ATK_ROLE_TABLE_CELL;
     case ROLE_HEADING: return ATK_ROLE_HEADING;
+    /* Tables whose cells take the focus, with xml-roles saying which. */
+    case ROLE_GRID: return ATK_ROLE_TABLE;
+    case ROLE_TREE_GRID: return ATK_ROLE_TREE_TABLE;
+    case ROLE_DELETION: return ATK_ROLE_CONTENT_DELETION;
+    case ROLE_INSERTION: return ATK_ROLE_CONTENT_INSERTION;
     default: return ATK_ROLE_PANEL;
     }
 }
@@ -519,8 +535,12 @@ static void add_states(AtkStateSet *set, const Node *node) {
     if (n->flags & MULTIPLE) atk_state_set_add_state(set, ATK_STATE_MULTISELECTABLE);
     if (n->flags & INVALID) atk_state_set_add_state(set, ATK_STATE_INVALID_ENTRY);
     if (n->flags & REQUIRED) atk_state_set_add_state(set, ATK_STATE_REQUIRED);
-    if (n->role == ROLE_SLIDER || n->role == ROLE_SPLITTER) atk_state_set_add_state(set, n->width >= n->height ? ATK_STATE_HORIZONTAL : ATK_STATE_VERTICAL);
-    /* As GtkSeparator's. */
+    /* Which way it runs: as the application tells (aria-orientation),
+       else a slider's or splitter's longer side, and a separator across
+       as GtkSeparator's. */
+    if (n->states & VERTICAL && n->role != ROLE_SEPARATOR) atk_state_set_add_state(set, ATK_STATE_VERTICAL);
+    else if (n->states & HORIZONTAL) atk_state_set_add_state(set, ATK_STATE_HORIZONTAL);
+    else if (n->role == ROLE_SLIDER || n->role == ROLE_SPLITTER) atk_state_set_add_state(set, n->width >= n->height ? ATK_STATE_HORIZONTAL : ATK_STATE_VERTICAL);
     if (n->role == ROLE_SEPARATOR) atk_state_set_add_state(set, (n->states & VERTICAL) ? ATK_STATE_VERTICAL : ATK_STATE_HORIZONTAL);
     if (textual(n->role)) {
         atk_state_set_add_state(set, ATK_STATE_SELECTABLE_TEXT);
@@ -556,7 +576,8 @@ static AtkAttributeSet *node_attributes(AtkObject *obj) {
         }
         /* A list built only in view says where its rows are among all. */
         if (node->n.position > 0) position = node->n.position;
-        if (node->parent->n.set_size > 0) size = node->parent->n.set_size;
+        if (node->n.set_size > 0) size = node->n.set_size;
+        else if (node->parent->n.set_size > 0) size = node->parent->n.set_size;
         list = add_attribute(list, "posinset", g_strdup_printf("%u", position));
         list = add_attribute(list, "setsize", g_strdup_printf("%u", size));
     }
@@ -570,7 +591,8 @@ static AtkAttributeSet *node_attributes(AtkObject *obj) {
     /* The ARIA role of a landmark or a live region, which its ATK role
        does not say all of. */
     const char *xml = n->role == ROLE_NAVIGATION ? "navigation" : n->role == ROLE_SEARCH ? "search" : n->role == ROLE_REGION ? "region" :
-        n->role == ROLE_LOG ? "log" : n->role == ROLE_TIMER ? "timer" : n->role == ROLE_ALERT ? "alert" : n->role == ROLE_STATUS ? "status" : NULL;
+        n->role == ROLE_LOG ? "log" : n->role == ROLE_TIMER ? "timer" : n->role == ROLE_ALERT ? "alert" : n->role == ROLE_STATUS ? "status" :
+        n->role == ROLE_GRID ? "grid" : n->role == ROLE_TREE_GRID ? "treegrid" : (textual(n->role) && n->states & SEARCH) ? "searchbox" : NULL;
     if (xml) list = add_attribute(list, "xml-roles", g_strdup(xml));
     /* How a live region and what is inside it are read, as Chromium's say
        aria-live, aria-atomic and aria-relevant. */
@@ -598,10 +620,18 @@ static AtkAttributeSet *node_attributes(AtkObject *obj) {
     if (node->role_description) list = add_attribute(list, "roledescription", g_strdup(node->role_description));
     /* The keys that press or focus it, as Chromium says. */
     if (node->key_shortcuts) list = add_attribute(list, "keyshortcuts", g_strdup(node->key_shortcuts));
+    /* A table's or grid's rows and columns, built or not, and where a row
+       or cell is among them, from 1, as Chromium says aria-rowcount and
+       the like. */
+    if (n->row_count > 0) list = add_attribute(list, "rowcount", g_strdup_printf("%u", n->row_count));
+    if (n->column_count > 0) list = add_attribute(list, "colcount", g_strdup_printf("%u", n->column_count));
+    if (n->row_index > 0) list = add_attribute(list, "rowindex", g_strdup_printf("%u", n->row_index));
+    if (n->column_index > 0) list = add_attribute(list, "colindex", g_strdup_printf("%u", n->column_index));
     return list;
 }
 /* The node a node controls (controller-for), and those controlling it
-   (controlled-by), as ARIA's aria-controls. */
+   (controlled-by), as ARIA's aria-controls; with its description and
+   error message, and those it describes or is the error of. */
 static AtkRelationSet *node_ref_relation_set(AtkObject *obj) {
     AtkRelationSet *set = atk_relation_set_new();
     Node *node = node_of(obj);
@@ -610,12 +640,24 @@ static AtkRelationSet *node_ref_relation_set(AtkObject *obj) {
         Node *target = g_hash_table_lookup(node->host->nodes, &node->n.controls);
         if (target) atk_relation_set_add_relation_by_type(set, ATK_RELATION_CONTROLLER_FOR, target->obj);
     }
+    /* What describes it (aria-describedby), and the message of its error
+       while it is invalid (aria-errormessage). */
+    if (node->n.described_by) {
+        Node *target = g_hash_table_lookup(node->host->nodes, &node->n.described_by);
+        if (target) atk_relation_set_add_relation_by_type(set, ATK_RELATION_DESCRIBED_BY, target->obj);
+    }
+    if (node->n.error_message && (node->n.flags & INVALID)) {
+        Node *target = g_hash_table_lookup(node->host->nodes, &node->n.error_message);
+        if (target) atk_relation_set_add_relation_by_type(set, ATK_RELATION_ERROR_MESSAGE, target->obj);
+    }
     GHashTableIter iter;
     gpointer key, value;
     g_hash_table_iter_init(&iter, node->host->nodes);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
         Node *other = value;
         if (other->n.controls == node->n.id) atk_relation_set_add_relation_by_type(set, ATK_RELATION_CONTROLLED_BY, other->obj);
+        if (other->n.described_by == node->n.id) atk_relation_set_add_relation_by_type(set, ATK_RELATION_DESCRIPTION_FOR, other->obj);
+        if (other->n.error_message == node->n.id && (other->n.flags & INVALID)) atk_relation_set_add_relation_by_type(set, ATK_RELATION_ERROR_FOR, other->obj);
     }
     return set;
 }
