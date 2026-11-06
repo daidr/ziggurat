@@ -70,6 +70,8 @@ pub const AreaOptions = pointer_controls.Options;
 pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit, SelectionFull } || layout.Error;
 
 pub const max_depth = 32;
+/// Nodes around the focus that `View.focusWithin` and `focusLeft` follow.
+pub const max_focus_chain = 64;
 /// Longest name a control without a look takes from the text inside it, in
 /// bytes; text past it is left out.
 pub const max_plain_name = 256;
@@ -1114,6 +1116,11 @@ pub const Embed = struct {
     /// Register the leaf as a Tab stop under its node id, so it can hold
     /// focus and receive keys through `input`.
     focusable: bool = false,
+    /// Whether the leaf takes typed or composed text now, as a text field
+    /// that is not read only, a terminal or an editor does, for
+    /// `View.focusTakesText`. Called during passes; it must not allocate
+    /// or block.
+    takes_text: ?*const fn (*anyopaque) bool = null,
     /// Whether native content the leaf shows, such as a web page, has the
     /// keyboard itself. A Tab that leaves such content past its ends
     /// (`KeyInput.from_page`) moves the focus on from this leaf. Called
@@ -1400,6 +1407,8 @@ pub const Node = struct {
     graphic: ?Graphic = null,
     /// A pointer area repaints as the pointer moves over it.
     track: bool = false,
+    /// A container that observes the input inside it (`observeInput`).
+    observes: bool = false,
     /// The node or one around it is `Style.hidden`, or it floats from an
     /// anchor that is: it takes no room, paints nothing and takes no input.
     concealed: bool = false,
@@ -1550,6 +1559,33 @@ pub const Event = union(enum) {
     /// A value dragged from a `dragSource`, or a row of a `dragRows`
     /// container, let go over no target taking it, at a window point.
     drag_missed: struct { id: u64, payload: Payload, position: Point },
+    /// Input on its way to where the focus or the pointer is, which the
+    /// containers around it that `observeInput` see first.
+    observe: Observed,
+};
+
+/// Input an `observeInput` container sees, without taking it, before the
+/// focused node or the node under the pointer gets it.
+pub const Observed = union(enum) {
+    /// A key pressed (with `repeat` for those of a key held) or released
+    /// while the focus is the container or inside it.
+    key_down: z.KeyInput,
+    key_up: z.KeyInput,
+    /// Text typed, or the composition an input method shows, while the
+    /// focus is inside it; borrowed for the pass.
+    text: []const u8,
+    composition: []const u8,
+    /// A button went down or came up over the container.
+    pointer_down: struct { position: Point, button: z.PointerButton, modifiers: z.KeyModifiers },
+    pointer_up: struct { position: Point, button: z.PointerButton },
+
+    fn pointed(self: Observed) ?Point {
+        return switch (self) {
+            .pointer_down => |value| value.position,
+            .pointer_up => |value| value.position,
+            else => null,
+        };
+    }
 };
 
 /// What a press or key does to a tree or table row.
@@ -1894,6 +1930,22 @@ pub const View = struct {
     poses: posed.State = .{},
     /// Keyboard focus at the start of this pass, set by the host.
     focus: ?u64 = null,
+    /// The focused node and those around it, from it out, as of this pass's
+    /// start, found in the tree of the pass before (`focusWithin`); and
+    /// those the focus left since that pass (`focusLeft`). A popover, list
+    /// or menu counts as inside the node it opens from.
+    focus_chain: [max_focus_chain]u64 = undefined,
+    focus_chain_len: usize = 0,
+    focus_left_ids: [max_focus_chain]u64 = undefined,
+    focus_left_len: usize = 0,
+    /// This pass read where the focus is; see `finish`.
+    focus_read: bool = false,
+    /// The focus takes text, as of this pass's start (`focusTakesText`).
+    focus_text: bool = false,
+    /// Containers observing the input inside them in the pass built last,
+    /// so that the host runs passes for them only while there are some.
+    observers: usize = 0,
+    observers_built: usize = 0,
     /// A control the host should focus after this pass, such as a combo box
     /// whose list just closed.
     restore: ?u64 = null,
@@ -2055,6 +2107,9 @@ pub const View = struct {
 
     /// Start a pass with an implicit root column.
     pub fn reset(self: *View, root_style: Style, event: ?Event) void {
+        self.trackFocus();
+        self.focus_read = false;
+        self.observers_built = 0;
         @memcpy(self.exits_before[0..self.exits_len], self.exits[0..self.exits_len]);
         self.exits_before_len = self.exits_len;
         self.exits_len = 0;
@@ -2499,6 +2554,7 @@ pub const View = struct {
             .reorder => |value| value.id,
             .pointer => |value| value.id,
             .drag_missed => |value| value.id,
+            .observe => return null,
         };
         if (target != id) return null;
         self.event = null;
@@ -2659,7 +2715,7 @@ pub const View = struct {
                 };
             };
             if (self.popover_shown) |id| if (id == node.id) {
-                self.popover_within = self.focusWithin(node);
+                self.popover_within = self.focusWithinNode(node);
             };
         }
         if (node.kind == .token_field and self.removed_token == index) {
@@ -4929,8 +4985,17 @@ pub const View = struct {
     pub fn finish(self: *View) Error!void {
         // The areas around a press learned of it in this pass.
         self.press_inside = null;
+        self.observers = self.observers_built;
         if (self.depth != 1) return error.UnbalancedContainer;
         self.buffers.nodes[0].end = self.len;
+        // A pass that read where the focus is, in a tree that moved the
+        // focused node in or out of what it read, is drawn again, so that
+        // it reads it right.
+        if (self.focus_read) {
+            var chain: [max_focus_chain]u64 = undefined;
+            const len = self.focusChain(&chain);
+            if (!std.mem.eql(u64, chain[0..len], self.focus_chain[0..self.focus_chain_len])) self.wakeAt(self.now);
+        }
         try router_controls.finish(self);
         if (self.arrow_focus) |id| {
             self.arrow_focus = null;
@@ -6519,7 +6584,7 @@ pub const View = struct {
                         .table_row => try target.tableRow(node.id, bounds, node.text, self.rowOptions(node, control)),
                         .token_field, .combo_field => {
                             if (node.kind == .token_field) try target.tokenField(node.id, bounds, style.name, node.semantic_parent) else try target.comboField(node.id, bounds, node.text, node.checked, control);
-                            const focused = self.focusWithin(node);
+                            const focused = self.focusWithinNode(node);
                             target.roundedRect(bounds, 3, ui.Color.rgb(if (focused) theme.palette.focus else if (style.enabled) theme.palette.border else theme.palette.disabled_border));
                             target.roundedRect(inset(bounds, theme.metrics.border), 2, ui.Color.rgb(theme.palette.field));
                         },
@@ -7070,8 +7135,108 @@ pub const View = struct {
         target.roundedRect(pill, pill.height / 2, ui.Color.rgb(if (node.checked) theme.palette.on_accent else theme.palette.control));
         target.label(.{ .x = pill.x + pad + 4, .y = pill.y, .width = @max(0, pill.width - 2 * (pad + 4)), .height = pill.height }, node.badge, if (node.checked) theme.palette.accent else theme.palette.text);
     }
+    /// The focused node and those around it in the tree built last, from
+    /// it out, into `chain`; none while the window lacks the keyboard. A
+    /// focus not in the tree counts itself alone.
+    fn focusChain(self: *const View, chain: *[max_focus_chain]u64) usize {
+        if (!self.window_focused) return 0;
+        const focused = self.focus orelse return 0;
+        var len: usize = 0;
+        for (self.buffers.nodes[1..@max(self.len, 1)], 1..) |*node, index| if (node.id == focused) {
+            var at: u32 = @intCast(index);
+            while (at != none and at != 0 and len < chain.len) {
+                const inner = &self.buffers.nodes[at];
+                chain[len] = inner.id;
+                len += 1;
+                at = if (inner.anchor != none) inner.anchor else inner.parent;
+            }
+            break;
+        };
+        if (len == 0) {
+            chain[0] = focused;
+            len = 1;
+        }
+        return len;
+    }
+    fn trackFocus(self: *View) void {
+        var chain: [max_focus_chain]u64 = undefined;
+        const len = self.focusChain(&chain);
+        self.focus_text = false;
+        if (self.window_focused) if (self.focus) |focused| for (self.buffers.nodes[1..@max(self.len, 1)]) |*node| if (node.id == focused) {
+            if (node.embed) |content| if (content.takes_text) |ask| {
+                self.focus_text = ask(content.context);
+            };
+            break;
+        };
+        self.focus_left_len = 0;
+        for (self.focus_chain[0..self.focus_chain_len]) |id| {
+            if (std.mem.indexOfScalar(u64, chain[0..len], id) != null) continue;
+            self.focus_left_ids[self.focus_left_len] = id;
+            self.focus_left_len += 1;
+        }
+        @memcpy(self.focus_chain[0..len], chain[0..len]);
+        self.focus_chain_len = len;
+    }
+    /// Whether the keyboard focus is on the node with `id` or inside it,
+    /// as CSS's `:focus-within`, while the window has the keyboard: the
+    /// popovers, lists and menus that open from it count as inside it. It
+    /// answers as of this pass's start, from where the nodes were in the
+    /// pass before, so a node built this pass for the first time asks with
+    /// its id from `lastNode`; a pass that reads it as the focus moves in a
+    /// tree that changes is drawn again.
+    pub fn focusWithin(self: *View, id: u64) bool {
+        self.focus_read = true;
+        return std.mem.indexOfScalar(u64, self.focus_chain[0..self.focus_chain_len], id) != null;
+    }
+    /// Whether the focus left the node with `id` since the pass before: it
+    /// was on the node or inside it, and is now outside it, or nowhere, as
+    /// the window lost the keyboard; the web's `focusout` whose
+    /// `relatedTarget` the node does not contain. A combo box of one's own
+    /// closes its list as the focus leaves it, but not as it moves into
+    /// that list, which opens from it.
+    pub fn focusLeft(self: *View, id: u64) bool {
+        self.focus_read = true;
+        return std.mem.indexOfScalar(u64, self.focus_left_ids[0..self.focus_left_len], id) != null;
+    }
+    /// Opens a column that sees the input coming to what is inside it, as
+    /// an ancestor hears the events that bubble up to it, without taking
+    /// it: the keys pressed and released and the text typed and composed
+    /// while the focus is the container or inside it, and the buttons
+    /// pressed and released over it. It returns the input in a pass of its
+    /// own that comes before the input goes on as it would (to the focused
+    /// control, the shortcuts and Tab), the outermost container first, and
+    /// null in other passes. A demo stops playing at the first key pressed
+    /// in it; a panel hides its hint once one of its fields is typed in. A
+    /// key that moved the focus, as Tab, comes up where the focus went.
+    /// Close it with `end`.
+    pub fn observeInput(self: *View, style: Style) Error!?Observed {
+        const node = try self.open(.column, style);
+        node.observes = true;
+        self.observers_built += 1;
+        const event = self.event orelse return null;
+        if (event != .observe) return null;
+        const observed = event.observe;
+        if (observed.pointed()) |point| {
+            const bounds = self.boundsOf(node.id) orelse return null;
+            if (!contains(bounds, point)) return null;
+        } else if (std.mem.indexOfScalar(u64, self.focus_chain[0..self.focus_chain_len], node.id) == null) return null;
+        return observed;
+    }
+    /// Whether a container observed the input in the pass built last, and
+    /// so whether input should go through a pass for them first.
+    pub fn observing(self: *const View) bool {
+        return self.observers != 0;
+    }
+    /// Whether the focus takes text, typed or composed: an embedded leaf
+    /// that says so (`Embed.takes_text`), as a text field that is not read
+    /// only, a terminal or an editor. The guard of single-key shortcuts: a
+    /// command palette's letters step aside while a field types them.
+    pub fn focusTakesText(self: *View) bool {
+        self.focus_read = true;
+        return self.focus_text;
+    }
     /// True when focus is on the node or a node inside it.
-    fn focusWithin(self: *const View, node: *const Node) bool {
+    fn focusWithinNode(self: *const View, node: *const Node) bool {
         const focused = self.focus orelse return false;
         const start = (@intFromPtr(node) - @intFromPtr(self.buffers.nodes.ptr)) / @sizeOf(Node);
         for (self.buffers.nodes[start..node.end]) |*inner| if (inner.id == focused) return true;
@@ -7896,6 +8061,11 @@ pub const Host = struct {
             },
             else => {},
         }
+        // The containers observing the input see it before anything else.
+        if (self.view.observing()) if (observedOf(event)) |seen| {
+            self.deliver(.{ .observe = seen });
+            self.invalidate();
+        };
         // The keys held count whatever takes them, the inspector too.
         if (event == .key_input and !event.key_input.from_page and self.view.holdKey(event.key_input)) self.invalidate();
         if (self.options.tools()) |tools| if (self.inspectorInput(tools, event)) return true;
@@ -8093,6 +8263,10 @@ pub const Host = struct {
     fn onKeyRelease(ptr: *anyopaque, _: *ui.Context, input: z.KeyInput) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return;
+        if (self.view.observing()) {
+            self.deliver(.{ .observe = .{ .key_up = input } });
+            self.invalidate();
+        }
         if (self.view.releaseKey(input)) self.invalidate();
         self.view.focus = self.context.input_state.focused;
         if (self.view.embedKeyUp(input) or self.applicationKey(input, true)) self.settleEmbed(null);
@@ -8131,6 +8305,17 @@ pub const Host = struct {
         self.deliver(value);
         self.invalidate();
         return true;
+    }
+    /// What an `observeInput` container sees of a window event.
+    fn observedOf(event: z.Event) ?Observed {
+        return switch (event) {
+            .key_input => |input| if (input.from_page) null else .{ .key_down = input },
+            .text_input => |typed| .{ .text = typed.text },
+            .text_preedit => |composed| .{ .composition = composed.text },
+            .pointer_down => |press| .{ .pointer_down = .{ .position = .{ .x = press.position.x, .y = press.position.y }, .button = press.button, .modifiers = press.modifiers } },
+            .pointer_up => |release| .{ .pointer_up = .{ .position = .{ .x = release.position.x, .y = release.position.y }, .button = release.button } },
+            else => null,
+        };
     }
     fn areaButton(button: z.PointerButton) ?PointerButton {
         return switch (button) {

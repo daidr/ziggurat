@@ -215,3 +215,131 @@ test "a tester starts with the desktop's preferences, the pointer's among them" 
     try testing.expectEqual(@as(f32, 28), app.size);
     try testing.expect(app.hover_tip);
 }
+
+const Panel = struct {
+    within: bool = false,
+    left: usize = 0,
+    seen_keys: usize = 0,
+    seen_presses: usize = 0,
+    outer_keys: usize = 0,
+    hint: bool = true,
+    fn build(self: *Panel, v: *View) anyerror!void {
+        _ = try v.button("Before", .{});
+        if (try v.observeInput(.{ .name = "Outer" })) |seen| switch (seen) {
+            .key_down => self.outer_keys += 1,
+            else => {},
+        };
+        const panel = try v.observeInput(.{ .name = "Panel", .gap = 4, .key = 1 });
+        const id = v.lastNode().id;
+        if (panel) |seen| switch (seen) {
+            .key_down => {
+                self.seen_keys += 1;
+                self.hint = false;
+            },
+            .pointer_down => self.seen_presses += 1,
+            else => {},
+        };
+        self.within = v.focusWithin(id);
+        if (v.focusLeft(id)) self.left += 1;
+        if (self.hint) try v.text("Type a name", .{});
+        _ = try v.button("Name", .{});
+        _ = try v.button("Email", .{});
+        try v.end();
+        try v.end();
+        _ = try v.button("After", .{});
+    }
+};
+
+test "focus within a container, the focus leaving it, and the input inside it" {
+    var storage: Storage = .{};
+    var app: Panel = .{};
+    var h = Harness.init(&app, Panel.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.render();
+    try h.focus(.{ .text = "Before" });
+    try h.render();
+    try testing.expect(!app.within);
+    // A key outside the panel is not the panel's.
+    _ = try h.key(.{ .key = .a });
+    try testing.expectEqual(@as(usize, 0), app.seen_keys);
+    try testing.expectEqual(@as(usize, 0), app.outer_keys);
+    try h.focus(.{ .text = "Name" });
+    try h.render();
+    try testing.expect(app.within);
+    try testing.expectEqual(@as(usize, 0), app.left);
+    // The containers around the focus see its keys, the outermost too.
+    _ = try h.key(.{ .key = .a });
+    try testing.expectEqual(@as(usize, 1), app.seen_keys);
+    try testing.expectEqual(@as(usize, 1), app.outer_keys);
+    try testing.expect(!app.hint);
+    // Moving within it is not leaving it.
+    try h.focus(.{ .text = "Email" });
+    try h.render();
+    try testing.expect(app.within);
+    try testing.expectEqual(@as(usize, 0), app.left);
+    try h.focus(.{ .text = "After" });
+    try h.render();
+    try testing.expect(!app.within);
+    try testing.expectEqual(@as(usize, 1), app.left);
+    try h.render();
+    try testing.expectEqual(@as(usize, 1), app.left);
+    // The window losing the keyboard is the focus leaving.
+    try h.focus(.{ .text = "Name" });
+    try h.render();
+    try h.windowFocus(false);
+    try testing.expectEqual(@as(usize, 2), app.left);
+    try h.windowFocus(true);
+    // A press over it, wherever it lands, is seen.
+    const name = h.visible(try h.find(.{ .text = "Name" })).?;
+    try h.press(name.x + 2, name.y + 2, .{});
+    try h.release(name.x + 2, name.y + 2);
+    try testing.expectEqual(@as(usize, 1), app.seen_presses);
+    const before = h.visible(try h.find(.{ .text = "Before" })).?;
+    try h.press(before.x + 2, before.y + 2, .{});
+    try h.release(before.x + 2, before.y + 2);
+    try testing.expectEqual(@as(usize, 1), app.seen_presses);
+}
+
+const Shortcuts = struct {
+    takes: bool = true,
+    text: bool = false,
+    fn takesText(ptr: *anyopaque) bool {
+        const self: *Shortcuts = @ptrCast(@alignCast(ptr));
+        return self.text;
+    }
+    fn measure(_: *anyopaque, _: view.Theme) ui.layout.Measurement {
+        return .{ .minimum = .{ .width = 40, .height = 20 }, .preferred = .{ .width = 40, .height = 20 } };
+    }
+    fn paint(_: *anyopaque, _: *ui.Frame, _: u64, _: view.Rect) anyerror!void {}
+    fn input(_: *anyopaque, _: u64, _: view.EmbedInput) bool {
+        return false;
+    }
+    fn build(self: *Shortcuts, v: *View) anyerror!void {
+        try v.embed(.{ .context = self, .measure = measure, .paint = paint, .focusable = true, .input = input, .takes_text = takesText }, .{ .key = 3, .name = "Field" });
+        _ = try v.button("Other", .{});
+        self.takes = v.focusTakesText();
+    }
+};
+
+test "whether the focus takes text" {
+    var storage: Storage = .{};
+    var app: Shortcuts = .{ .text = true };
+    var h = Harness.init(&app, Shortcuts.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.render();
+    try testing.expect(!app.takes);
+    try h.focus(.{ .name = "Field" });
+    try h.render();
+    try testing.expect(app.takes);
+    app.text = false;
+    try h.render();
+    try testing.expect(!app.takes);
+    app.text = true;
+    try h.focus(.{ .text = "Other" });
+    try h.render();
+    try testing.expect(!app.takes);
+}

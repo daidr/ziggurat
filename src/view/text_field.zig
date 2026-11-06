@@ -69,7 +69,12 @@ pub const TextField = struct {
     /// The leaf to emit from a build function with `View.embed`. Give it a
     /// `Style.key` when siblings before it can change, so its id stays put.
     pub fn embed(self: *TextField) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .annotate = annotate, .status = status, .text = text, .cursor = cursor };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .annotate = annotate, .status = status, .text = text, .cursor = cursor, .takes_text = takesText };
+    }
+    fn takesText(ptr: *anyopaque) bool {
+        const self: *TextField = @ptrCast(@alignCast(ptr));
+        const policy = self.field.options.policy;
+        return policy.enabled and !policy.read_only;
     }
 
     /// Give the field keyboard focus: at once when it is attached, or as

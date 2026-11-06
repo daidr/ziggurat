@@ -202,6 +202,7 @@ pub const Harness = struct {
     /// Type `text` into the inspector's find bar while it has the
     /// keyboard, then render; error.NoTextTarget otherwise.
     pub fn typeText(self: *Harness, text: []const u8) anyerror!void {
+        try self.observe(.{ .text = text });
         const tools = self.config.options.tools() orelse return error.NoTextTarget;
         if (!tools.typeText(text)) return error.NoTextTarget;
         try self.render();
@@ -210,6 +211,7 @@ pub const Harness = struct {
     /// Replay a key release to the focused embedded leaf, then render if it
     /// took it, as Host does. True when it took it.
     pub fn keyUp(self: *Harness, input: z.KeyInput) anyerror!bool {
+        try self.observe(.{ .key_up = input });
         if (self.view.releaseKey(input)) try self.render();
         self.view.focus = self.focusId();
         if (!self.view.embedKeyUp(input) and !self.applicationKey(input, true)) return false;
@@ -414,8 +416,16 @@ pub const Harness = struct {
     /// shortcuts, Tab, range keys, group arrows, spatial arrows, Home/End,
     /// then Enter/Space activation. Delivers any resulting event, renders,
     /// and returns whether a control handled the key. Needs `attachInput`.
+    /// Run the pass in which `observeInput` containers see input, as Host
+    /// runs it before routing the input on, while there are some.
+    fn observe(self: *Harness, seen: view.Observed) anyerror!void {
+        if (!self.view.observing()) return;
+        try self.run(.{ .observe = seen });
+        try self.render();
+    }
     pub fn key(self: *Harness, input: z.KeyInput) anyerror!bool {
         const context = self.input orelse return error.NoInput;
+        try self.observe(.{ .key_down = input });
         if (self.view.holdKey(input)) try self.render();
         // The inspector's keys come before the view's, as in Host.
         if (self.config.options.tools()) |tools| if (tools.key(input)) {
@@ -777,6 +787,7 @@ pub const Harness = struct {
     pub fn press(self: *Harness, x: f32, y: f32, modifiers: z.KeyModifiers) anyerror!void {
         self.pressed = null;
         self.sample(true);
+        try self.observe(.{ .pointer_down = .{ .position = .{ .x = x, .y = y }, .button = .primary, .modifiers = modifiers } });
         _ = self.view.pressedAt(.{ .x = x, .y = y }, .primary, modifiers);
         if (try self.inspectorPress(x, y, modifiers)) return self.render();
         switch (self.view.pointerDown(.{ .x = x, .y = y })) {
@@ -826,6 +837,7 @@ pub const Harness = struct {
     /// it. Renders.
     pub fn release(self: *Harness, x: f32, y: f32) anyerror!void {
         self.view.pointer_sample.pressure = 0;
+        try self.observe(.{ .pointer_up = .{ .position = .{ .x = x, .y = y }, .button = .primary } });
         if (self.config.options.tools()) |tools| if (tools.pointerUp(.{ .x = x, .y = y })) return self.render();
         if (self.view.areaRelease(.{ .x = x, .y = y }, .primary)) |event| {
             self.pressed = null;
