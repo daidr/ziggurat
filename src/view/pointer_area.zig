@@ -59,8 +59,22 @@ pub const PointerArea = struct {
     bounds: ?Rect = null,
     /// The pointer is over it and nothing that floats above covers it.
     hovered: bool = false,
-    /// A button went down on it and the pointer is still over it.
+    /// The primary button went down on it and the pointer is still over
+    /// it, as CSS's `:active`: a secondary or middle press only clicks.
     pressed: bool = false,
+    /// The button holding a press that went down on it, whichever it is,
+    /// while the press lasts, over it or not: with `position` it builds a
+    /// gesture of another button, as a canvas panning with the middle one.
+    pressed_button: ?Button = null,
+    /// A press went down on it or anywhere inside it in this pass, a
+    /// control inside it taking the press or not, without the area taking
+    /// the pointer: a cell notices an Alt+press while its row still selects.
+    pressed_inside: bool = false,
+    /// The press that went down on it was cancelled in this pass, as the
+    /// system takes the pointer (a menu or another window taking the
+    /// mouse, a browser scrolling with a touch) or the window loses the
+    /// keyboard: it clicks nothing, and a gesture undoes what it began.
+    press_canceled: bool = false,
     /// The pointer relative to `bounds` while it is hovered.
     position: ?Point = null,
     /// A primary click came up over it in this pass.
@@ -79,6 +93,10 @@ pub const PointerArea = struct {
     /// down.
     modifiers: z.KeyModifiers = .{},
 };
+
+/// A press anywhere in the window, which the areas around it learn of in
+/// the first pass built after it (`PointerArea.pressed_inside`).
+pub const InsidePress = struct { point: Point, button: Button, modifiers: z.KeyModifiers };
 
 /// The press a pointer area follows until its release.
 pub const Press = struct { id: u64, button: Button, clicks: u8, modifiers: z.KeyModifiers };
@@ -136,18 +154,27 @@ pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
         result.hovered = true;
         result.position = local(area.bounds, v.pointer.?);
     };
-    if (v.area_press) |held| result.pressed = held.id == node.id and result.hovered;
+    if (v.area_press) |held| if (held.id == node.id) {
+        result.pressed = held.button == .primary and result.hovered;
+        result.pressed_button = held.button;
+    };
     if (comptime view.inspector.enabled) if (v.tools) |tools| {
         // The inspector shows the area hovered or pressed.
         if (tools.forced(node.id, .hover) or tools.forced(node.id, .active)) result.hovered = true;
         if (tools.forced(node.id, .active)) result.pressed = true;
+    };
+    if (v.press_inside) |inside_press| if (known) |area| if (contains(area.rect, inside_press.point) and reaches(v, area.rect, inside_press.point)) {
+        result.pressed_inside = true;
+        if (event == null) result.modifiers = inside_press.modifiers;
     };
     if (event) |value| {
         result.modifiers = value.modifiers;
         switch (value.phase) {
             .press => {
                 result.pressed_now = value.button;
-                result.pressed = true;
+                result.pressed = value.button == .primary;
+                result.pressed_button = value.button;
+                result.pressed_inside = true;
                 result.double_clicked = value.button == .primary and value.clicks == 2;
             },
             .release => if (value.inside) switch (value.button) {
@@ -158,7 +185,11 @@ pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
                 .secondary => result.right_clicked = true,
                 .middle => result.middle_clicked = true,
             },
-            .cancel => {},
+            .cancel => {
+                result.press_canceled = true;
+                result.pressed = false;
+                result.pressed_button = null;
+            },
         }
     }
     return result;
@@ -178,6 +209,15 @@ pub fn press(v: *View, point: Point, button: Button, modifiers: z.KeyModifiers, 
     v.area_last = .{ .id = area.id, .button = button, .time = now, .at = point, .count = count };
     v.area_press = .{ .id = area.id, .button = button, .clicks = count, .modifiers = modifiers };
     return .{ .pointer = .{ .id = area.id, .phase = .press, .button = button, .clicks = count, .modifiers = modifiers, .position = local(area.bounds, point) } };
+}
+
+/// A button went down at `point`, whatever takes it: the areas around it
+/// report `pressed_inside` in the first pass built after it. True when an
+/// area there should repaint to learn of it.
+pub fn pressedAt(v: *View, point: Point, button: Button, modifiers: z.KeyModifiers) bool {
+    v.press_inside = .{ .point = point, .button = button, .modifiers = modifiers };
+    for (v.overlay.areas[0..v.overlay.area_count]) |*area| if (contains(area.rect, point) and reaches(v, area.rect, point)) return true;
+    return false;
 }
 
 /// `button` came up at `point`: the area it went down on learns whether it

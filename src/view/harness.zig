@@ -752,6 +752,7 @@ pub const Harness = struct {
     /// pointer drags is followed by `moveTo` and `release`. Renders.
     pub fn press(self: *Harness, x: f32, y: f32, modifiers: z.KeyModifiers) anyerror!void {
         self.pressed = null;
+        _ = self.view.pressedAt(.{ .x = x, .y = y }, .primary, modifiers);
         if (try self.inspectorPress(x, y, modifiers)) return self.render();
         switch (self.view.pointerDown(.{ .x = x, .y = y })) {
             .consumed => {
@@ -833,6 +834,7 @@ pub const Harness = struct {
         }
         const point: view.Point = .{ .x = x, .y = y };
         _ = self.view.pointerMoved(point);
+        _ = self.view.pressedAt(point, button, modifiers);
         if (self.view.pointerDown(point) == .consumed) {
             self.restoreFocus();
             try self.render();
@@ -3028,7 +3030,7 @@ const Explorer = struct {
     fn build(self: *Explorer, v: *View) anyerror!void {
         try v.row(.{ .gap = 20 });
         try v.column(.{ .key = 1, .gap = 4, .name = "Files" });
-        try v.dragRows(file_kind);
+        _ = try v.dragRows(file_kind);
         try v.text("a.txt", .{ .key = 10, .height = 30 });
         // A folder among the rows takes the rows dropped on it.
         switch (try v.dropTarget(.{ .kind = file_kind }, .{ .key = 11, .height = 30 })) {
@@ -3084,7 +3086,7 @@ test "a container cannot both drag its rows out and reorder them" {
     var v = View.init(storage.buffers());
     v.reset(.{}, null);
     try v.column(.{});
-    try v.dragRows(1);
+    _ = try v.dragRows(1);
     try std.testing.expectError(error.InvalidValue, v.reorder());
     try v.end();
     try v.column(.{});
@@ -3106,7 +3108,7 @@ const Sheet = struct {
     fn build(self: *Sheet, v: *View) anyerror!void {
         _ = try v.table(&.{.{ .title = "Name" }}, &self.sort, &self.selection, .{ .name = "Sheet" });
         if (self.drag_out) {
-            try v.dragRows(7);
+            _ = try v.dragRows(7);
         } else if (self.reorder) {
             if (try v.reorder()) |move| self.moved = move;
         } else try v.dragSelect();

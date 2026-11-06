@@ -1265,6 +1265,15 @@ pub const DropState = union(enum) {
     /// Something dropped on it in this pass, at a window point.
     dropped: struct { data: Dropped, position: Point },
 };
+/// A payload dragged out of a `dragRows` container let go over no target.
+pub const DragMiss = struct { payload: Payload, position: Point };
+/// What a `dragSourceState` tells of its drag.
+pub const DragSourceState = struct {
+    /// Dragged now, to show it dimmed.
+    dragging: bool = false,
+    /// Let go over no target in this pass, at this window point.
+    missed: ?Point = null,
+};
 /// Items of a `reorder` container moving: the item at `from` goes before
 /// the item at `to`, where the count of items means after the last. Both
 /// count the items in build order before the move.
@@ -1515,6 +1524,9 @@ pub const Event = union(enum) {
     reorder: struct { id: u64, move: Move },
     /// A press, release or lost press of a `pointerArea`.
     pointer: PointerEvent,
+    /// A value dragged from a `dragSource`, or a row of a `dragRows`
+    /// container, let go over no target taking it, at a window point.
+    drag_missed: struct { id: u64, payload: Payload, position: Point },
 };
 
 /// What a press or key does to a tree or table row.
@@ -1914,6 +1926,9 @@ pub const View = struct {
     tools: ?*const Inspector = null,
     /// The pointer area a button went down on, until it comes up.
     area_press: ?pointer_controls.Press = null,
+    /// A press anywhere, for the areas around it to learn of in the first
+    /// pass built after it; set with `pressedAt`.
+    press_inside: ?pointer_controls.InsidePress = null,
     /// The last press on a pointer area, to count double presses.
     area_last: pointer_controls.Last = .{},
     /// What the pointer hovered at the last move, to tell when to repaint.
@@ -2405,6 +2420,7 @@ pub const View = struct {
     pub const areaPress = pointer_controls.press;
     pub const areaRelease = pointer_controls.release;
     pub const areaCancel = pointer_controls.cancel;
+    pub const pressedAt = pointer_controls.pressedAt;
     pub const pointerMoved = pointer_controls.moved;
     pub const cursorAt = pointer_controls.cursorAt;
 
@@ -2456,6 +2472,7 @@ pub const View = struct {
             .drop => |value| value.id,
             .reorder => |value| value.id,
             .pointer => |value| value.id,
+            .drag_missed => |value| value.id,
         };
         if (target != id) return null;
         self.event = null;
@@ -4386,12 +4403,14 @@ pub const View = struct {
         switch (capture.target) {
             .embed => unreachable,
             .area => |id| result.push(.{ .drag = .{ .id = id, .phase = .end, .origin = capture.origin, .position = point, .delta = .{ .x = point.x - capture.position.x, .y = point.y - capture.position.y }, .modifiers = capture.modifiers } }),
+            // Let go over no target that takes it: the source learns where,
+            // which may be outside the window, as to tear a tab out.
             .source => |source| if (self.dropTargetAt(point, .{ .value = source.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = source.payload }, .position = point } });
-            },
+            } else result.push(.{ .drag_missed = .{ .id = source.id, .payload = source.payload, .position = point } }),
             .rows => |rows| if (self.dropTargetAt(point, .{ .value = rows.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = rows.payload }, .position = point } });
-            },
+            } else result.push(.{ .drag_missed = .{ .id = rows.list, .payload = rows.payload, .position = point } }),
             .leaf => |leaf| if (self.dropTargetAt(point, .{ .value = leaf.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = leaf.payload }, .position = point } });
             },
@@ -4747,9 +4766,21 @@ pub const View = struct {
     /// drags. True while it is dragged, to show it dimmed. Close it with
     /// `end`.
     pub fn dragSource(self: *View, payload: Payload, style: Style) Error!bool {
+        return (try self.dragSourceState(payload, style)).dragging;
+    }
+    /// `dragSource`, telling also, in the pass after the release, that the
+    /// payload was let go over no `dropTarget` taking it, and where in the
+    /// window's coordinates: outside the window when it was let go past its
+    /// edge, as to tear a tab out into a window of its own. A drag given up
+    /// with Escape, or lost as the system cancels the press, is not missed.
+    pub fn dragSourceState(self: *View, payload: Payload, style: Style) Error!DragSourceState {
         const node = try self.open(.drag_source, style);
         node.payload = payload;
-        return self.dragging(.source, node.id);
+        var state: DragSourceState = .{ .dragging = self.dragging(.source, node.id) };
+        if (self.take(node.id)) |event| if (event == .drag_missed) {
+            state.missed = event.drag_missed.position;
+        };
+        return state;
     }
 
     /// Starts a drop target, laid out as a column, that takes what `accept`
@@ -4809,14 +4840,18 @@ pub const View = struct {
     /// the application finds among its `Selection`, and how many go shows
     /// beside the pointer. Escape gives the drag up. A tree cannot drag its
     /// rows out, and a container cannot both `dragRows` and `reorder` or
-    /// `dragSelect`.
-    pub fn dragRows(self: *View, kind: u64) Error!void {
+    /// `dragSelect`. In the pass after a release over no target taking
+    /// the payload it returns that payload and where it was let go, in the
+    /// window's coordinates, as `dragSourceState` tells it; null otherwise.
+    pub fn dragRows(self: *View, kind: u64) Error!?DragMiss {
         const index = self.stack[self.depth - 1];
         if (index == 0) return error.NotContainer;
         const node = &self.buffers.nodes[index];
         if (node.kind == .tree or node.drag_select or node.reorder) return error.InvalidValue;
         if (node.kind != .table and node.child_count != 0) return error.InvalidValue;
         node.drag_rows = kind;
+        if (self.take(node.id)) |event| if (event == .drag_missed) return .{ .payload = event.drag_missed.payload, .position = event.drag_missed.position };
+        return null;
     }
 
     /// Let a primary drag from a row of the tree or table just opened select
@@ -4866,6 +4901,8 @@ pub const View = struct {
 
     /// Validate balance after the build function returns.
     pub fn finish(self: *View) Error!void {
+        // The areas around a press learned of it in this pass.
+        self.press_inside = null;
         if (self.depth != 1) return error.UnbalancedContainer;
         self.buffers.nodes[0].end = self.len;
         try router_controls.finish(self);
@@ -7857,6 +7894,7 @@ pub const Host = struct {
                     }
                 }
                 const point: Point = .{ .x = press.position.x, .y = press.position.y };
+                if (areaButton(press.button)) |button| if (self.view.pressedAt(point, button, press.modifiers)) self.invalidate();
                 if (press.button != .primary) {
                     // Secondary and middle presses reach pointer areas where
                     // no control lies.
@@ -8883,6 +8921,7 @@ test {
     _ = @import("direction.zig");
     _ = @import("navigation_tests.zig");
     _ = @import("pointer_tests.zig");
+    _ = @import("input_tests.zig");
     _ = @import("inspector_tests.zig");
     _ = @import("inspector_editor.zig");
     _ = @import("gradient.zig");
