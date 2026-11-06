@@ -81,6 +81,8 @@ typedef struct NativeItem {
     uint32_t modifiers;
     int32_t command;
     void *icon;
+    /* Unused here: DBusMenu has no tooltips. */
+    const char *tooltip;
 } NativeItem;
 typedef struct MenuEntry {
     gchar *label;
