@@ -159,3 +159,36 @@ test "a drag let go over no target tells its source where" {
     try testing.expectEqual(@as(u64, 0), app.rows_missed.?.payload.value);
     try testing.expectEqual(@as(f32, row.y + 400), app.rows_missed.?.position.y);
 }
+
+const Pad = struct {
+    last: view.PointerArea = .{ .id = 0 },
+    pens: usize = 0,
+    fn build(self: *Pad, v: *View) anyerror!void {
+        self.last = try v.pointerArea(.{}, .{ .width = 200, .height = 200 });
+        try v.end();
+        if (self.last.pointer) |sample| if (sample.device == .pen) {
+            self.pens += 1;
+        };
+    }
+};
+
+test "an area tells what presses it and how hard" {
+    var storage: Storage = .{};
+    var app: Pad = .{};
+    var h = Harness.init(&app, Pad.build, storage.buffers(), .{});
+    try h.render();
+    const pad = (try h.find(.{ .kind = .pointer_area })).bounds;
+    try h.press(pad.x + 10, pad.y + 10, .{});
+    try testing.expectEqual(z.PointerSample{ .device = .mouse, .pressure = 0.5 }, app.last.pointer.?);
+    try h.release(pad.x + 10, pad.y + 10);
+    try testing.expect(app.last.pointer == null);
+    h.usePointer(.pen, 0.6);
+    try h.press(pad.x + 10, pad.y + 10, .{});
+    try testing.expectEqual(z.PointerSample{ .device = .pen, .pressure = 0.6 }, app.last.pointer.?);
+    h.usePointer(.pen, 0.9);
+    try h.moveTo(pad.x + 20, pad.y + 10);
+    try h.render();
+    try testing.expectEqual(@as(f32, 0.9), app.last.pointer.?.pressure);
+    try h.release(pad.x + 20, pad.y + 10);
+    try testing.expect(app.pens >= 2);
+}

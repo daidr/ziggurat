@@ -1138,6 +1138,9 @@ pub const PointerPress = struct {
     /// 1 for a single press, 2 for the second of a double press, and so on.
     count: u8 = 1,
     modifiers: z.KeyModifiers = .{},
+    /// What presses and how hard, as Pointer Events' `pointerType` and
+    /// `pressure`; see `z.PointerSample`.
+    pointer: z.PointerSample = .{ .pressure = 0.5 },
 };
 /// The pointer moving while it presses a leaf that took the press.
 pub const PointerDrag = struct {
@@ -1149,6 +1152,9 @@ pub const PointerDrag = struct {
     /// The pointer has gone `drag_threshold` from the origin during this
     /// press; it stays set once reached.
     dragging: bool,
+    /// What presses and how hard as of this move: a signature pad widens
+    /// its stroke with a pen's pressure.
+    pointer: z.PointerSample = .{ .pressure = 0.5 },
 };
 /// A wheel or touchpad scroll over a leaf, in DIP; positive y scrolls down.
 pub const PointerWheel = struct { position: Point, delta: Point };
@@ -1926,6 +1932,9 @@ pub const View = struct {
     tools: ?*const Inspector = null,
     /// The pointer area a button went down on, until it comes up.
     area_press: ?pointer_controls.Press = null,
+    /// The device and pressure of the latest pointer event, which Host
+    /// takes from the window as each comes (`z.Window.pointerSample`).
+    pointer_sample: z.PointerSample = .{},
     /// A press anywhere, for the areas around it to learn of in the first
     /// pass built after it; set with `pressedAt`.
     press_inside: ?pointer_controls.InsidePress = null,
@@ -4254,7 +4263,7 @@ pub const View = struct {
             const again = last.id == entry.id and now >= last.time and now - last.time <= double_press_time and distance(last.at, point) <= double_press_distance;
             const count: u8 = if (again) last.count +| 1 else 1;
             self.last_press = .{ .id = entry.id, .time = now, .at = point, .count = count };
-            if (entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_down = .{ .position = local(entry, point), .count = count, .modifiers = modifiers } })) {
+            if (entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_down = .{ .position = local(entry, point), .count = count, .modifiers = modifiers, .pointer = self.pointer_sample } })) {
                 self.capture = .{ .target = .{ .embed = entry.id }, .origin = point, .position = point, .modifiers = modifiers, .embed_context = entry.embed.context };
                 result.consumed = true;
                 result.repaint = true;
@@ -4326,7 +4335,7 @@ pub const View = struct {
                 self.capture = null;
                 return result;
             };
-            result.repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_drag = .{ .position = local(entry, point), .origin = local(entry, capture.origin), .delta = delta, .dragging = capture.dragging } });
+            result.repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_drag = .{ .position = local(entry, point), .origin = local(entry, capture.origin), .delta = delta, .dragging = capture.dragging, .pointer = self.pointer_sample } });
             result.settle = result.repaint;
             // The leaf hands the drag over to carry a payload out of it.
             const ask = entry.embed.drag orelse return result;
@@ -7863,6 +7872,13 @@ pub const Host = struct {
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return false;
+        // What points, and how hard, as the window tells it.
+        switch (event) {
+            .pointer_down, .pointer_up, .pointer_move => if (self.context.window) |window| {
+                self.view.pointer_sample = window.pointerSample();
+            },
+            else => {},
+        }
         // The keys held count whatever takes them, the inspector too.
         if (event == .key_input and !event.key_input.from_page and self.view.holdKey(event.key_input)) self.invalidate();
         if (self.options.tools()) |tools| if (self.inspectorInput(tools, event)) return true;

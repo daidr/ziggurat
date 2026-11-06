@@ -107,6 +107,9 @@ pub const Harness = struct {
     /// Renders record the semantic tree as a window's would; see
     /// `recordSemantics`.
     semantics: bool = false,
+    /// What presses, set with `usePointer`.
+    pointer_device: z.PointerDevice = .mouse,
+    pointer_pressure: ?f32 = null,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: view.Buffers, config: Config) Harness {
         var built = View.init(buffers);
@@ -750,8 +753,19 @@ pub const Harness = struct {
     /// embedded leaf under it, which captures the pointer when it takes it.
     /// Otherwise a tree or table row selects, and a press on something the
     /// pointer drags is followed by `moveTo` and `release`. Renders.
+    /// Have the presses and moves after it come from `device` pressing
+    /// that hard, as a pen or a finger; null pressure for a device that
+    /// tells none, which presses 0.5 while a button is down.
+    pub fn usePointer(self: *Harness, device: z.PointerDevice, pressure: ?f32) void {
+        self.pointer_device = device;
+        self.pointer_pressure = pressure;
+    }
+    fn sample(self: *Harness, down: bool) void {
+        self.view.pointer_sample = .{ .device = self.pointer_device, .pressure = if (down) self.pointer_pressure orelse 0.5 else 0 };
+    }
     pub fn press(self: *Harness, x: f32, y: f32, modifiers: z.KeyModifiers) anyerror!void {
         self.pressed = null;
+        self.sample(true);
         _ = self.view.pressedAt(.{ .x = x, .y = y }, .primary, modifiers);
         if (try self.inspectorPress(x, y, modifiers)) return self.render();
         switch (self.view.pointerDown(.{ .x = x, .y = y })) {
@@ -787,6 +801,7 @@ pub const Harness = struct {
             return self.render();
         };
         _ = self.view.pointerMoved(.{ .x = x, .y = y });
+        self.sample(self.view.capture != null or self.view.area_press != null);
         if (self.view.captureMove(.{ .x = x, .y = y })) |result| if (result.consumed) {
             // A drag takes the press from the control under it.
             if (result.cancel_press) self.pressed = null;
@@ -799,6 +814,7 @@ pub const Harness = struct {
     /// never dragged activates the control it began on when released over
     /// it. Renders.
     pub fn release(self: *Harness, x: f32, y: f32) anyerror!void {
+        self.view.pointer_sample.pressure = 0;
         if (self.config.options.tools()) |tools| if (tools.pointerUp(.{ .x = x, .y = y })) return self.render();
         if (self.view.areaRelease(.{ .x = x, .y = y }, .primary)) |event| {
             self.pressed = null;

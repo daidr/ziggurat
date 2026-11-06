@@ -662,6 +662,25 @@ static gboolean emulated(NativeWindow *s, GdkEvent *native) {
     GdkDevice *device=gdk_event_get_source_device(native);
     return device && gdk_device_get_source(device)==GDK_SOURCE_TOUCHSCREEN;
 }
+/* The device of a pointer event and how hard it presses, as Pointer Events
+   tell them, on the wire: width 1 a mouse, 2 a pen or an eraser, 3 a finger
+   (a tap of the area's own touches), dx the pressure axis, or -1 when the
+   device tells none. */
+static void pointer_sample(NativeWindow *s, GdkEvent *native, NativeEvent *event) {
+    uint32_t device=1; double pressure=-1;
+    if (s->synthetic) device=3;
+    else {
+        GdkDevice *source=gdk_event_get_source_device(native);
+        if (source) switch (gdk_device_get_source(source)) {
+        case GDK_SOURCE_PEN: case GDK_SOURCE_ERASER: device=2; break;
+        case GDK_SOURCE_TOUCHSCREEN: device=3; break;
+        default: break;
+        }
+        double value=0;
+        if (device==2 && gdk_event_get_axis(native,GDK_AXIS_PRESSURE,&value)) pressure=value;
+    }
+    event->width=device; event->dx=pressure;
+}
 static gboolean button(GtkWidget *widget, GdkEventButton *native, gpointer data) {
     NativeWindow *s=data;
     if (emulated(s,(GdkEvent *)native)) return TRUE;
@@ -711,6 +730,7 @@ static gboolean button(GtkWidget *widget, GdkEventButton *native, gpointer data)
          * focus change, as a context menu or history button needs. */
         if (ticket.button==ZLG_POINTER_UNKNOWN || !pointer_allowed(s,ticket.operation)) goto done;
         NativeEvent other={0}; other.kind=down?3:4; other.key=(int)ticket.button; other.x=x; other.y=y; other.flags=(int)ticket.modifiers;
+        pointer_sample(s,(GdkEvent *)native,&other);
         other.context=s->pointer_enabled?&ticket:NULL;
         emit(s,&other);
         if (!pointer_allowed(s,ticket.operation)) disposition=ZLG_POINTER_DENIED;
@@ -727,6 +747,7 @@ static gboolean button(GtkWidget *widget, GdkEventButton *native, gpointer data)
         if (!pointer_allowed(s,ticket.operation)) { disposition=ZLG_POINTER_DENIED; goto done; }
     }
     NativeEvent event={0}; event.kind=down?3:4; event.x=x; event.y=y; event.flags=(int)ticket.modifiers;
+    pointer_sample(s,(GdkEvent *)native,&event);
     event.context=s->pointer_enabled?&ticket:NULL;
     if (down) s->gesture=native;
     emit(s,&event);
@@ -761,7 +782,7 @@ static gboolean motion(GtkWidget *widget, GdkEventMotion *native, gpointer data)
         gdk_window_set_cursor(gtk_widget_get_window(s->area),cursor); s->cursor_hit=hit;
     }
     if (!s->destroyed && s->pointer_operation==operation) {
-        NativeEvent event={0}; event.kind=5; event.x=x; event.y=y; emit(s,&event);
+        NativeEvent event={0}; event.kind=5; event.x=x; event.y=y; pointer_sample(s,(GdkEvent *)native,&event); emit(s,&event);
     }
     release(s); return TRUE;
 }

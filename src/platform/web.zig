@@ -321,6 +321,14 @@ pub fn setCursor(record: *core.WindowRecord, cursor: core.Cursor) void {
         .alias => "alias",
         .context_menu => "context-menu",
         .none => "none",
+        .progress => "progress",
+        .wait => "wait",
+        .help => "help",
+        .cell => "cell",
+        .zoom_in => "zoom-in",
+        .zoom_out => "zoom-out",
+        .all_scroll => "all-scroll",
+        .no_drop => "no-drop",
     };
     zw_window_cursor(record.native.id, name.ptr, name.len);
 }
@@ -345,9 +353,13 @@ fn event(record: *core.WindowRecord, native: *const NativeEvent) i32 {
         3, 4 => {
             if (native.key < 0 or native.key > 4) return 0;
             const input: core.PointerButtonInput = .{ .position = point, .modifiers = modifiers, .button = @fromBackingInt(@intCast(zio.asUnsigned(native.key))) };
+            record.notePointerWire(native.width, native.dx, if (native.kind == 3) .down else .up, input.button);
             if (native.kind == 3) record.emit(.{ .pointer_down = input }) else record.emit(.{ .pointer_up = input });
         },
-        5 => record.emit(.{ .pointer_move = point }),
+        5 => {
+            record.notePointerWire(native.width, native.dx, null, .primary);
+            record.emit(.{ .pointer_move = point });
+        },
         6 => record.emit(.{ .wheel = .{ .position = point, .delta = .{ .x = @floatCast(native.dx), .y = @floatCast(native.dy) } } }),
         7 => record.emit(.{ .focus = native.flags & 1 != 0 }),
         8 => record.emit(.cancel_input),

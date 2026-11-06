@@ -3,6 +3,8 @@
    event wire as the GTK adapter; the kinds are documented in macos.zig.
    Compiled without ARC: objects are retained and released explicitly. */
 #import <AppKit/AppKit.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -250,6 +252,21 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
     [self addTrackingArea:area];[area release];[super updateTrackingAreas];
 }
 - (NSPoint)local:(NSEvent *)event{return [self convertPoint:[event locationInWindow] fromView:nil];}
+/* The device of a mouse event and how hard it presses, on the wire: width 1
+   a mouse or a touchpad, 2 a tablet's pen, 3 a touch; dx the pen's
+   pressure, or -1 for a device that tells none. */
+static void pointer_sample(NSEvent *event,NativeEvent *wire){
+    wire->width=1;wire->dx=-1;
+    const NSEventType type=[event type];
+    if(type==NSEventTypeTabletPoint){wire->width=2;wire->dx=[event pressure];return;}
+    if(type==NSEventTypeTabletProximity){wire->width=2;return;}
+    switch([event subtype]){
+        case NSEventSubtypeTabletPoint:wire->width=2;wire->dx=[event pressure];break;
+        case NSEventSubtypeTabletProximity:wire->width=2;break;
+        case NSEventSubtypeTouch:wire->width=3;break;
+        default:break;
+    }
+}
 - (void)mouseDown:(NSEvent *)event{
     NativeWindow *s=native;if(!s)return;retain_window(s);
     NSPoint point=[self local:event];
@@ -258,7 +275,7 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
     s->secondary_click=secondary;
     if(secondary){
         if(!s->destroyed&&!(s->popup&&!(s->popup&POPUP_FOCUSABLE)))[s->window makeFirstResponder:self];
-        NativeEvent down={0};down.kind=3;down.key=1;down.x=point.x;down.y=point.y;down.flags=(int)modifiers([event modifierFlags]);emit(s,&down);
+        NativeEvent down={0};down.kind=3;down.key=1;down.x=point.x;down.y=point.y;down.flags=(int)modifiers([event modifierFlags]);pointer_sample(event,&down);emit(s,&down);
         release_window(s);return;
     }
     zlmw_drag_pressed(s->window,event);
@@ -275,7 +292,7 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
         release_window(s);return;
     }
     if(!s->destroyed&&!(s->popup&&!(s->popup&POPUP_FOCUSABLE)))[s->window makeFirstResponder:self];
-    NativeEvent down={0};down.kind=3;down.x=point.x;down.y=point.y;down.flags=(int)modifiers([event modifierFlags]);
+    NativeEvent down={0};down.kind=3;down.x=point.x;down.y=point.y;down.flags=(int)modifiers([event modifierFlags]);pointer_sample(event,&down);
     s->gesture=event;emit(s,&down);if(s->gesture==event)s->gesture=nil;
     release_window(s);
 }
@@ -283,7 +300,7 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
     NativeWindow *s=native;if(!s)return;NSPoint point=[self local:event];
     const int secondary=s->secondary_click;s->secondary_click=0;
     if(!input_allowed(s))return;
-    NativeEvent up={0};up.kind=4;up.key=secondary?1:0;up.x=point.x;up.y=point.y;up.flags=(int)modifiers([event modifierFlags]);emit(s,&up);
+    NativeEvent up={0};up.kind=4;up.key=secondary?1:0;up.x=point.x;up.y=point.y;up.flags=(int)modifiers([event modifierFlags]);pointer_sample(event,&up);emit(s,&up);
 }
 /* Buttons other than the primary one: 1 secondary, 2 middle, 3 back and 4
    forward, the wire's numbers, as AppKit numbers them; others are none. */
@@ -298,7 +315,7 @@ static void other_button(NSView *view,NativeWindow *s,NSEvent *event,int kind){
     if(!input_allowed(s)){release_window(s);return;}
     if(kind==3&&!s->destroyed&&!(s->popup&&!(s->popup&POPUP_FOCUSABLE)))[s->window makeFirstResponder:view];
     NSPoint point=[view convertPoint:[event locationInWindow] fromView:nil];
-    NativeEvent press={0};press.kind=kind;press.key=(int)number;press.x=point.x;press.y=point.y;press.flags=(int)modifiers([event modifierFlags]);
+    NativeEvent press={0};press.kind=kind;press.key=(int)number;press.x=point.x;press.y=point.y;press.flags=(int)modifiers([event modifierFlags]);pointer_sample(event,&press);
     if(!s->destroyed)emit(s,&press);
     release_window(s);
 }
@@ -308,9 +325,11 @@ static void other_button(NSView *view,NativeWindow *s,NSEvent *event,int kind){
 - (void)otherMouseUp:(NSEvent *)event{other_button(self,native,event,4);}
 - (void)moved:(NSEvent *)event{
     NativeWindow *s=native;if(!s)return;NSPoint point=[self local:event];
-    NativeEvent move={0};move.kind=5;move.x=point.x;move.y=point.y;emit(s,&move);
+    NativeEvent move={0};move.kind=5;move.x=point.x;move.y=point.y;pointer_sample(event,&move);emit(s,&move);
 }
 - (void)mouseMoved:(NSEvent *)event{[self moved:event];}
+/* A pen pressing harder or softer between moves: a move where it is. */
+- (void)tabletPoint:(NSEvent *)event{[self moved:event];}
 - (void)mouseDragged:(NSEvent *)event{[self moved:event];}
 - (void)rightMouseDragged:(NSEvent *)event{[self moved:event];}
 - (void)otherMouseDragged:(NSEvent *)event{[self moved:event];}
@@ -401,6 +420,14 @@ static void page_key(NativeWindow *s,NSEvent *event){
         NativeEvent activate={0};activate.kind=15;activate.key=code==0x30?0:1;emit(s,&activate);release_window(s);return;
     }
     if(s->keyboard){keyboard_key(s,event);release_window(s);return;}
+    /* A held key's repeats type it again where the input methods see no
+       text around the caret, as this view gives them none: press and
+       hold's accents menu, holding the repeats back, would type nothing. */
+    if(!composing&&[event isARepeat]){
+        NSString *text=[event characters];
+        const unichar first=[text length]?[text characterAtIndex:0]:0;
+        if([text length]&&!(first<0x20||first==0x7f||(first>=0xf700&&first<=0xf8ff))){emit_text(s,12,text,0);release_window(s);return;}
+    }
     [self interpretKeyEvents:@[event]];
     release_window(s);
 }
@@ -780,6 +807,22 @@ int zlm_window_menu_activate(NativeWindow *s,const char *const *path,int count){
         return 0;
     }
 }
+/* Whether NSCursor implements the class method itself: sending a private
+   selector it lacks raises, though respondsToSelector: may answer yes. */
+static int own_cursor(const char *name){
+    SEL wanted=sel_registerName(name);
+    if(name[0]!='_')return [NSCursor respondsToSelector:wanted];
+    unsigned int count=0;Method *methods=class_copyMethodList(object_getClass([NSCursor class]),&count);
+    int found=0;
+    for(unsigned int i=0;i<count&&!found;i++)if(method_getName(methods[i])==wanted)found=1;
+    free(methods);
+    return found;
+}
+static NSCursor *private_cursor(const char *name,const char *fallback){
+    if(own_cursor(name))return ((NSCursor *(*)(id,SEL))objc_msgSend)([NSCursor class],sel_registerName(name));
+    if(fallback&&own_cursor(fallback))return ((NSCursor *(*)(id,SEL))objc_msgSend)([NSCursor class],sel_registerName(fallback));
+    return nil;
+}
 /* The client cursor, by the order of core.Cursor. macOS has no public
    diagonal resize cursors before macOS 15, so those keep the arrow. */
 void zlm_window_cursor(NativeWindow *s,int cursor){
@@ -800,6 +843,18 @@ void zlm_window_cursor(NativeWindow *s,int cursor){
             case 20:value=[NSCursor dragLinkCursor];break;
             case 21:value=[NSCursor contextualMenuCursor];break;
             case 22:{NSImage *blank=[[[NSImage alloc] initWithSize:NSMakeSize(1,1)] autorelease];value=[[[NSCursor alloc] initWithImage:blank hotSpot:NSZeroPoint] autorelease];break;}
+            /* AppKit keeps these private, as WebKit uses them: progress,
+               wait, help, cell, zoom in and out. Looked up among the class
+               methods NSCursor implements itself, else the nearest public
+               one. All-scroll is the open hand, no-drop the forbidden one. */
+            case 23:value=private_cursor("busyButClickableCursor",nil);break;
+            case 24:value=private_cursor("_waitCursor","busyButClickableCursor");break;
+            case 25:value=private_cursor("_helpCursor",nil);break;
+            case 26:value=private_cursor("_cellCursor","crosshairCursor");break;
+            case 27:value=private_cursor("_zoomInCursor",nil);break;
+            case 28:value=private_cursor("_zoomOutCursor",nil);break;
+            case 29:value=[NSCursor openHandCursor];break;
+            case 30:value=[NSCursor operationNotAllowedCursor];break;
             default:value=nil;break;
         }
         [s->cursor release];s->cursor=[value retain];

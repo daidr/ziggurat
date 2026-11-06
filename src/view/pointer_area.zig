@@ -75,6 +75,10 @@ pub const PointerArea = struct {
     /// mouse, a browser scrolling with a touch) or the window loses the
     /// keyboard: it clicks nothing, and a gesture undoes what it began.
     press_canceled: bool = false,
+    /// What presses it and how hard, as of the press's last move, while
+    /// `pressed_button` is set: a mouse, a pen or a finger, and a pressure
+    /// from 0 to 1, a device that tells none pressing 0.5.
+    pointer: ?z.PointerSample = null,
     /// The pointer relative to `bounds` while it is hovered.
     position: ?Point = null,
     /// A primary click came up over it in this pass.
@@ -157,6 +161,7 @@ pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
     if (v.area_press) |held| if (held.id == node.id) {
         result.pressed = held.button == .primary and result.hovered;
         result.pressed_button = held.button;
+        result.pointer = v.pointer_sample;
     };
     if (comptime view.inspector.enabled) if (v.tools) |tools| {
         // The inspector shows the area hovered or pressed.
@@ -175,6 +180,7 @@ pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
                 result.pressed = value.button == .primary;
                 result.pressed_button = value.button;
                 result.pressed_inside = true;
+                result.pointer = v.pointer_sample;
                 result.double_clicked = value.button == .primary and value.clicks == 2;
             },
             .release => if (value.inside) switch (value.button) {

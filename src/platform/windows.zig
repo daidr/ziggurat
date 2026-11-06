@@ -1654,8 +1654,14 @@ fn cursorHandle(cursor: core.Cursor) c.HCURSOR {
         .resize_ns, .resize_n, .resize_s, .resize_row => 32645,
         .resize_nwse => 32642,
         .resize_nesw => 32643,
-        .not_allowed => 32648,
-        .crosshair => 32515,
+        .not_allowed, .no_drop => 32648,
+        .crosshair, .cell => 32515,
+        .progress => 32650,
+        .wait => 32514,
+        .help => 32651,
+        .all_scroll => 32646,
+        // Windows has no zoom cursors; the arrow stands in.
+        .zoom_in, .zoom_out => 32512,
     };
     return c.LoadCursorW(null, @ptrFromInt(id));
 }

@@ -1986,13 +1986,34 @@ body>.ziggurat-window{position:fixed}
           );
         } else deliver(1, encoder.encode(e.dataTransfer.getData("text/plain")));
       });
+      // The device and its pressure: width 1 a mouse, 2 a pen, 3 a finger;
+      // dx the pressure of a pen or a finger, -1 for a mouse, which tells
+      // none.
+      const sample = (e) => {
+        const width = { mouse: 1, pen: 2, touch: 3 }[e.pointerType] || 1;
+        return { width, dx: width === 1 ? -1 : e.pressure };
+      };
+      const buttons = { 0: 0, 1: 2, 2: 1, 3: 3, 4: 4 };
+      // The bit of `buttons` for a `button`, as Pointer Events number them.
+      const bits = { 0: 1, 1: 4, 2: 2, 3: 8, 4: 16 };
       c.addEventListener("pointermove", (e) => {
+        // A second finger presses nothing, as on the desktops.
+        if (!e.isPrimary) return;
         this.pointer = [e.clientX, e.clientY];
         const [x, y] = this.point(win, e);
-        this.send(win, { kind: 5, x, y, flags: this.mods(e) });
+        const button = buttons[e.button];
+        // A button going down or up while another is held comes as a move
+        // with its button (a chord).
+        if (e.button >= 0 && button !== undefined && this.allowed(win)) {
+          const down = (e.buttons & bits[e.button]) !== 0;
+          this.send(win, { kind: down ? 3 : 4, key: button, x, y, flags: this.mods(e), ...sample(e) });
+          return;
+        }
+        this.send(win, { kind: 5, x, y, flags: this.mods(e), ...sample(e) });
       });
       c.addEventListener("pointerdown", (e) => {
         e.preventDefault();
+        if (!e.isPrimary) return;
         this.pointer = [e.clientX, e.clientY];
         if (document.activeElement !== input) input.focus({ preventScroll: true });
         const [x, y] = this.point(win, e);
@@ -2002,17 +2023,20 @@ body>.ziggurat-window{position:fixed}
           c.setPointerCapture(e.pointerId);
         } catch (_) {}
         if (!this.allowed(win)) return;
-        this.send(win, { kind: 3, key: button, x, y, flags: this.mods(e) });
+        this.send(win, { kind: 3, key: button, x, y, flags: this.mods(e), ...sample(e) });
       });
       const up = (e) => {
+        if (!e.isPrimary) return;
         const [x, y] = this.point(win, e);
         const button = { 0: 0, 1: 2, 2: 1, 3: 3, 4: 4 }[e.button];
         if (button === undefined) return;
-        this.send(win, { kind: 4, key: button, x, y, flags: this.mods(e) });
+        this.send(win, { kind: 4, key: button, x, y, flags: this.mods(e), ...sample(e) });
       };
       c.addEventListener("pointerup", up);
+      // The browser took the pointer, as a touch it scrolls the page with:
+      // the press ends without a release, so that it clicks nothing.
       c.addEventListener("pointercancel", (e) => {
-        up(e);
+        if (!e.isPrimary) return;
         this.send(win, { kind: 8 });
       });
       // iOS sends a tap's mouse events after its pointer events: the
