@@ -3,7 +3,9 @@ const zio = @import("ziggurat_io");
 const update = @import("root.zig");
 const publication = @import("publication.zig");
 
-pub const Entry = struct { name: []const u8, bytes: []const u8 };
+/// `mode` carries the payload's Unix permission bits; null publishes the
+/// file with the default mode (the executable stays executable).
+pub const Entry = struct { name: []const u8, bytes: []const u8, mode: ?u32 = null };
 
 /// Fixed DOS date 1980-01-01 so equal inputs produce equal archives.
 const dos_date: u16 = (1 << 5) | 1;
@@ -65,7 +67,7 @@ pub const PackageInfo = struct {
     executable: []const u8,
 };
 
-const Payload = struct { path: []const u8, bytes: u64, sha256: []const u8 };
+const Payload = struct { path: []const u8, bytes: u64, sha256: []const u8, mode: ?u32 = null };
 
 /// Build an update package: payload files plus a package.json inventory that
 /// `publication.publishZip` accepts. Entries are sorted by name; the caller
@@ -89,7 +91,7 @@ pub fn buildPackage(allocator: std.mem.Allocator, info: PackageInfo, files: []co
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(entry.bytes, &digest, .{});
         hex.* = std.fmt.bytesToHex(digest, .lower);
-        item.* = .{ .path = entry.name, .bytes = entry.bytes.len, .sha256 = hex };
+        item.* = .{ .path = entry.name, .bytes = entry.bytes.len, .sha256 = hex, .mode = if (entry.mode) |mode| mode & 0o7777 else null };
     }
     if (!found_executable) return error.MissingExecutable;
     var version_buffer: [32]u8 = undefined;
@@ -102,7 +104,7 @@ pub fn buildPackage(allocator: std.mem.Allocator, info: PackageInfo, files: []co
         .target = info.target,
         .executable = info.executable,
         .files = payload,
-    }, .{ .whitespace = .indent_2 });
+    }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
     defer allocator.free(inventory);
     sorted[files.len] = .{ .name = "package.json", .bytes = inventory };
     std.mem.sort(Entry, sorted, {}, lessThan);
@@ -145,4 +147,41 @@ test "stored package round-trips through publication and is deterministic" {
     const bytes = try temp.dir.readFileAlloc(zio.io(), try published.relativePath(&buffer), allocator, .limited(64));
     defer allocator.free(bytes);
     try std.testing.expectEqualStrings(files[0].bytes, bytes);
+}
+
+test "published payloads keep the permission bits the package recorded" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const info: PackageInfo = .{ .name = "Modes", .identity = "org.ziggurat.ModeFixture", .target = "linux-x86_64", .version = .{ .major = 1, .minor = 1, .patch = 0 }, .executable = "app" };
+    const files = [_]Entry{
+        .{ .name = "app", .bytes = "#!/bin/sh\n" },
+        .{ .name = "readonly", .bytes = "new", .mode = 0o444 },
+        .{ .name = "executable", .bytes = "same", .mode = 0o555 },
+        .{ .name = "shared", .bytes = "new", .mode = 0o660 },
+    };
+    const zip = try buildPackage(allocator, info, &files);
+    defer allocator.free(zip);
+    const key = try update.Ed25519.KeyPair.generateDeterministic(@splat(6));
+    var manifest: update.Manifest = .{ .identity = info.identity, .target = info.target, .version = info.version, .url = "https://example.invalid/m.zip", .bytes = zip.len, .sha256 = undefined, .signature = undefined };
+    std.crypto.hash.sha2.Sha256.hash(zip, &manifest.sha256, .{});
+    const json = try update.sign(allocator, manifest, key);
+    defer allocator.free(json);
+    const verified = try update.parseAndVerify(allocator, json, .{ .identity = info.identity, .target = info.target, .current_version = .{ .major = 1, .minor = 0, .patch = 0 }, .public_key = key.public_key.toBytes() });
+    defer verified.deinit();
+    var temp = std.testing.tmpDir(.{ .iterate = true });
+    defer temp.cleanup();
+    var file = try temp.dir.createFile(zio.io(), "download.zip", .{ .read = true });
+    defer file.close(zio.io());
+    try file.writeStreamingAll(zio.io(), zip);
+    const published = try publication.publishZip(allocator, temp.dir, file, &verified, .{});
+    var buffer: [512]u8 = undefined;
+    const executable_path = try published.relativePath(&buffer);
+    const release = std.fs.path.dirname(executable_path).?;
+    const expected = [_]struct { name: []const u8, mode: u32 }{ .{ .name = "app", .mode = 0o755 }, .{ .name = "readonly", .mode = 0o444 }, .{ .name = "executable", .mode = 0o555 }, .{ .name = "shared", .mode = 0o660 } };
+    for (expected) |item| {
+        var path_buffer: [512]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ release, item.name });
+        const stat = try temp.dir.statFile(zio.io(), path, .{});
+        try std.testing.expectEqual(item.mode, zio.modeOf(stat.permissions) & 0o777);
+    }
 }

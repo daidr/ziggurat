@@ -265,10 +265,30 @@ const Walker = struct {
         } else return error.InvalidMessage;
     }
 
+    const SignStem = struct { display: number.SignDisplay, accounting: bool = false };
+
+    /// ICU's sign stems, long (`sign-always`) and short (`+!`).
+    fn signStem(stem: []const u8) ?SignStem {
+        const table = [_]struct { []const u8, []const u8, SignStem }{
+            .{ "sign-auto", "+", .{ .display = .auto } },
+            .{ "sign-always", "+!", .{ .display = .always } },
+            .{ "sign-never", "+_", .{ .display = .never } },
+            .{ "sign-except-zero", "+?", .{ .display = .except_zero } },
+            .{ "sign-negative", "+-", .{ .display = .negative } },
+            .{ "sign-accounting-always", "()!", .{ .display = .always, .accounting = true } },
+            .{ "sign-accounting-except-zero", "()?", .{ .display = .except_zero, .accounting = true } },
+            .{ "sign-accounting-negative", "()-", .{ .display = .negative, .accounting = true } },
+        };
+        for (table) |entry| if (std.mem.eql(u8, stem, entry[0]) or std.mem.eql(u8, stem, entry[1])) return entry[2];
+        return null;
+    }
+
     /// `, ::stems` then the closing brace, as ICU's number skeletons:
     /// `currency/EUR`, `compact-short` (or `K`), `compact-long` (`KK`),
     /// `unit-width-iso-code`, `unit-width-full-name`, `unit-width-narrow`,
-    /// `sign-accounting`, `percent` and `.00`-style fraction digits. Null,
+    /// `sign-accounting`, the sign stems (`sign-always` or `+!`,
+    /// `sign-except-zero`, `sign-never`, `sign-negative` and their
+    /// accounting forms), `percent` and `.00`-style fraction digits. Null,
     /// with nothing read, when the style is not a skeleton.
     fn skeleton(self: *Walker) Error!?number.Options {
         var at = self.position;
@@ -302,8 +322,11 @@ const Walker = struct {
                 options.currency_display = .narrow_symbol;
             } else if (std.mem.eql(u8, stem, "unit-width-short")) {
                 options.currency_display = .symbol;
-            } else if (std.mem.eql(u8, stem, "sign-accounting")) {
+            } else if (std.mem.eql(u8, stem, "sign-accounting") or std.mem.eql(u8, stem, "()")) {
                 options.currency_sign = .accounting;
+            } else if (signStem(stem)) |sign| {
+                options.sign_display = sign.display;
+                if (sign.accounting) options.currency_sign = .accounting;
             } else if (std.mem.eql(u8, stem, "percent")) {
                 options.style = .percent;
             } else if (stem[0] == '.' and stem.len <= 1 + number.max_fraction_digits) {
@@ -548,6 +571,10 @@ test "number skeletons: currencies and compact notation" {
     try expectFormat("en", "{p, number, ::currency/EUR unit-width-iso-code}", &args(.{ .p = 5 }), "EUR\u{a0}5.00");
     try expectFormat("en", "{p, number, ::currency/EUR unit-width-full-name}", &args(.{ .p = 1 }), "1.00 euros");
     try expectFormat("en", "{p, number, ::currency/USD sign-accounting}", &args(.{ .p = -2 }), "($2.00)");
+    try expectFormat("en", "{p, number, ::percent sign-always}", &args(.{ .p = 0.25 }), "+25%");
+    try expectFormat("en", "{p, number, ::+?}", &args(.{ .p = 0 }), "0");
+    try expectFormat("en", "{p, number, ::+_}", &args(.{ .p = -3 }), "3");
+    try expectFormat("en", "{p, number, ::currency/USD ()!}", &args(.{ .p = 2 }), "+$2.00");
     try expectFormat("en", "{n, number, ::compact-short} / {n, number, ::KK}", &args(.{ .n = 1234567 }), "1.2M / 1.2 million");
     try expectFormat("en", "{n, number, ::.00}", &args(.{ .n = 3 }), "3.00");
     try expectFormat("en", "{n, number, ::percent .#}", &args(.{ .n = 0.125 }), "12.5%");

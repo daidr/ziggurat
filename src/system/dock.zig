@@ -41,7 +41,7 @@ pub const Dock = struct {
         if (self.app) |current| if (current != app) return error.AlreadyAttached;
         const plan = try menus.validate(items, false);
         if (items.len == 0) return self.clear();
-        var labels: [types.max_menu_items][512]u8 = undefined;
+        var labels: [types.max_menu_items][types.menu_text_bytes]u8 = undefined;
         var native_items: [types.max_menu_items]native.NativeItem = undefined;
         var ids: [types.max_menu_items]u64 = undefined;
         var enabled: [types.max_menu_items]bool = undefined;

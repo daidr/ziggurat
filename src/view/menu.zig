@@ -58,7 +58,19 @@ pub const ItemOptions = struct {
     /// with the item highlighted, as a row of radio items for a theme in
     /// an account menu that switches without closing it.
     keep_open: bool = false,
+    /// Shown as the pointer rests on the item, as `View.tooltip` shows
+    /// one, to say what it does; also its description to assistive
+    /// technology.
+    tooltip: []const u8 = "",
+    /// An icon before the label, drawn by the Host's `Options.icons` in the
+    /// item's text color. The items of a panel with one keep its column,
+    /// so their labels line up.
+    icon: ?view.Icon = null,
 };
+
+/// Side of a menu item's icon, and the room its column takes, in DIP.
+pub const icon_size: f32 = 16;
+pub const icon_column: f32 = icon_size + 6;
 
 /// Which menu is open and where its highlight is. It belongs to the View
 /// and outlives passes.
@@ -184,10 +196,25 @@ pub fn popoverMenuButton(self: *View, label: []const u8, style: Style) Error!boo
 /// choice, by press, Enter or Space; the menu then closes.
 pub fn menuItem(self: *View, label: []const u8, options: ItemOptions, style: Style) Error!bool {
     const panel = try currentPanel(self);
+    const panel_ref = panel;
+    const panel_id = panel.id;
+    const panel_has_icons = panel.menu_icons;
     const node = try item(self, panel, label, style);
     node.mark = if (options.checked == null) .none else if (options.radio) .radio else .check;
     node.checked = options.checked orelse false;
     node.badge = try self.copyText(options.shortcut);
+    if (options.tooltip.len > 0) node.tooltip = try self.copyText(options.tooltip);
+    if (options.icon) |which| {
+        node.menu_icon = which;
+        if (!panel_has_icons) {
+            // The items built before keep the column too.
+            const all = self.buffers.nodes[0..self.len];
+            for (all) |*other| if (other.kind == .menu_item and other.semantic_parent == panel_id) {
+                other.menu_icons = true;
+            };
+            panel_ref.menu_icons = true;
+        }
+    }
     if (self.takeEvent(node.id) == null or !node.style.enabled) return false;
     if (options.keep_open) self.menu.highlight = node.id else close(self, true);
     return true;
@@ -396,6 +423,7 @@ fn itemNode(self: *View, panel: *Node, label: []const u8, style: Style, plain: b
     };
     node.highlighted = if (state.highlight) |current| current == id else false;
     if (node.highlighted) state.seen = true;
+    node.menu_icons = panel.menu_icons;
     return node;
 }
 
@@ -518,6 +546,12 @@ pub fn panelAt(self: *const View, point: Point) bool {
     const overlay = &self.overlay.menu;
     for (overlay.panels[0..overlay.panel_count]) |rect| if (contains(rect, point)) return true;
     return false;
+}
+
+/// The id of the item of the open menu under `point`, for its tooltip.
+pub fn itemUnder(self: *const View, point: Point) ?u64 {
+    if (self.menu.open == null) return null;
+    return if (itemAt(self, point)) |entry| entry.id else null;
 }
 
 fn itemAt(self: *const View, point: Point) ?Overlay.Item {

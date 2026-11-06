@@ -31,6 +31,9 @@ pub const NativeItem = extern struct {
     command: i32,
     icon: ?*anyopaque = null,
     role: i32 = 0,
+    /// Null for none.
+    subtitle: ?[*:0]const u8 = null,
+    tooltip: ?[*:0]const u8 = null,
 };
 const Done = *const fn (?*anyopaque, u64, i32) callconv(.c) void;
 const TrayEvent = *const fn (?*anyopaque, u64, i32, i32, i32) callconv(.c) void;
@@ -100,7 +103,7 @@ const Popup = struct {
         if (self.pending.native != null) return error.MenuAlreadyPending;
         if (request == 0) return error.InvalidRequestId;
         const plan = try menus.validate(items, true);
-        var labels: [types.max_menu_items][512]u8 = undefined;
+        var labels: [types.max_menu_items][types.menu_text_bytes]u8 = undefined;
         var native_items: [types.max_menu_items]NativeItem = undefined;
         var ids: [types.max_menu_items]u64 = undefined;
         var enabled: [types.max_menu_items]bool = undefined;
@@ -246,7 +249,7 @@ pub const Owner = struct {
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
         const plan = try menus.validate(items, false);
-        var labels: [types.max_menu_items][512]u8 = undefined;
+        var labels: [types.max_menu_items][types.menu_text_bytes]u8 = undefined;
         var native_items: [types.max_menu_items]NativeItem = undefined;
         var ids: [types.max_menu_items]u64 = undefined;
         var enabled: [types.max_menu_items]bool = undefined;
@@ -687,7 +690,7 @@ pub const Tray = struct {
         app.assertOwner();
         const native = self.native orelse return error.NotAttached;
         const plan = try menus.validate(items, false);
-        var labels: [types.max_menu_items][512]u8 = undefined;
+        var labels: [types.max_menu_items][types.menu_text_bytes]u8 = undefined;
         var native_items: [types.max_menu_items]NativeItem = undefined;
         var ids: [types.max_menu_items]u64 = undefined;
         var enabled: [types.max_menu_items]bool = undefined;
@@ -828,10 +831,13 @@ pub fn roleCode(id: u64) i32 {
 
 /// Converts menu items into the C layout. Labels lose their mnemonics in
 /// caller storage; command indices follow declaration order.
-pub fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *[types.max_menu_items][512]u8, native_items: *[types.max_menu_items]NativeItem, ids: *[types.max_menu_items]u64, enabled: *[types.max_menu_items]bool) !usize {
+pub fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *[types.max_menu_items][types.menu_text_bytes]u8, native_items: *[types.max_menu_items]NativeItem, ids: *[types.max_menu_items]u64, enabled: *[types.max_menu_items]bool) !usize {
     var commands: usize = 0;
     for (items, 0..) |item, index| {
+        // The label, subtitle and tooltip share the item's buffer.
         const label = try menus.plainLabel(&labels[index], item.label);
+        const subtitle = try menus.terminated(labels[index][label.len + 1 ..], item.subtitle);
+        const tooltip = try menus.terminated(labels[index][label.len + subtitle.len + 2 ..], item.tooltip);
         var command: i32 = -1;
         if (item.kind == .command) {
             command = @intCast(commands);
@@ -852,6 +858,8 @@ pub fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *
             .command = command,
             .icon = if (item.icon) |icon| icon.native else null,
             .role = if (item.kind != .separator) roleCode(item.id) else 0,
+            .subtitle = if (item.subtitle.len > 0) subtitle.ptr else null,
+            .tooltip = if (item.tooltip.len > 0) tooltip.ptr else null,
         };
     }
     return commands;

@@ -654,6 +654,8 @@ fn readHandshake(allocator: std.mem.Allocator, connection: *std.http.Client.Conn
         }
         return error.HandshakeRejected;
     }
+    // Offering subprotocols makes the server's choice mandatory.
+    if (offered.len > 0) return error.HandshakeRejected;
     return try allocator.dupe(u8, "");
 }
 
@@ -892,6 +894,7 @@ test "cancel aborts a running socket and a rejected handshake fails" {
     }.run;
     var peer = try TestPeer.init(script);
     defer peer.deinit();
+    peer.protocol = "x";
     const thread = try std.Thread.spawn(.{}, TestPeer.serve, .{&peer});
     defer thread.join();
     defer peer.release.set();
@@ -930,6 +933,37 @@ test "cancel aborts a running socket and a rejected handshake fails" {
     defer http_thread.join();
     const url = try std.fmt.bufPrint(&buffer, "ws://127.0.0.1:{d}/", .{http_server.port()});
     try std.testing.expectError(error.HandshakeRejected, Socket.connect(std.testing.allocator, &client, url, .{}, null));
+}
+
+test "an offered subprotocol must be acknowledged" {
+    const script = struct {
+        fn run(_: *TestPeer, _: *std.http.Server.WebSocket, _: std.Io.net.Stream) anyerror!void {}
+    }.run;
+    const Case = struct { answer: ?[]const u8, offered: []const []const u8, opens: bool };
+    const cases = [_]Case{
+        .{ .answer = null, .offered = &.{"chat"}, .opens = false },
+        .{ .answer = "", .offered = &.{"chat"}, .opens = false },
+        .{ .answer = "chat", .offered = &.{ "chat", "v2" }, .opens = true },
+        .{ .answer = null, .offered = &.{}, .opens = true },
+    };
+    for (cases) |case| {
+        var peer = try TestPeer.init(script);
+        defer peer.deinit();
+        peer.protocol = case.answer;
+        const thread = try std.Thread.spawn(.{}, TestPeer.serve, .{&peer});
+        defer thread.join();
+        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
+        defer client.deinit();
+        var buffer: [64]u8 = undefined;
+        const result = Socket.connect(std.testing.allocator, &client, try peer.url(&buffer), .{ .protocols = case.offered }, null);
+        if (case.opens) {
+            const socket = try result;
+            defer socket.deinit();
+            try std.testing.expectEqualStrings(case.answer orelse "", socket.protocol);
+        } else {
+            try std.testing.expectError(error.HandshakeRejected, result);
+        }
+    }
 }
 
 test "output queued before cancel fails as a write error" {

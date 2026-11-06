@@ -45,7 +45,7 @@ pub fn build(items: []const types.Item, plan: *const menus.Plan, popup: bool, fi
             if (c.AppendMenuW(parent_menu, c.MF_SEPARATOR, 0, null) == 0) return error.MenuCreationFailed;
             continue;
         }
-        var label: [320]u16 = undefined;
+        var label: [1024]u16 = undefined;
         const text = try labelText(&label, item);
         const flags: c.UINT = @as(c.UINT, @intCast(c.MF_STRING)) | @as(c.UINT, @intCast(if (item.enabled) 0 else c.MF_GRAYED)) | @as(c.UINT, @intCast(if (item.checked) c.MF_CHECKED else 0));
         if (item.kind == .submenu) {
@@ -99,8 +99,9 @@ pub fn iconTint() u32 {
 }
 
 fn labelText(destination: []u16, item: types.Item) ![:0]const u16 {
-    var bytes: [1024]u8 = undefined;
-    var label = item.label;
+    var bytes: [2048]u8 = undefined;
+    // The subtitle follows the label on the same line.
+    var label = try menus.windowsLabel(bytes[1024..], item);
     if (item.accelerator) |accelerator| {
         @memcpy(bytes[0..label.len], label);
         bytes[label.len] = '\t';

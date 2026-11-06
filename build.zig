@@ -2624,6 +2624,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "ipc", .module = ipc }, .{ .name = "fixture", .module = ipc_fixture } },
     }) });
     const update_tests = addTest(b, .{ .root_module = update });
+    b.step("test-update", "Run signed update, package, delta and publication tests").dependOn(&b.addRunArtifact(update_tests).step);
     const net_tests = addTest(b, .{ .root_module = net });
     const producer_service = b.createModule(.{ .root_source_file = b.path("tests/resource_producer_service.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_ipc", .module = ipc }, .{ .name = "ziggurat_resource_stream", .module = resource_stream } } });
     const producer_fixture_tests = addTest(b, .{ .root_module = b.createModule(.{

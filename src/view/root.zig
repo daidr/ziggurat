@@ -1262,6 +1262,11 @@ pub const Node = struct {
     badge: []const u8 = "",
     /// What marks a menu item; see `MenuItemOptions`.
     mark: ui.widgets.MenuMark = .none,
+    /// The icon a menu item shows before its label.
+    menu_icon: ?Icon = null,
+    /// A menu item keeps the room of its panel's icon column, or a menu
+    /// panel has one, as an item of it shows an icon.
+    menu_icons: bool = false,
     /// How a dialog is placed and dismissed.
     modal: DialogOptions = .{},
     /// Laid out right to left: a container mirrors its children.
@@ -4471,7 +4476,11 @@ pub const View = struct {
         const highlighted = menu_controls.hover(self, point);
         var target: ?u64 = null;
         if (point) |at| find: {
-            if (menu_controls.panelAt(self, at)) break :find;
+            // Over a menu, only its items' tooltips show.
+            if (menu_controls.panelAt(self, at)) {
+                target = menu_controls.itemUnder(self, at);
+                break :find;
+            }
             if (self.overlay.popup) |list| if (contains(list.rect, at)) break :find;
             const panel = self.popoverAt(at);
             var index = self.overlay.tip_count;
@@ -4787,7 +4796,8 @@ pub const View = struct {
                 // Room for the mark, the label, the shortcut and the arrow.
                 const mark = ui.widgets.menu_mark_width;
                 const shortcut = if (node.badge.len > 0) measurer.textSize(node.badge, null).width + metrics.label_gap else 0;
-                break :blk .{ .width = 2 * metrics.content_inset + mark + metrics.label_gap / 2 + text_size.width + shortcut + (if (node.expanded != null) mark else 0), .height = text_size.height + metrics.content_inset + 4 };
+                const lead: f32 = if (node.menu_icons) menu_controls.icon_column else 0;
+                break :blk .{ .width = 2 * metrics.content_inset + mark + lead + metrics.label_gap / 2 + text_size.width + shortcut + (if (node.expanded != null) mark else 0), .height = @max(text_size.height, if (node.menu_icons) menu_controls.icon_size else 0) + metrics.content_inset + 4 };
             },
             .menu_separator => .{ .width = 0, .height = menu_controls.separator_height },
             .button, .tab, .segment => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
@@ -6365,16 +6375,27 @@ pub const View = struct {
                         .expanded = node.expanded,
                         .highlighted = node.highlighted,
                     });
-                } else try target.menuItem(node.id, bounds, node.text, .{
-                    .control = control,
-                    .mark = node.mark,
-                    .checked = node.checked,
-                    .expanded = node.expanded,
-                    .highlighted = node.highlighted,
-                    .shortcut = node.badge,
-                    .shortcut_width = if (node.badge.len > 0) self.measurer.textSize(node.badge, null).width else 0,
-                    .rtl = node.rtl,
-                }),
+                } else {
+                    try target.menuItem(node.id, bounds, node.text, .{
+                        .control = control,
+                        .mark = node.mark,
+                        .checked = node.checked,
+                        .expanded = node.expanded,
+                        .highlighted = node.highlighted,
+                        .shortcut = node.badge,
+                        .shortcut_width = if (node.badge.len > 0) self.measurer.textSize(node.badge, null).width else 0,
+                        .rtl = node.rtl,
+                        .lead = if (node.menu_icons) menu_controls.icon_column else 0,
+                    });
+                    if (node.menu_icon) |which| if (@TypeOf(target) == *ui.Frame) if (self.icons) |painter| {
+                        const palette = theme.palette;
+                        const color = if (!node.style.enabled) palette.disabled_text else if (node.highlighted) palette.on_accent else palette.text;
+                        const side = menu_controls.icon_size;
+                        const pad = theme.metrics.content_inset;
+                        const x = if (node.rtl) bounds.x + bounds.width - pad - ui.widgets.menu_mark_width - side else bounds.x + pad + ui.widgets.menu_mark_width;
+                        try painter.paint(painter.context, target, which, .{ .x = x, .y = bounds.y + (bounds.height - side) / 2, .width = side, .height = side }, ui.Color.rgb(color), node.rtl and which.directional());
+                    };
+                },
                 .menu_separator => {
                     const pad = theme.metrics.content_inset;
                     const line = theme.metrics.border / 2;

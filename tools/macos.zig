@@ -601,10 +601,46 @@ pub fn dmgFileName(allocator: std.mem.Allocator, stem: []const u8, version: []co
     return std.fmt.allocPrint(allocator, "{s}-{s}.dmg", .{ stem, version });
 }
 
-/// Creates a writable HFS+ image of `source`, as large as its contents
-/// need. hdiutil runs without -quiet, which would leave out why it failed.
-pub fn hdiutilCreateArgs(volume: []const u8, source: []const u8, output: []const u8) [14][]const u8 {
-    return .{ "hdiutil", "create", "-ov", "-volname", volume, "-srcfolder", source, "-fs", "HFS+", "-fsargs", "-c c=64,a=16,e=16", "-format", "UDRW", output };
+/// The filesystems `createDmg` tries, in order.
+pub const dmg_filesystems = [_][]const u8{ "HFS+", "APFS" };
+
+/// Creates a writable image of `source` on the filesystem `fs`, HFS+ or
+/// APFS, as large as its contents need. hdiutil runs without -quiet, which
+/// would leave out why it failed.
+pub fn hdiutilCreateArgs(buffer: *[14][]const u8, fs: []const u8, volume: []const u8, source: []const u8, output: []const u8) []const []const u8 {
+    const head = [_][]const u8{ "hdiutil", "create", "-ov", "-volname", volume, "-srcfolder", source, "-fs", fs };
+    @memcpy(buffer[0..head.len], &head);
+    var len: usize = head.len;
+    if (std.mem.eql(u8, fs, "HFS+")) {
+        buffer[len] = "-fsargs";
+        buffer[len + 1] = "-c c=64,a=16,e=16";
+        len += 2;
+    }
+    buffer[len] = "-format";
+    buffer[len + 1] = "UDRW";
+    buffer[len + 2] = output;
+    return buffer[0 .. len + 3];
+}
+
+/// Creates the writable image on HFS+, or on APFS when HFS+ fails for
+/// another reason than a busy resource: on recent macOS, "hdiutil create
+/// -srcfolder" can fail on HFS+ with "no mountable file systems" or
+/// "Device not configured" and work on APFS. APFS needs macOS 10.13, and
+/// the ULMO image it is converted to needs 10.15 already. What each
+/// filesystem failed with is printed.
+fn createDmg(allocator: std.mem.Allocator, volume: []const u8, source: []const u8, output: []const u8) !void {
+    for (dmg_filesystems) |fs| {
+        var buffer: [14][]const u8 = undefined;
+        hdiutilRetrying(allocator, hdiutilCreateArgs(&buffer, fs, volume, source, output)) catch |err| {
+            std.debug.print("ziggurat: the disk image could not be created on {s}\n", .{fs});
+            // Still busy after the retries: another filesystem would wait
+            // for the same.
+            if (err == error.ResourceBusy) return error.CommandFailed;
+            continue;
+        };
+        return;
+    }
+    return error.CommandFailed;
 }
 
 /// The first device `hdiutil attach` prints: the whole disk, as /dev/disk4.
@@ -630,10 +666,11 @@ fn hdiutilRetrying(allocator: std.mem.Allocator, argv: []const []const u8) !void
         const output = try run(allocator, argv);
         if (output.ok) return;
         if (first == null) first = output.text;
-        if (attempt == 4 or std.mem.indexOf(u8, output.text, "Resource busy") == null) {
+        const busy = std.mem.indexOf(u8, output.text, "Resource busy") != null;
+        if (attempt == 4 or !busy) {
             std.debug.print("ziggurat: {s} failed\n{s}\n", .{ try std.mem.join(allocator, " ", argv), std.mem.trim(u8, output.text, " \r\n") });
             if (attempt > 0) std.debug.print("first attempt: {s}\n", .{std.mem.trim(u8, first.?, " \r\n")});
-            return error.CommandFailed;
+            return if (busy) error.ResourceBusy else error.CommandFailed;
         }
         zio.sleep((@as(u64, 2) << attempt) * std.time.ns_per_s);
     }
@@ -688,7 +725,8 @@ pub fn buildDmg(allocator: std.mem.Allocator, options: DmgOptions) !void {
     // The image starts as a copy of a folder holding all it shows. ditto
     // keeps the bundle exactly as signed, and copies it without cloning:
     // hdiutil counts the blocks a file takes, fewer than its size in a
-    // sparse file, which HFS+ cannot keep sparse.
+    // sparse file, which HFS+ cannot keep sparse; on HFS+ and APFS every
+    // file takes whole blocks.
     const source = try std.fs.path.join(allocator, &.{ work.path, "src" });
     const app_name = std.fs.path.basename(options.app);
     try std.Io.Dir.cwd().createDirPath(zio.io(), source);
@@ -705,7 +743,7 @@ pub fn buildDmg(allocator: std.mem.Allocator, options: DmgOptions) !void {
     if (has_icon) try std.Io.Dir.cwd().copyFile(volume_icon, source_dir, ".VolumeIcon.icns", zio.io(), .{});
 
     const writable = try std.fs.path.join(allocator, &.{ work.path, "rw.dmg" });
-    try hdiutilRetrying(allocator, &hdiutilCreateArgs(options.volume, source, writable));
+    try createDmg(allocator, options.volume, source, writable);
     const mount = try std.fs.path.join(allocator, &.{ work.path, "mnt" });
     try std.Io.Dir.cwd().createDirPath(zio.io(), mount);
     const attach = try run(allocator, &.{ "hdiutil", "attach", "-readwrite", "-noverify", "-noautoopen", "-nobrowse", "-mountpoint", mount, writable });
@@ -920,9 +958,13 @@ test "signing, disk image and notarization arguments" {
     try testing.expectEqualStrings("hello-1.2.0.0.dmg", try dmgFileName(allocator, "hello", "1.2.0.0", null));
     try testing.expectEqualStrings("/dev/disk4", attachedDisk("/dev/disk4          \tGUID_partition_scheme\n/dev/disk4s1\tApple_HFS\t/tmp/mnt\n").?);
     try testing.expectEqual(null, attachedDisk("nothing\n"));
-    const create = hdiutilCreateArgs("Hello", "src", "rw.dmg");
+    var create_buffer: [14][]const u8 = undefined;
+    const create = hdiutilCreateArgs(&create_buffer, "HFS+", "Hello", "src", "rw.dmg");
     try testing.expectEqualStrings("HFS+", create[8]);
+    try testing.expectEqualStrings("-fsargs", create[9]);
     try testing.expectEqualStrings("UDRW", create[12]);
+    const apfs = hdiutilCreateArgs(&create_buffer, "APFS", "Hello", "src", "rw.dmg");
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "hdiutil", "create", "-ov", "-volname", "Hello", "-srcfolder", "src", "-fs", "APFS", "-format", "UDRW", "rw.dmg" }), apfs);
     const hex = finderInfoHex();
     try testing.expectEqualStrings("0000000000000000" ++ "0400", hex[0..20]);
     const verdict = notaryVerdict(allocator, "Conducting pre-submission checks...\n{\"id\":\"abc\",\"status\":\"Invalid\",\"message\":\"Processing complete\"}\n");

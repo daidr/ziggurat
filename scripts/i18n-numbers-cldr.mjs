@@ -190,6 +190,13 @@ for (const l of locales) {
   for (const c of ["USD", "EUR", "JPY", "CHF"]) for (const display of ["symbol", "narrowSymbol", "code", "name"]) for (const [sign, v] of [["standard", 1], ["standard", 1234.56], ["standard", -1234.56], ["accounting", -1234.56]]) {
     cases.push({ locale: l, kind: "currency", currency: c, display, sign, value: v, want: new Intl.NumberFormat(l, { style: "currency", currency: c, currencyDisplay: display, currencySign: sign, numberingSystem: "latn" }).format(v) });
   }
+  // Sign displays, with the plus where the locale puts its minus.
+  for (const sign of ["always", "exceptZero", "negative", "never"]) {
+    for (const v of [1234.5, -1234.5, 0, 0.0001, -0.0001]) cases.push({ locale: l, kind: "sign", display: "decimal", sign, value: v, want: new Intl.NumberFormat(l, { signDisplay: sign, numberingSystem: "latn" }).format(v) });
+    for (const v of [0.25, -0.25, 0.00001]) cases.push({ locale: l, kind: "sign", display: "percent", sign, value: v, want: new Intl.NumberFormat(l, { style: "percent", signDisplay: sign, numberingSystem: "latn" }).format(v) });
+    for (const [currencySign, v] of [["standard", 1234.56], ["standard", -1234.56], ["standard", 0], ["accounting", 1234.56], ["accounting", -1234.56]]) cases.push({ locale: l, kind: "sign", display: currencySign, currency: "EUR", sign, value: v, want: new Intl.NumberFormat(l, { style: "currency", currency: "EUR", currencySign, signDisplay: sign, numberingSystem: "latn" }).format(v) });
+    for (const v of [1234, -1234, 0]) cases.push({ locale: l, kind: "sign", display: "compact", sign, value: v, want: new Intl.NumberFormat(l, { notation: "compact", signDisplay: sign, numberingSystem: "latn" }).format(v) });
+  }
   for (const v of [1234.56, 2.1e6]) cases.push({ locale: l, kind: "compact-currency", currency: "USD", display: "short", value: v, want: new Intl.NumberFormat(l, { style: "currency", currency: "USD", notation: "compact", numberingSystem: "latn" }).format(v) });
 }
 mkdirSync(new URL("../src/i18n/testdata/", import.meta.url), { recursive: true });

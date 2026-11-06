@@ -45,6 +45,8 @@ typedef struct ZsmItem {
     int32_t command;
     void *icon;
     int32_t role;
+    /* NULL for none. */
+    const char *subtitle, *tooltip;
 } ZsmItem;
 enum { KIND_COMMAND = 0, KIND_SUBMENU = 1, KIND_SEPARATOR = 2 };
 
@@ -140,6 +142,13 @@ static NSMenu *build_menu(const ZsmItem *items, uint32_t count, id target, ZsmCo
         NSString *label = zsm_string(it->label);
         SEL native = role_selector(it->role);
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:label action:it->kind == KIND_COMMAND ? (native ?: @selector(zsmClicked:)) : NULL keyEquivalent:key_string(it->key)];
+        /* macOS 14 shows a subtitle under the title; before, it follows it. */
+        if (it->subtitle && it->subtitle[0]) {
+            NSString *subtitle = zsm_string(it->subtitle);
+            if ([item respondsToSelector:@selector(setSubtitle:)]) [item performSelector:@selector(setSubtitle:) withObject:subtitle];
+            else [item setTitle:[NSString stringWithFormat:@"%@ — %@", label, subtitle]];
+        }
+        if (it->tooltip && it->tooltip[0]) [item setToolTip:zsm_string(it->tooltip)];
         if (it->key) [item setKeyEquivalentModifierMask:it->modifiers];
         if (it->icon && !(bar && it->parent < 0)) [item setImage:(__bridge NSImage *)it->icon];
         if (it->kind == KIND_SUBMENU) {
