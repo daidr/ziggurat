@@ -568,10 +568,11 @@ pub const Harness = struct {
     pub fn click(self: *Harness, query: Query) anyerror!void {
         const node = try self.find(query);
         if (isRow(node.kind)) return self.clickWith(query, .{});
-        switch (node.kind) {
+        // A label (`View.labelledBy`) passes its press to its control.
+        if (self.view.labelPress(node.id) == null) switch (node.kind) {
             .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text, .menu_item => {},
             else => return error.NotActivatable,
-        }
+        };
         _ = try self.target(node, .primary);
         try self.activate(node);
     }
