@@ -71,6 +71,7 @@ const Files = struct {
     sorts: usize = 0,
     arranged: usize = 0,
     selecting: bool = false,
+    missed: ?view.DragMiss = null,
     use_columns: []const collections.Column = &columns,
 
     fn init(self: *Files, mode: Selection.Mode) void {
@@ -104,6 +105,7 @@ const Files = struct {
         if (result.submitted) |row| self.submitted = row;
         if (result.double_clicked) |at| self.double = at;
         if (result.moved) |move| self.moved = move;
+        if (result.drag_missed) |miss| self.missed = miss;
         self.selecting = result.drag_selecting;
     }
 };
@@ -329,6 +331,37 @@ test "assistive technology chooses rows and sorts by column headers" {
     try testing.expectEqual(@as(usize, 2), app.sort.?.column);
 }
 
+test "assistive technology reads the cells of the rows in view" {
+    var app: Files = .{};
+    app.init(.single);
+    app.count = 3;
+    var f: Fixture = .{};
+    f.storage = .{};
+    const App = Files;
+    f.h = Harness.init(&app, App.build, f.storage.buffers(), .{});
+    f.context = ui.Context.init(&f.dummy, Windowless.draw, Windowless.action);
+    try f.h.recordSemantics(&f.context);
+    const id = (try f.leaf()).id;
+    const row = collections.partId(id, 17);
+    const kind = try f.h.accessibleId(collections.partId(row, 0x636f_6c75_6d6e_0000 ^ view.key("Kind")));
+    try testing.expectEqual(ui.accessibility.Role.cell, kind.role());
+    try testing.expectEqualStrings("r1c2", kind.name());
+    try testing.expectEqual(@as(u32, 3), kind.entry.column_index);
+    try testing.expectEqual(@as(u32, 3), kind.entry.row_index);
+    try testing.expectEqual(@as(?u64, row), kind.entry.parent);
+    // Many rows: cells go only while the window's tree has room.
+    app.count = 100_000;
+    try f.h.render();
+    var all: [ui.accessibility.max_nodes]view.Accessible = undefined;
+    const nodes = try f.h.accessibleAll(&all);
+    try testing.expect(nodes.len <= ui.accessibility.max_nodes - 1);
+    var cells: usize = 0;
+    for (nodes) |node| if (node.role() == .cell) {
+        cells += 1;
+    };
+    try testing.expect(cells > 0 and cells % 3 == 0);
+}
+
 test "a table keeps the item at its top as rows come above it" {
     var ids: [200]u64 = undefined;
     for (&ids, 0..) |*id, index| id.* = 1000 + index;
@@ -353,6 +386,27 @@ test "a table keeps the item at its top as rows come above it" {
     app.count = 120;
     try f.h.render();
     try testing.expectEqual(@as(f64, 560), app.state.scrollOffset());
+}
+
+test "a single choice whose item leaves the rows is none in the same pass" {
+    var ids: [8]u64 = .{ 11, 12, 13, 14, 15, 16, 17, 18 };
+    var app: Files = .{};
+    app.init(.single);
+    app.ids = ids[0..4];
+    app.count = 4;
+    var f: Fixture = .{};
+    try f.start(&app);
+    try f.click(50, Fixture.rowY(2), .{});
+    try testing.expectEqualSlices(u64, &.{13}, app.selection.items());
+    // The choice follows its item as rows come before it.
+    app.ids = ids[1..5];
+    try f.h.render();
+    try testing.expectEqualSlices(u64, &.{13}, app.selection.items());
+    // Its item gone, the choice is none once the table has built.
+    app.ids = ids[4..8];
+    try f.h.render();
+    try testing.expectEqual(@as(usize, 0), app.selection.len);
+    try testing.expectEqual(@as(?u64, null), app.selection.cursor);
 }
 
 test "a table that follows its end keeps new rows in view" {
@@ -842,6 +896,10 @@ test "rows drag out of a table with how many go, for targets elsewhere to take" 
     try f.h.advance(std.time.ns_per_s);
     try f.h.drag(b.x + 50, b.y + Fixture.rowY(3), b.x + 50, b.y + Fixture.rowY(6), 3);
     try testing.expect(app.dropped == null and app.files.moved == null);
+    // The table learns where they were let go.
+    const missed = app.files.missed.?;
+    try testing.expectEqual(@as(u64, file_kind), missed.payload.kind);
+    try testing.expectApproxEqAbs(b.y + Fixture.rowY(6), missed.position.y, 0.01);
 }
 
 test "a table cannot both drag its rows out and reorder them" {

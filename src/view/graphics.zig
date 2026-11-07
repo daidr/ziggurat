@@ -302,6 +302,25 @@ pub const SvgImage = struct {
         };
         self.prepared = prepared;
     }
+    /// Pixels of the picture drawn `longer` pixels on its longer side,
+    /// keeping its aspect, in `color` (0xRRGGBB) for `currentColor`: for a
+    /// picture made once, as a system menu's icon
+    /// (`ziggurat_system.MenuIcon.fromPixels`, at 64). Independent of
+    /// what the view shows; `deinit` the result.
+    pub fn raster(self: *const SvgImage, longer: u32, color: u32) !Raster {
+        if (longer == 0) return error.InvalidImage;
+        const side: f32 = @floatFromInt(longer);
+        const wide = self.width >= self.height;
+        const width: u32 = if (wide) longer else @max(1, @as(u32, @intFromFloat(@round(side * self.width / self.height))));
+        const height: u32 = if (wide) @max(1, @as(u32, @intFromFloat(@round(side * self.height / self.width)))) else longer;
+        const prepared = try self.document.prepare(self.allocator, .{
+            .main_thread = std.Thread.getCurrentId(),
+            .width = width,
+            .height = height,
+            .current_color = .{ .r = @truncate(color >> 16), .g = @truncate(color >> 8), .b = @truncate(color) },
+        });
+        return .{ .prepared = prepared, .pixels = prepared.pixels, .width = width, .height = height, .stride = @as(usize, width) * 4 };
+    }
     fn release(self: *SvgImage) void {
         const prepared = self.prepared orelse return;
         if (self.host.context.window != null) _ = self.host.context.releaseImage(prepared.identity) catch |err| {
@@ -312,6 +331,20 @@ pub const SvgImage = struct {
             return;
         };
         self.prepared = null;
+    }
+};
+
+/// Pixels `SvgImage.raster` prepared: top-down premultiplied BGRA8,
+/// `stride` bytes a row.
+pub const Raster = struct {
+    prepared: *svg.Prepared,
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+    stride: usize,
+    pub fn deinit(self: *Raster) void {
+        self.prepared.close() catch {};
+        self.* = undefined;
     }
 };
 
@@ -361,6 +394,18 @@ test "lengths and natural sizes" {
     const document = try svg.Document.parse(std.testing.allocator, "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 20'><rect width='40' height='20'/></svg>", .{});
     defer document.close() catch {};
     try std.testing.expectEqual(view.Size{ .width = 40, .height = 20 }, try naturalSize(document));
+}
+
+test "an SVG rasters at its longer side in the color asked for" {
+    var picture = try SvgImage.init(std.testing.allocator, undefined, "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 20'><rect width='40' height='20' fill='currentColor'/></svg>", .{});
+    defer picture.document.close() catch {};
+    var drawn = try picture.raster(64, 0x0000ff);
+    defer drawn.deinit();
+    try std.testing.expectEqual(@as(u32, 64), drawn.width);
+    try std.testing.expectEqual(@as(u32, 32), drawn.height);
+    // Blue, opaque, in the middle (BGRA).
+    const middle = drawn.pixels[16 * drawn.stride + 32 * 4 ..][0..4];
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, middle);
 }
 
 test "every icon prepares a mask, mirrored or not" {

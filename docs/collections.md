@@ -45,7 +45,7 @@ const Files = struct {
 
 ## 选择
 
-`collections.Selection` 以应用提供的存储保存选中项目的键，按键排序，所以查询是 O(log n)，范围选择一次排序并入；存储长度是能同时选中的最多项数，超出时状态的 `core.last_error` 记为 `SelectionFull`，选择保持不变（Ctrl+A 在行数多于容量时整体拒绝）。`.single` 只选一行。`anchor` 是 Shift 范围的起点，`cursor` 是键盘所在行，`version` 随每次改动递增。已不在集合中的键会保留，由应用移除。
+`collections.Selection` 以应用提供的存储保存选中项目的键，按键排序，所以查询是 O(log n)，范围选择一次排序并入；存储长度是能同时选中的最多项数，超出时状态的 `core.last_error` 记为 `SelectionFull`，选择保持不变（Ctrl+A 在行数多于容量时整体拒绝）。`.single` 只选一行。`anchor` 是 Shift 范围的起点，`cursor` 是键盘所在行，`version` 随每次改动递增。已不在集合中的键会保留，由应用移除；例外是行带 `key` 的表格与网格视图的单选：选中的项目不在行中时，集合构建时就把选择清空（`cursor` 与 `anchor` 一并清除），所以同一遍里在集合之后构建、读选中行的内容（如详情面板）要把空选择当作未选。同一个集合改显示另一组行时（如另一张表的列），清空选择并重置状态，让它忘掉之前选中的项目和滚动位置。
 
 - 单击选中一行；Ctrl+单击加入或取出；Shift+单击从 anchor 选到这一行，Ctrl+Shift 把范围加入已有选择；在空白处单击清除选择。
 - Up/Down、Home/End、PageUp/PageDown 移动并选中，Shift 扩展范围，Ctrl 只移动光标；Space 选中光标行，Ctrl+Space 切换，Shift+Space 选范围；Ctrl+A 全选（多选时）。移动后的行以最小位移滚入可见区。
@@ -77,7 +77,7 @@ const Files = struct {
 - **保存布局**：`TableState.layout(&buffer)` 按显示顺序给出每列的 id 和宽度（平分的列为 0），`Result.arranged` 在用户调整或移动列时为 true；`restore(saved)` 在下一遍按 id 恢复顺序与宽度，未知的列按自身顺序跟在后面。
 - **排序**：设置 `TableState.sort` 后，单击可排序列头按它升序，再次单击反转；表头画箭头，辅助技术读到方向，`Result.sorted` 报告变化，行的顺序由应用按 `sort` 排列（用 `key` 让选择跟随行）。设置 `sort_by`（`SortKeys`，最多 8 列）时按多列排序：普通单击只按这一列（已是第一列时反转），Ctrl+单击或 Shift+单击把列追加为升序，再按一次变降序，第三次移除；多列时列头显示次序号，`sort` 保持为第一列。行头列不排序。
 - **重排行**：`reorder`（不能同时 `drag_select`）让用户把行拖到其他位置，一条线标出插入点；松开时 `Result.moved` 给出拖动的行、插入到哪一行之前（等于行数表示末尾），以及该行是否已选中（是则应用移动所有选中的行）。放回原处不产生移动。
-- **拖出行**：`drag_rows = kind`（不能同时 `reorder`、`drag_select` 或 `cell_select`）让行被拖出表格交给别处，如把文件拖进文件夹：按下一行移动超过阈值后，表格把拖动交给视图（`Embed.drag`），视图拖动 `Payload{ .kind = kind, .value = 行号 }`，一份行的副本（带该行的 `label` 或第一列文字）跟随指针，指针下最内层接受该 `kind` 的 `dropTarget` 在松开时收到它，和 `dragSource` 一样；表格本身不收、也不画插入线。按下已选中的行时拖动的是全部选中行（应用在 `selection` 里找），指针旁的强调色小圆角标显示行数（多于一行时）；按下已选中的行要等松开才改选择，因此拖动不会丢掉选择，未拖动的单击照常只选中该行。
+- **拖出行**：`drag_rows = kind`（不能同时 `reorder`、`drag_select` 或 `cell_select`）让行被拖出表格交给别处，如把文件拖进文件夹：按下一行移动超过阈值后，表格把拖动交给视图（`Embed.drag`），视图拖动 `Payload{ .kind = kind, .value = 行号 }`，一份行的副本（带该行的 `label` 或第一列文字）跟随指针，指针下最内层接受该 `kind` 的 `dropTarget` 在松开时收到它，和 `dragSource` 一样；表格本身不收、也不画插入线。松开处没有接受它的目标时，下一遍 `Result.drag_missed` 给出载荷与松开的窗口坐标（可能在窗口外，比如把行拖出成新窗口）；嵌入叶子一般用 `View.embedDragMissed(id)` 取得。按下已选中的行时拖动的是全部选中行（应用在 `selection` 里找），指针旁的强调色小圆角标显示行数（多于一行时）；按下已选中的行要等松开才改选择，因此拖动不会丢掉选择，未拖动的单击照常只选中该行。
 - **悬停与外观**：悬停行有浅色背景；选中行从边到边以强调色填充，`round_rows` 改为圆角。
 
 ### 单元格选择
@@ -110,7 +110,7 @@ const Files = struct {
 
 ## 可访问性
 
-启用 `-Daccessibility=true` 时，Windows UIA 把表格与大纲表格映射为 DataGrid，表头为 Header，列头为 HeaderItem（排序方向放在 ItemStatus，调用它即单击排序），可见行为 DataItem / SelectionItem；没有列的大纲为 Tree，行为带层级和展开状态的 TreeItem；网格视图为 List，项目为 ListItem。每帧最多暴露 `max_semantic_rows`（40）个可见行（窗口的语义树共 128 个节点）。辅助技术选择、加入、移出、展开和折叠这些行时作用于对应项目。屏外行不暴露，但每行报告它在全部行中的位置、列表报告总行数、大纲行报告层级，macOS VoiceOver 读作“第 120 行，共 10,000 行”（AXIndex / AXRowCount / AXDisclosureLevel），Linux 为 ATK 的 posinset / setsize / level；单元格选择的块不单独暴露。
+启用 `-Daccessibility=true` 时，Windows UIA 把表格与大纲表格映射为 DataGrid，表头为 Header，列头为 HeaderItem（排序方向放在 ItemStatus，调用它即单击排序），可见行为 DataItem / SelectionItem；没有列的大纲为 Tree，行为带层级和展开状态的 TreeItem；网格视图为 List，项目为 ListItem。每帧最多暴露 `max_semantic_rows`（40）个可见行（窗口的语义树共 128 个节点）。辅助技术选择、加入、移出、展开和折叠这些行时作用于对应项目。屏外行不暴露，但每行报告它在全部行中的位置、列表报告总行数、大纲行报告层级，macOS VoiceOver 读作“第 120 行，共 10,000 行”（AXIndex / AXRowCount / AXDisclosureLevel），Linux 为 ATK 的 posinset / setsize / level；表格的可见行在窗口语义树还有余量（除这一行的单元格外至少再留 32 个节点）时还暴露每个可见单元格：角色为单元格（行头列为行头），名称是单元格文字，带行号与列号（`row_index`/`column_index`，列号按显示顺序），单元格选择时报告是否在块内；余量不够的行只暴露行本身。
 
 ## 当前范围
 
