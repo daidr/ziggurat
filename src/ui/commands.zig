@@ -35,6 +35,12 @@ pub const Font = struct {
     /// A family by its `ziggurat_fonts` id, registered or the system's;
     /// 0 is the interface family, or the fixed-pitch one for monospace.
     family: u8 = 0,
+    /// Room added after every character, in DIP, as CSS's
+    /// `letter-spacing`: positive spreads text out, as labels in capitals
+    /// take, negative tightens it. Measured widths include the room after
+    /// the last character. Not part of `key`: a text command carries it on
+    /// its own (`Text.letterSpacing`).
+    letter_spacing: f32 = 0,
 
     pub const Weight = enum(u8) {
         regular,
@@ -59,8 +65,22 @@ pub const Font = struct {
     pub const max_family = 63;
     pub const smallest: f32 = 1;
     pub const largest: f32 = 1024;
+    /// The most letter spacing goes either way, in DIP.
+    pub const max_letter_spacing: f32 = 1024;
     pub fn valid(self: Font) bool {
-        return std.math.isFinite(self.size) and self.size >= smallest and self.size <= largest and self.family <= max_family;
+        return std.math.isFinite(self.size) and self.size >= smallest and self.size <= largest and self.family <= max_family and
+            std.math.isFinite(self.letter_spacing) and @abs(self.letter_spacing) <= max_letter_spacing;
+    }
+    /// `key` with the letter spacing, for caches of measured text.
+    pub fn measureKey(self: Font) u64 {
+        const spacing: u32 = if (self.letter_spacing == 0) 0 else @bitCast(self.letter_spacing);
+        return @as(u64, @as(u32, @bitCast(self.key()))) | @as(u64, spacing) << 32;
+    }
+    /// The font with `letter_spacing` set to `value`.
+    pub fn spaced(self: Font, value: f32) Font {
+        var out = self;
+        out.letter_spacing = value;
+        return out;
     }
     /// The compact form stored in a command; sizes round to 1/16 DIP.
     pub fn key(self: Font) FontKey {
@@ -80,7 +100,34 @@ pub const FontKey = packed struct(u32) {
         return @as(u32, @bitCast(self)) == @as(u32, @bitCast(FontKey{}));
     }
 };
-pub const Text = struct { bounds: Rect, color: u32, offset: u16, len: u16, font: FontKey = .{} };
+/// A single-line label. `color` is 0xRRGGBB; its top byte is the
+/// command's own: `spaced` there says that the four bytes before the text
+/// in the buffer's text storage hold the label's letter spacing, an f32 in
+/// DIP (`letterSpacing`), as the command has no room for it.
+pub const Text = struct {
+    bounds: Rect,
+    color: u32,
+    offset: u16,
+    len: u16,
+    font: FontKey = .{},
+
+    pub const spaced: u32 = 1 << 24;
+    /// The label's color, 0xRRGGBB.
+    pub fn rgb(self: Text) u32 {
+        return self.color & 0xff_ffff;
+    }
+    /// The label's bytes in `storage`, the buffer's text storage.
+    pub fn bytes(self: Text, storage: []const u8) ![]const u8 {
+        if (self.offset > storage.len or self.len > storage.len - self.offset) return error.InvalidTextRange;
+        return storage[self.offset..][0..self.len];
+    }
+    /// The room after each of the label's characters, in DIP.
+    pub fn letterSpacing(self: Text, storage: []const u8) f32 {
+        if (self.color & spaced == 0 or self.offset < 4 or self.offset > storage.len) return 0;
+        const value: f32 = @bitCast(std.mem.readInt(u32, storage[self.offset - 4 ..][0..4], .little));
+        return if (std.math.isFinite(value)) value else 0;
+    }
+};
 pub const ImageCommand = struct {
     destination: Rect,
     alignment: drawing.Point,
@@ -628,10 +675,23 @@ pub const Buffer = struct {
         if (!font.valid()) return error.InvalidFont;
         if (!std.unicode.utf8ValidateSlice(utf8)) return error.InvalidUtf8;
         if (utf8.len > 2048) return error.TextTooLong;
-        if (utf8.len > self.text_storage.len - self.text_len) return error.TextStorageFull;
+        try self.appendText(.{ .bounds = bounds, .color = color & 0xff_ffff, .offset = 0, .len = @intCast(utf8.len), .font = font.key() }, utf8, font.letter_spacing);
+    }
+    /// Appends a text command for `utf8`, copying it, with its letter
+    /// spacing before it when it has one.
+    fn appendText(self: *Buffer, value: Text, utf8: []const u8, spacing: f32) !void {
+        const prefix: usize = if (spacing != 0 and utf8.len != 0) 4 else 0;
+        if (utf8.len + prefix > self.text_storage.len - self.text_len) return error.TextStorageFull;
+        var command = value;
+        command.color = value.rgb();
+        if (prefix != 0) {
+            std.mem.writeInt(u32, self.text_storage[self.text_len..][0..4], @bitCast(spacing), .little);
+            command.color |= Text.spaced;
+        }
         // Storage is 64 KiB, so a non-empty run always starts below 65536.
-        const offset: u16 = if (utf8.len == 0) 0 else @intCast(self.text_len);
-        try self.append(.{ .text = .{ .bounds = bounds, .color = color, .offset = offset, .len = @intCast(utf8.len), .font = font.key() } });
+        command.offset = if (utf8.len == 0) 0 else @intCast(self.text_len + prefix);
+        try self.append(.{ .text = command });
+        self.text_len += prefix;
         @memcpy(self.text_storage[self.text_len..][0..utf8.len], utf8);
         self.text_len += utf8.len;
     }
@@ -842,12 +902,11 @@ pub const Buffer = struct {
                 try self.append(.{ .gradient = .{ .bounds = moved.rect(value.bounds, delta), .radius = value.radius, .stroke_width = value.stroke_width, .brush = @intCast(index) } });
             },
             .text => |value| {
-                if (value.offset > source.text_len or value.len > source.text_len - value.offset) return error.InvalidTextRange;
-                if (value.len > self.text_storage.len - self.text_len) return error.TextStorageFull;
-                const offset: u16 = if (value.len == 0) 0 else @intCast(self.text_len);
-                try self.append(.{ .text = .{ .bounds = moved.rect(value.bounds, delta), .color = value.color, .offset = offset, .len = value.len, .font = value.font } });
-                @memcpy(self.text_storage[self.text_len..][0..value.len], source.text_storage[value.offset..][0..value.len]);
-                self.text_len += value.len;
+                const stored = source.text_storage[0..source.text_len];
+                const utf8 = try value.bytes(stored);
+                var copy = value;
+                copy.bounds = moved.rect(value.bounds, delta);
+                try self.appendText(copy, utf8, value.letterSpacing(stored));
             },
             .prepared_text => |value| {
                 if (value.resource >= source.prepared_text_len) return error.MissingResources;
@@ -1102,6 +1161,33 @@ test "frame buffer owns text and failures do not partially append" {
     try std.testing.expectEqual(2, buffer.text_len);
     buffer.reset();
     try std.testing.expectEqual(0, buffer.commands().len);
+}
+
+test "a text command keeps its letter spacing beside its bytes, through a copy" {
+    var buffer: Buffer = .{};
+    const rect: Rect = .{ .x = 0, .y = 0, .width = 80, .height = 20 };
+    try buffer.textFont(rect, "plain", 0x123456, .{});
+    try buffer.textFont(rect, "SPACED", 0xff_abcdef, (Font{ .size = 12 }).spaced(1.5));
+    try buffer.textFont(rect, "", 0, (Font{}).spaced(3));
+    const stored = buffer.textBytes();
+    const plain = buffer.commands()[0].text;
+    const spaced = buffer.commands()[1].text;
+    try std.testing.expectEqual(@as(f32, 0), plain.letterSpacing(stored));
+    try std.testing.expectEqualStrings("SPACED", try spaced.bytes(stored));
+    try std.testing.expectEqual(@as(f32, 1.5), spaced.letterSpacing(stored));
+    // The top byte of a color is the command's own.
+    try std.testing.expectEqual(@as(u32, 0xabcdef), spaced.rgb());
+    try std.testing.expectEqual(@as(f32, 0), buffer.commands()[2].text.letterSpacing(stored));
+    try std.testing.expectError(error.InvalidFont, buffer.textFont(rect, "x", 0, (Font{}).spaced(std.math.nan(f32))));
+
+    var copy: Buffer = .{};
+    try copy.textFont(rect, "first", 0, .{});
+    try copy.appendTranslated(&buffer, 0, buffer.len, .{ .x = 4, .y = 0 });
+    const moved = copy.commands()[2].text;
+    try std.testing.expectEqualStrings("SPACED", try moved.bytes(copy.textBytes()));
+    try std.testing.expectEqual(@as(f32, 1.5), moved.letterSpacing(copy.textBytes()));
+    try std.testing.expectEqual(@as(f32, 4), moved.bounds.x);
+    try std.testing.expectEqual(@as(f32, 0), copy.commands()[1].text.letterSpacing(copy.textBytes()));
 }
 
 test "explicit transform storage is exclusive transactional and shares scope depth" {

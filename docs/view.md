@@ -542,6 +542,15 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 
 `Style.balance` 让换行文本各行宽度接近，如 CSS 的 `text-wrap: balance`：保持按全宽换行时的行数，取仍能容下这些行的最窄宽度（按 0.25 DIP 二分），两行的标题从中间附近断开，而不是第二行只剩一个词。适合标题、说明和卡片标签这类短文本，需要 `wrap`；富文本的 `Options.balance` 相同。
 
+`Style.letter_spacing` 在文本和链接的每个字符之后多留若干 DIP，如 CSS 的 `letter-spacing`：正数拉开，用于小号大写标签，负数收紧。设在容器上时里面的文本都继承，文本自己设的优先；0 去掉外层的间距，用于加宽间距的标签里的数字；null 取外层的。间距随 `Font.letter_spacing` 交给测量回调和文本命令，宽度、换行、截断与省略号都计入它，最后一个字符之后的间距也算在宽度里，与浏览器和 DirectWrite、Core Text 的测量一致；Pango 只在字符之间加间距，平台测量（`text_measure.Native`）替它补上末尾的那一份。默认的估算测量器按码点数加间距。
+
+```zig
+try v.column(.{ .letter_spacing = 2 });
+try v.text("SPACED CAPITALS", .{ .font = .{ .size = 12, .weight = .bold } });
+try v.text("4.2.1", .{ .letter_spacing = 0 });
+try v.end();
+```
+
 ## 上一帧的边界
 
 `View.boundsOf(id)` 与 `Host.bounds(id)` 返回节点在上一次排列中的窗口边界，供绘制之外使用，例如把原生弹出菜单放在某个节点旁边；`lastNode().id` 给出刚加入节点的 ID。`Storage` 自带记录；自行组装 `Buffers` 时提供 `placed` 缓冲（与节点同容量），否则不记录。

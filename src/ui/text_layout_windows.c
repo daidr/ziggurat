@@ -59,6 +59,8 @@ int ztl_layout_init(void *storage,void *engine,const char *utf8,uint32_t n8,cons
        characters and a Traditional Chinese one where it lacks them. */
     if(SUCCEEDED(hr)&&options->han_count&&options->han_locale&&options->han_locale[0]){WCHAR han[86];if(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,options->han_locale,-1,han,86))for(uint32_t i=0;i<options->han_count&&SUCCEEDED(hr);++i){DWRITE_TEXT_RANGE range={options->han_runs[i].start,options->han_runs[i].end-options->han_runs[i].start};hr=IDWriteTextLayout_SetLocaleName(s->layout,han,range);}}
     if(SUCCEEDED(hr)){DWRITE_TEXT_METRICS metrics;hr=IDWriteTextLayout_GetMetrics(s->layout,&metrics);if(SUCCEEDED(hr)&&!options->wrap)hr=IDWriteTextLayout_SetMaxWidth(s->layout,metrics.widthIncludingTrailingWhitespace);if(SUCCEEDED(hr))hr=IDWriteTextLayout_SetMaxHeight(s->layout,metrics.height);}
+    /* Letter spacing after each character (Windows 8's IDWriteTextLayout1). */
+    if(SUCCEEDED(hr)&&options->spacing!=0){IDWriteTextLayout1 *spaced=NULL;if(SUCCEEDED(IDWriteTextLayout_QueryInterface(s->layout,&IID_IDWriteTextLayout1,(void **)&spaced))&&spaced){DWRITE_TEXT_RANGE all={0,length};hr=IDWriteTextLayout1_SetCharacterSpacing(spaced,0,options->spacing,0,all);IDWriteTextLayout1_Release(spaced);}}
 done:DROP(format);if(FAILED(hr)){DROP(s->layout);return status(hr,error);}InterlockedIncrement(&layouts);return ZTL_OK;
 }
 void ztl_layout_close(void *storage){Layout *s=storage;DROP(s->layout);InterlockedDecrement(&layouts);}

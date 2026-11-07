@@ -40,7 +40,7 @@ pub const Native = struct {
     trust: std.AutoHashMapUnmanaged(u32, Trust) = .empty,
     stats: Stats = .{},
 
-    const Key = struct { hash: u64, font: u32 };
+    const Key = struct { hash: u64, font: u64 };
     const Pair = struct { font: u32, first: u8, second: u8 };
     const Trust = struct { numbers_checked: u8 = 0, numbers_off: bool = false, parts_checked: u8 = 0, parts_off: bool = false };
     const max_entries = 8192;
@@ -94,9 +94,9 @@ pub const Native = struct {
     /// The width of `utf8` in `font`, in DIP.
     pub fn width(self: *Native, utf8: []const u8, font: Font) f32 {
         if (utf8.len == 0) return 0;
-        const key: Key = .{ .hash = std.hash.Wyhash.hash(0, utf8), .font = @bitCast(font.key()) };
+        const key: Key = .{ .hash = std.hash.Wyhash.hash(0, utf8), .font = font.measureKey() };
         if (self.widths.get(key)) |w| return w;
-        const w = self.numberWidth(utf8, font, key.font) orelse
+        const w = self.numberWidth(utf8, font, @bitCast(font.key())) orelse
             if (self.rawWidth(utf8, font)) |raw| @ceil(raw) else |_| estimate(utf8, font);
         if (self.widths.count() >= max_entries) self.widths.clearRetainingCapacity();
         self.widths.put(self.allocator, key, w) catch {};
@@ -105,7 +105,7 @@ pub const Native = struct {
 
     fn options(font: Font) text.Options {
         const family = if (font.family != 0) fonts.systemName(font.family) else if (font.monospace) monospace_family else interface_family;
-        return .{ .family = family, .size = font.size, .weight = font.weight.value(), .italic = font.italic };
+        return .{ .family = family, .size = font.size, .weight = font.weight.value(), .italic = font.italic, .letter_spacing = font.letter_spacing };
     }
 
     /// The advance of `utf8` laid out on its own, not rounded.
@@ -139,7 +139,8 @@ pub const Native = struct {
     /// A number put together from the advances of its characters and the
     /// kerning of each pair; null for text that is not one.
     fn numberWidth(self: *Native, utf8: []const u8, font: Font, font_key: u32) ?f32 {
-        if (!isNumber(utf8)) return null;
+        // Spaced letters are laid out, as the pairs measured are not.
+        if (!isNumber(utf8) or font.letter_spacing != 0) return null;
         const trust = self.trustOf(font_key) orelse return null;
         if (trust.numbers_off) return null;
         var sum: f32 = 0;
@@ -173,7 +174,7 @@ pub const Native = struct {
     /// that starts the paragraph or follows a space, and ends it or comes
     /// before one. Null otherwise, and for text that breaks other ways.
     pub fn partWidth(self: *Native, whole: []const u8, start: usize, end: usize, font: Font) ?f32 {
-        if (start >= end or end > whole.len) return null;
+        if (start >= end or end > whole.len or font.letter_spacing != 0) return null;
         var first = start;
         while (first > 0 and whole[first - 1] != '\n') first -= 1;
         var last = end;

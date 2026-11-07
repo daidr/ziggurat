@@ -34,13 +34,17 @@ static inline CTFontRef create_font(const char *named,float size,uint16_t weight
     CFRelease(attributes);if(!descriptor)return NULL;
     CTFontRef font=CTFontCreateWithFontDescriptor(descriptor,size,NULL);CFRelease(descriptor);return font;
 }
-/* The line a text command draws: its UTF-8 text in font, truncated with
-   an ellipsis to width. NULL with *failed clear draws nothing. */
-static inline CTLineRef text_line(CTFontRef font,const char *text,uint32_t length,double width,CGFloat *ascent,CGFloat *descent,int *failed){
+/* The line a text command draws: its UTF-8 text in font, with spacing
+   DIP of tracking after each character (which keeps the font's kerning),
+   truncated with an ellipsis to width. NULL with *failed clear draws
+   nothing. */
+static inline CTLineRef text_line(CTFontRef font,const char *text,uint32_t length,double width,float spacing,CGFloat *ascent,CGFloat *descent,int *failed){
     *failed=1;
     CFStringRef string=CFStringCreateWithBytes(NULL,(const UInt8 *)text,length,kCFStringEncodingUTF8,false);if(!string)return NULL;
-    const void *keys[2]={kCTFontAttributeName,kCTForegroundColorFromContextAttributeName};const void *values[2]={font,kCFBooleanTrue};
-    CFDictionaryRef attributes=CFDictionaryCreate(NULL,keys,values,2,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    double tracking_value=spacing;CFNumberRef tracking=spacing!=0?CFNumberCreate(NULL,kCFNumberDoubleType,&tracking_value):NULL;
+    const void *keys[3]={kCTFontAttributeName,kCTForegroundColorFromContextAttributeName,kCTTrackingAttributeName};const void *values[3]={font,kCFBooleanTrue,tracking};
+    CFDictionaryRef attributes=CFDictionaryCreate(NULL,keys,values,tracking?3:2,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if(tracking)CFRelease(tracking);
     CFAttributedStringRef attributed=attributes?CFAttributedStringCreate(NULL,string,attributes):NULL;CFRelease(string);
     CTLineRef line=attributed?CTLineCreateWithAttributedString(attributed):NULL;if(attributed)CFRelease(attributed);
     if(!line){if(attributes)CFRelease(attributes);return NULL;}

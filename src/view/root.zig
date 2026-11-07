@@ -164,6 +164,14 @@ pub const Style = struct {
     /// Font for text nodes, such as `.heading1` or `.code`; null is the
     /// 16 DIP label font that widgets use.
     font: ?Font = null,
+    /// Room added after every character of a text or link, in DIP, as
+    /// CSS's `letter-spacing`: positive spreads letters out, as small
+    /// labels in capitals take, negative tightens them. Set on a container,
+    /// the texts inside take it unless they set their own: 0 takes away
+    /// that of the containers around it, as for a number within a spaced
+    /// label. Null takes the containers'. Widths, wrapping and ellipses
+    /// count it, the room after the last character included.
+    letter_spacing: ?f32 = null,
     /// The language of a text, or of the texts inside a container that
     /// set none, as a BCP 47 tag such as "ko" or "en-US"; "" takes that of
     /// the containers around it, and the window's (`Options.language`)
@@ -1148,13 +1156,15 @@ pub const Measurer = struct {
         if (self.measure_font) |callback| return callback(self.context, text, value);
         const scale = value.size / 16;
         const height = @max(line_height * scale, @ceil(value.size * 1.25));
+        // Letter spacing goes after each character, the last one's too.
+        const spacing = if (value.letter_spacing == 0) 0 else value.letter_spacing * @as(f32, @floatFromInt(std.unicode.utf8CountCodepoints(text) catch text.len));
         if (value.monospace) {
             const count = std.unicode.utf8CountCodepoints(text) catch text.len;
-            return .{ .width = @as(f32, @floatFromInt(count)) * value.size * 0.6, .height = height };
+            return .{ .width = @max(0, @as(f32, @floatFromInt(count)) * value.size * 0.6 + spacing), .height = height };
         }
         const base = self.measure(self.context, text);
         const emphasis: f32 = if (value.weight == .regular) 1 else 1.05;
-        return .{ .width = @ceil(base.width * scale * emphasis), .height = height };
+        return .{ .width = @max(0, @ceil(base.width * scale * emphasis + spacing)), .height = height };
     }
     /// Width of `whole[start..end]`, from `measure_part` where it knows it.
     pub fn partWidth(self: Measurer, whole: []const u8, start: usize, end: usize, font: ?Font) f32 {
@@ -1162,7 +1172,7 @@ pub const Measurer = struct {
         return self.textSize(whole[start..end], font).width;
     }
     const browser = @import("builtin").cpu.arch == .wasm32;
-    extern "ziggurat" fn zw_measure_text(text: [*]const u8, length: u32, size: f32, weight: u32, italic: u32, monospace: u32) f64;
+    extern "ziggurat" fn zw_measure_text(text: [*]const u8, length: u32, size: f32, weight: u32, italic: u32, monospace: u32, spacing: f32) f64;
     fn browserMeasure(_: ?*anyopaque, text: []const u8) Size {
         return browserMeasureFont(null, text, .{});
     }
@@ -1170,8 +1180,8 @@ pub const Measurer = struct {
         const scale = font.size / 16;
         const height = @max(line_height * scale, @ceil(font.size * 1.25));
         if (text.len == 0) return .{ .width = 0, .height = height };
-        const width = zw_measure_text(text.ptr, @intCast(text.len), font.size, font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace));
-        return .{ .width = @floatCast(@ceil(width)), .height = height };
+        const width = zw_measure_text(text.ptr, @intCast(text.len), font.size, font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), font.letter_spacing);
+        return .{ .width = @floatCast(@max(0, @ceil(width))), .height = height };
     }
     pub fn estimate(_: ?*anyopaque, text: []const u8) Size {
         var width: f32 = 0;
@@ -2537,11 +2547,17 @@ pub const View = struct {
         if (style.text_stroke) |stroke| if (!stroke.valid()) return error.InvalidValue;
         if (style.pose) |pose| if (!pose.valid()) return error.InvalidValue;
         if (style.clip_inset) |clip| if (!clip.valid()) return error.InvalidValue;
+        if (style.letter_spacing) |spacing| if (!std.math.isFinite(spacing) or @abs(spacing) > Font.max_letter_spacing) return error.InvalidValue;
         const index = self.len;
         const id = self.identity(parent, kind, style);
         var effective = style;
         if (comptime inspector_panel.enabled) if (self.tools) |tools| tools.restyle(id, &effective);
         effective.enabled = style.enabled and parent.style.enabled;
+        // Letter spacing passes to what is inside, and a text draws with it.
+        if (effective.letter_spacing == null) effective.letter_spacing = parent.style.letter_spacing;
+        if (kind == .text or kind == .link) if (effective.letter_spacing) |spacing| {
+            if (spacing != 0 or effective.font != null) effective.font = (effective.font orelse Font{}).spaced(spacing);
+        };
         self.buffers.nodes[index] = .{ .kind = kind, .id = id, .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
             .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast, .dialog, .table_header, .table_row, .token_field, .combo_field, .route => parent.id,
             else => if (parent.style.role != null and parent.isContainer()) parent.id else parent.semantic_parent,

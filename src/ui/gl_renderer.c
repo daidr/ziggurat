@@ -145,7 +145,7 @@ typedef struct ZlCapture {float clips[ZL_CLIPS][4];uint32_t clip_depth,run,kind,
 typedef struct ZlImage {GLuint texture;uint32_t width,height,levels;int coverage;} ZlImage;
 /* A text drawn once, by what it draws (its bytes, font, color, box and
    where within a device pixel it starts). */
-typedef struct ZlText {uint64_t hash,used;char *bytes;uint32_t len,rgb,width,height;float size,box[2],offset[2],scale;uint16_t weight;int italic,monospace;char family[64];GLuint texture;} ZlText;
+typedef struct ZlText {uint64_t hash,used;char *bytes;uint32_t len,rgb,width,height;float size,spacing,box[2],offset[2],scale;uint16_t weight;int italic,monospace;char family[64];GLuint texture;} ZlText;
 typedef struct ZlStats {uint32_t device_creations,context_creations,resizes,presents,memory_presents,busy_presents,text_rasters,text_entries;uint64_t frames,instances,batches,layers,filter_passes,partial_frames,text_hits,offscreen_targets,device_losses,damage_submissions,effect_passes,backdrops,indicators,sweeps;} ZlStats;
 
 typedef struct ZlRenderer ZlRenderer;
@@ -203,7 +203,7 @@ struct ZlRenderer {
     ZlImage *slots;uint32_t slot_len;ZlImage candidate;
     void *prepared_keys[ZL_PREPARED];GLuint prepared_textures[ZL_PREPARED];uint32_t prepared_len;
     ZlText texts[ZL_TEXT_ENTRIES];uint32_t text_len;size_t text_bytes;uint64_t frame_serial,swept;
-    PangoLayout *layout;PangoFontDescription *font;float layout_scale;
+    PangoLayout *layout;PangoFontDescription *font;float layout_scale;int layout_spacing;
     /* The toplevel whose draw signal adds GTK's repaint to the Wayland
        surface's damage. */
     GtkWidget *toplevel;gulong damage_handler;
@@ -888,7 +888,7 @@ static void layout_for(ZlRenderer *s){
     /* Laid out at the frame's scale, as the software renderer lays out. */
     cairo_surface_t *scratch=cairo_image_surface_create(CAIRO_FORMAT_ARGB32,1,1);cairo_t *cr=cairo_create(scratch);
     cairo_scale(cr,s->scale,s->scale);
-    s->layout=pango_cairo_create_layout(cr);
+    s->layout=pango_cairo_create_layout(cr);s->layout_spacing=0;
     cairo_destroy(cr);cairo_surface_destroy(scratch);
     /* Text draws into transparent textures in grayscale, as glyph coverage
        the frame tints: where the desktop's settings leave antialiasing to
@@ -1075,14 +1075,14 @@ static size_t css_font(char *out,size_t capacity,const char *named,float size,ui
 /* Draws a text into box (bw x bh device pixels at bx0, by0) as src/ui/web.c
    draws it: the page lays out and draws the run, its baseline on a device
    pixel, and the run's pixels are cut to the box. */
-static uint32_t *web_text(ZlRenderer *s,double bx0,double by0,uint32_t bw,uint32_t bh,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t rgb,float size,uint16_t weight,int italic,int monospace,const char *family){
+static uint32_t *web_text(ZlRenderer *s,double bx0,double by0,uint32_t bw,uint32_t bh,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t rgb,float size,uint16_t weight,int italic,int monospace,const char *family,float spacing){
     double k=s->scale;
     uint32_t *box=calloc((size_t)bw*bh,4);if(!box)return NULL;
     if(!length)return box;
     char font[512];const size_t font_length=css_font(font,sizeof(font),family,size*(float)k,weight,italic,monospace);if(!font_length){free(box);return NULL;}
     const double pen_x=(double)x*k,fraction=pen_x-floor(pen_x);
     double info[6]={0};
-    if(zw_text_draw(text,length,font,(uint32_t)font_length,(double)size*k,(double)width*k,fraction,rgb&0xffffff,info)){free(box);return NULL;}
+    if(zw_text_draw(text,length,font,(uint32_t)font_length,(double)size*k,(double)width*k,fraction,rgb&0xffffff,(double)spacing*k,info)){free(box);return NULL;}
     const uint32_t w=(uint32_t)info[0],h=(uint32_t)info[1];if(!w||!h)return box;
     uint32_t *run=malloc((size_t)w*h*4);if(!run){free(box);return NULL;}
     zw_text_copy(run);
@@ -1101,6 +1101,17 @@ static uint32_t *web_text(ZlRenderer *s,double bx0,double by0,uint32_t bw,uint32
     free(run);return box;
 }
 #else
+/* Letter spacing in the layout's attributes, as the software renderer
+   sets it (src/ui/linux.c). */
+static int use_spacing(ZlRenderer *s,float spacing){
+    int units=(int)lround((double)spacing*PANGO_SCALE);
+    if(units!=s->layout_spacing){
+        PangoAttrList *list=NULL;
+        if(units){list=pango_attr_list_new();if(!list)return 2;pango_attr_list_insert(list,pango_attr_letter_spacing_new(units));}
+        pango_layout_set_attributes(s->layout,list);if(list)pango_attr_list_unref(list);s->layout_spacing=units;
+    }
+    return 0;
+}
 static void use_font(ZlRenderer *s,const char *named,float size,uint16_t weight,int italic,int monospace){
     const char *family=named&&named[0]?named:monospace?"Monospace":"Sans";
     gint absolute=(gint)(size*PANGO_SCALE+0.5f);
@@ -1135,13 +1146,14 @@ static ZlText *text_slot(ZlRenderer *s,size_t bytes){
     if(s->text_len==ZL_TEXT_ENTRIES)return NULL;
     return &s->texts[s->text_len++];
 }
-int zglr_text(void *p,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t rgb,float size,uint16_t weight,int italic,int monospace,const char *family){
+int zglr_text(void *p,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t rgb,float size,uint16_t weight,int italic,int monospace,const char *family,float spacing){
     ZlRenderer *s=p;
 #ifdef __wasm__
     if(!(width>=0)||width>INT_MAX/1024||length>INT_MAX||!(size>=1&&size<=1024))return 1;
 #else
     if(!(width>=0)||width>G_MAXINT/PANGO_SCALE||length>G_MAXINT||!(size>=1&&size<=1024))return 1;
 #endif
+    if(!(spacing>=-1024&&spacing<=1024))return 1;
     if(!visible(s)||width<=0||height<=0)return 0;
     double k=s->scale;
     double bx0=floor((double)x*k),by0=floor((double)y*k),bx1=ceil(((double)x+width)*k),by1=ceil(((double)y+height)*k);
@@ -1157,17 +1169,17 @@ int zglr_text(void *p,float x,float y,float width,float height,const char *text,
     float offset[2]={(float)((double)x*k-bx0),(float)((double)y*k-by0)};
     const char *named=family?family:"";
     uint64_t h=hash_bytes(1469598103934665603ull,text,length);
-    h=hash_bytes(h,&rgb,4);h=hash_bytes(h,&size,4);h=hash_bytes(h,&weight,2);h=hash_bytes(h,&width,4);h=hash_bytes(h,&height,4);h=hash_bytes(h,offset,8);h=hash_bytes(h,named,strlen(named));
+    h=hash_bytes(h,&rgb,4);h=hash_bytes(h,&size,4);h=hash_bytes(h,&spacing,4);h=hash_bytes(h,&weight,2);h=hash_bytes(h,&width,4);h=hash_bytes(h,&height,4);h=hash_bytes(h,offset,8);h=hash_bytes(h,named,strlen(named));
     ZlText *entry=NULL;
     if(whole)for(uint32_t n=0;n<s->text_len;n++){
         ZlText *t=&s->texts[n];
-        if(t->hash==h&&t->len==length&&t->rgb==rgb&&t->size==size&&t->weight==weight&&t->italic==italic&&t->monospace==monospace&&t->box[0]==width&&t->box[1]==height&&
+        if(t->hash==h&&t->len==length&&t->rgb==rgb&&t->size==size&&t->spacing==spacing&&t->weight==weight&&t->italic==italic&&t->monospace==monospace&&t->box[0]==width&&t->box[1]==height&&
            t->offset[0]==offset[0]&&t->offset[1]==offset[1]&&t->scale==s->scale&&t->width==bw&&t->height==bh&&strncmp(t->family,named,sizeof(t->family))==0&&memcmp(t->bytes,text,length)==0){entry=t;break;}
     }
     if(entry)s->stats.text_hits++;
     else{
 #ifdef __wasm__
-        uint32_t *pixels=web_text(s,bx0,by0,bw,bh,x,y,width,height,text,length,rgb,size,weight,italic,monospace,family);
+        uint32_t *pixels=web_text(s,bx0,by0,bw,bh,x,y,width,height,text,length,rgb,size,weight,italic,monospace,family,spacing);
         if(!pixels)return 2;
         GLuint texture=upload_bgra((const uint8_t *)pixels,bw,bh,bw*4);
         free(pixels);
@@ -1178,7 +1190,8 @@ int zglr_text(void *p,float x,float y,float width,float height,const char *text,
         /* The software renderer's drawing, moved by whole device pixels. */
         cairo_translate(cr,-bx0,-by0);cairo_scale(cr,k,k);
         use_font(s,family,size,weight,italic,monospace);
-        pango_layout_set_text(s->layout,text,(int)length);pango_layout_set_width(s->layout,(int)(width*PANGO_SCALE));
+        if(use_spacing(s,spacing)){cairo_destroy(cr);cairo_surface_destroy(surface);return 2;}
+        pango_layout_set_text(s->layout,text,(int)length);pango_layout_set_width(s->layout,(int)((width-fminf(spacing,0))*PANGO_SCALE));
         int layout_width,layout_height;pango_layout_get_size(s->layout,&layout_width,&layout_height);
         cairo_rectangle(cr,x,y,width,height);cairo_clip(cr);
         cairo_set_source_rgb(cr,(double)((rgb>>16)&255)/255,(double)((rgb>>8)&255)/255,(double)(rgb&255)/255);
@@ -1199,7 +1212,7 @@ int zglr_text(void *p,float x,float y,float width,float height,const char *text,
             i->rect[0]=(float)bx0;i->rect[1]=(float)by0;i->rect[2]=(float)bx1;i->rect[3]=(float)by1;i->params[2]=KIND_TEXT;i->color[3]=1;
             return 0;
         }
-        entry->hash=h;entry->bytes=malloc(length?length:1);if(entry->bytes)memcpy(entry->bytes,text,length);entry->len=length;entry->rgb=rgb;entry->size=size;entry->weight=weight;entry->italic=italic;entry->monospace=monospace;
+        entry->hash=h;entry->bytes=malloc(length?length:1);if(entry->bytes)memcpy(entry->bytes,text,length);entry->len=length;entry->rgb=rgb;entry->size=size;entry->spacing=spacing;entry->weight=weight;entry->italic=italic;entry->monospace=monospace;
         entry->box[0]=width;entry->box[1]=height;entry->offset[0]=offset[0];entry->offset[1]=offset[1];entry->scale=s->scale;entry->width=bw;entry->height=bh;
         snprintf(entry->family,sizeof(entry->family),"%s",named);entry->texture=texture;s->text_bytes+=(size_t)bw*bh*4;
         s->stats.text_entries=s->text_len;

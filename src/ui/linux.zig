@@ -30,7 +30,7 @@ extern fn zlc_gradient_surface(*anyopaque, *cpu_gradient.Surface) c_int;
 extern fn zlc_gradient_dirty(*anyopaque, u32, u32, u32, u32) void;
 extern fn zlc_brush_stats(*anyopaque, *u32, *u32, *u32) void;
 pub const BrushStats = struct { creations: u32 = 0, evictions: u32 = 0, cached: u32 = 0 };
-extern fn zlc_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8) c_int;
+extern fn zlc_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8, f32) c_int;
 extern fn zlc_prepared(*anyopaque, *anyopaque, f32, f32, f32, i32, i32, ?*const drawing.Rect, u32) c_int;
 extern fn zlc_scale(*anyopaque) f32;
 extern fn zlc_push_clip(*anyopaque, f32, f32, f32, f32) void;
@@ -648,9 +648,14 @@ pub const Renderer = struct {
         return self.textFont(rect, utf8, color, .{});
     }
     pub fn textFont(self: *Renderer, rect: Rect, utf8: []const u8, color: u32, font: commands.FontKey) !void {
+        return self.textSpaced(rect, utf8, color, font, 0);
+    }
+    /// A label with `spacing` DIP after each of its characters.
+    pub fn textSpaced(self: *Renderer, rect: Rect, utf8: []const u8, color: u32, font: commands.FontKey, spacing: f32) !void {
         if (utf8.len > 64 * 1024) return error.TextTooLong;
+        if (!std.math.isFinite(spacing)) return error.InvalidGeometry;
         if (!std.unicode.utf8ValidateSlice(utf8)) return error.InvalidUtf8;
-        if (zlc_text(self.native.?, rect.x, rect.y, rect.width, rect.height, utf8.ptr, @intCast(utf8.len), color, font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), if (font.family == 0) null else fonts.systemName(font.family).ptr) != 0) return error.DrawTextFailed;
+        if (zlc_text(self.native.?, rect.x, rect.y, rect.width, rect.height, utf8.ptr, @intCast(utf8.len), color & 0xff_ffff, font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), if (font.family == 0) null else fonts.systemName(font.family).ptr, spacing) != 0) return error.DrawTextFailed;
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
         try view.validate();
@@ -846,7 +851,7 @@ pub const Renderer = struct {
                 .text => |value| {
                     if (!layout.validRect(value.bounds)) return error.InvalidGeometry;
                     if (value.offset > text_bytes.len or value.len > text_bytes.len - value.offset) return error.InvalidTextRange;
-                    try self.textFont(value.bounds, text_bytes[value.offset..][0..value.len], value.color, value.font);
+                    try self.textSpaced(value.bounds, text_bytes[value.offset..][0..value.len], value.rgb(), value.font, value.letterSpacing(text_bytes));
                 },
                 .prepared_text => |value| {
                     if (value.resource >= prepared.len) return error.MissingResources;

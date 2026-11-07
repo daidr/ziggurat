@@ -67,5 +67,28 @@ pub fn main() !void {
     _ = measurer.partWidth("say \"hello there\" now", 0, 9, null);
     _ = measurer.partWidth("日本語 text", 0, 9, null);
     try check(native.stats.parts == parts, "text not plain was measured from a shaped line", .{});
+    // Letter spacing goes after each grapheme, the last one's too, as the
+    // platform lays it out; spaced text is never put together or taken
+    // from a shaped line.
+    const spaced_texts = [_]struct { text: []const u8, graphemes: f32 }{
+        .{ .text = "BUILD", .graphemes = 5 },
+        .{ .text = "4.2.1", .graphemes = 5 },
+        .{ .text = "office", .graphemes = 6 },
+        .{ .text = "日本語", .graphemes = 3 },
+        .{ .text = "Spaced capitals wrap", .graphemes = 20 },
+    };
+    for (spaced_texts) |item| for ([_]f32{ 2, 5, -0.5 }) |spacing| {
+        const plain = native.width(item.text, .{});
+        const numbers = native.stats.numbers;
+        const shaped_parts = native.stats.parts;
+        const spaced = native.width(item.text, (view.Font{}).spaced(spacing));
+        const expected = plain + spacing * item.graphemes;
+        try check(@abs(spaced - expected) <= 1.5, "\"{s}\" spaced {d} is {d}, without {d}", .{ item.text, spacing, spaced, plain });
+        _ = measurer.partWidth("Spaced capitals wrap", 0, 6, (view.Font{}).spaced(spacing));
+        try check(native.stats.numbers == numbers and native.stats.parts == shaped_parts, "spaced \"{s}\" was put together", .{item.text});
+    };
+    // A combining mark is part of its letter's grapheme.
+    const combined = native.width("e\u{301}e\u{301}", (view.Font{}).spaced(4)) - native.width("e\u{301}e\u{301}", .{});
+    std.debug.print("text measure: two letters with marks spaced 4 widen by {d}\n", .{combined});
     std.debug.print("text measure: numbers {d}, parts {d}, layouts {d}\n", .{ native.stats.numbers, native.stats.parts, native.stats.layouts });
 }

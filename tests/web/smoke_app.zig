@@ -37,6 +37,11 @@ fn startupFailure(window: z.Window) ?[:0]const u8 {
     const backend = feed.backend();
     if (backend.enabled(backend.context)) return "FAIL: updates enabled";
     if (placement.refresh(window)) |_| return "FAIL: window placement available" else |err| if (err != error.UnsupportedCapability) return "FAIL: window placement error";
+    // The page measures letter spacing after each of the six letters.
+    const measurer: view.Measurer = .{};
+    const plain = measurer.textSize("SPACED", view.Font{}).width;
+    const spaced = measurer.textSize("SPACED", (view.Font{}).spaced(3)).width;
+    if (@abs(spaced - plain - 18) > 1.5) return "FAIL: letter spacing measured";
     return null;
 }
 

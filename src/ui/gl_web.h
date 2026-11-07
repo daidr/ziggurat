@@ -169,7 +169,7 @@ ZGL(zgl_attach) int zgl_attach(uint32_t id);
 ZGL(zgl_current) int zgl_current(uint32_t id,uint32_t *generation);
 ZGL(zgl_renderer) uint32_t zgl_renderer(char *out,uint32_t capacity);
 /* The page's text, as src/ui/web.c draws it (zw_text_draw, zw_text_copy). */
-ZGL(zw_text_draw) int zw_text_draw(const char *text,uint32_t length,const char *font,uint32_t font_length,double size,double max_width,double offset,uint32_t rgb,double *out);
+ZGL(zw_text_draw) int zw_text_draw(const char *text,uint32_t length,const char *font,uint32_t font_length,double size,double max_width,double offset,uint32_t rgb,double spacing,double *out);
 ZGL(zw_text_copy) void zw_text_copy(uint32_t *pixels);
 
 /* What the desktops' renderer takes from GTK, cairo, Pango and EGL, made

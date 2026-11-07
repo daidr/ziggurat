@@ -18,7 +18,7 @@ IMPORT(zw_layout_font) void zw_layout_font(const char *font,uint32_t font_length
 IMPORT(zw_layout_segments) int32_t zw_layout_segments(const uint16_t *text,uint32_t length,const char *locale,uint32_t locale_length,uint32_t kind,uint32_t *out,uint32_t capacity);
 /* The pen's x at each UTF-16 offset 0..length, restarting at hard breaks. */
 IMPORT(zw_layout_advances) void zw_layout_advances(const uint16_t *text,uint32_t length,const char *font,uint32_t font_length,float *out);
-IMPORT(zw_layout_begin) int zw_layout_begin(uint32_t width,uint32_t height,double scale,double left,double top,const char *font,uint32_t font_length,uint32_t rtl);
+IMPORT(zw_layout_begin) int zw_layout_begin(uint32_t width,uint32_t height,double scale,double left,double top,const char *font,uint32_t font_length,uint32_t rtl,double spacing);
 IMPORT(zw_layout_draw) void zw_layout_draw(const uint16_t *text,uint32_t length,double x,double baseline);
 IMPORT(zw_layout_end) void zw_layout_end(uint8_t *mask,uint32_t stride);
 
@@ -28,6 +28,7 @@ typedef struct Layout {
     uint16_t *text;float *pen;uint32_t *graphemes;LineInfo *lines;ZtlCell *cells;
     uint32_t length,grapheme_count,line_count,cell_count,glyphs,rtl;
     double left,right,height,ascent;
+    float spacing;
     char font[512];
 } Layout;
 /* The coverage the renderer replays: the mask this prepare filled. */
@@ -128,6 +129,19 @@ int ztl_layout_init(void *storage,void *engine,const char *text,uint32_t length,
     if(graphemes<0){release_layout(s);return ZTL_FAILED;}
     s->grapheme_count=(uint32_t)graphemes;
     zw_layout_advances(s->text,length16,s->font,(uint32_t)font_length,s->pen);
+    /* Letter spacing after each grapheme, as the page's letterSpacing
+       draws it: the pen moves on by it once a grapheme, from the start
+       of each hard line. */
+    s->spacing=options->spacing;
+    if(s->spacing!=0){
+        double extra=0;
+        for(uint32_t g=0;g<s->grapheme_count;g++){
+            const uint32_t at=s->graphemes[g],end=g+1<s->grapheme_count?s->graphemes[g+1]:length16;
+            for(uint32_t i=at;i<end&&i<length16;i++)s->pen[i]+=(float)extra;
+            if(at<length16&&is_break(s->text[at]))extra=0;else extra+=s->spacing;
+        }
+        s->pen[length16]+=(float)extra;
+    }
     const int wrap=options->wrap&&options->width>0;
     uint32_t *breaks=NULL;uint32_t break_count=0;
     if(wrap&&length16){
@@ -289,7 +303,7 @@ int ztl_ink_bounds(void *storage,ZtlRect *out,ZtlError *error){
 int ztl_prepare(void *storage,void *layout,float scale,int32_t left,int32_t top,uint32_t width,uint32_t height,uint32_t stride,uint8_t *mask,const ZtlRect *clip,ZtlError *error){
     memset(storage,0,ZTL_STORAGE);Layout *s=layout_of(layout);*error=(ZtlError){0};(void)clip; /* The renderer applies the exact viewport once at replay. */
     if(!width||!height)return ZTL_FAILED;
-    if(zw_layout_begin(width,height,scale,left,top,s->font,(uint32_t)strlen(s->font),s->rtl))return ZTL_OOM;
+    if(zw_layout_begin(width,height,scale,left,top,s->font,(uint32_t)strlen(s->font),s->rtl,s->spacing))return ZTL_OOM;
     for(uint32_t i=0;i<s->line_count;i++){const LineInfo *line=&s->lines[i];if(line->end>line->start)zw_layout_draw(s->text+line->start,line->end-line->start,line->x,line->baseline);}
     zw_layout_end(mask,stride);
     Prepared *p=storage;p->coverage=(ZgCoverage){mask,(size_t)stride*height,width,height,stride,left,top,scale};p->live=1;references++;prepared++;return ZTL_OK;

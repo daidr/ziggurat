@@ -6,7 +6,10 @@
 typedef struct Engine {PangoFontMap *map;uint64_t fonts_seen;} Engine;
 /* Fonts the application registered since the map last looked. */
 void zfont_refresh(void *map,uint64_t *seen);
-typedef struct Layout {PangoLayout *layout;uint32_t length,line_count,cell_count;ZtlLine *lines;ZtlCell *cells;} Layout;
+/* spacing: Pango puts letter spacing between graphemes, half on either
+   side of each and none past a line's ends; widths count it after every
+   grapheme, as the other engines lay it out, the last one's included. */
+typedef struct Layout {PangoLayout *layout;uint32_t length,line_count,cell_count;ZtlLine *lines;ZtlCell *cells;float spacing;} Layout;
 typedef struct Prepared {cairo_surface_t *surface;cairo_pattern_t *pattern;} Prepared;
 #include "text_layout_outline_linux.h"
 _Static_assert(sizeof(Engine)<=ZTL_STORAGE,"engine storage");
@@ -43,6 +46,12 @@ int ztl_layout_init(void *storage,void *engine,const char *text,uint32_t length,
     pango_layout_set_width(s->layout,options->wrap?(int)ceil((options->width+1e-3)*PANGO_SCALE):-1);
     pango_layout_set_wrap(s->layout,options->wrap==1?PANGO_WRAP_WORD:PANGO_WRAP_WORD_CHAR);
     pango_layout_set_text(s->layout,text,(int)length);s->length=length;
+    s->spacing=options->spacing;
+    if(s->spacing!=0){
+        PangoAttrList *list=pango_attr_list_new();if(!list)return ZTL_OOM;
+        pango_attr_list_insert(list,pango_attr_letter_spacing_new((int)lround((double)s->spacing*PANGO_SCALE)));
+        pango_layout_set_attributes(s->layout,list);pango_attr_list_unref(list);
+    }
     /* Materialize the native runs during explicit creation, before queries. */
     PangoRectangle logical;pango_layout_get_extents(s->layout,NULL,&logical);
     g_atomic_int_inc(&layouts);return ZTL_OK;
@@ -51,6 +60,16 @@ void ztl_layout_close(void *storage){Layout *s=storage;DROP_OBJECT(s->layout);g_
 int ztl_metrics(void *storage,ZtlMetrics *out,ZtlError *error){
     Layout *s=storage;*error=(ZtlError){0};PangoRectangle logical;pango_layout_get_extents(s->layout,NULL,&logical);
     *out=(ZtlMetrics){{dip(logical.x),dip(logical.y),dip(logical.width),dip(logical.height)},(uint32_t)pango_layout_get_line_count(s->layout),0,0};
+    if(s->spacing!=0){
+        /* The widest line with the spacing after its last grapheme. */
+        float widest=0;
+        PangoLayoutIter *lines=pango_layout_get_iter(s->layout);
+        do{
+            PangoLayoutLine *line=pango_layout_iter_get_line_readonly(lines);PangoRectangle extents;pango_layout_iter_get_line_extents(lines,NULL,&extents);
+            float width=dip(extents.width)+(line->length>0?s->spacing:0);if(width>widest)widest=width;
+        }while(pango_layout_iter_next_line(lines));
+        pango_layout_iter_free(lines);out->bounds.width=widest>0?widest:0;
+    }
     PangoLayoutIter *iter=pango_layout_get_iter(s->layout);
     do{PangoLayoutRun *run=pango_layout_iter_get_run_readonly(iter);if(run){out->glyphs+=(uint32_t)run->glyphs->num_glyphs;for(int i=0;i<run->glyphs->num_glyphs;i++)if(run->glyphs->glyphs[i].glyph&PANGO_GLYPH_UNKNOWN_FLAG)out->missing++;}}while(pango_layout_iter_next_run(iter));
     pango_layout_iter_free(iter);return ZTL_OK;
@@ -109,7 +128,7 @@ int ztl_lines(void *storage,ZtlLine *out,uint32_t capacity,uint32_t *count,ZtlEr
     PangoLayoutIter *iter=pango_layout_get_iter(s->layout);uint32_t index=0;
     do{
         PangoLayoutLine *line=pango_layout_iter_get_line_readonly(iter);PangoRectangle logical;pango_layout_iter_get_line_extents(iter,NULL,&logical);
-        out[index]=(ZtlLine){(uint32_t)line->start_index,(uint32_t)(line->start_index+line->length),s->length,dip(logical.x),dip(logical.y),dip(logical.width),dip(logical.height),dip(pango_layout_iter_get_baseline(iter))};
+        out[index]=(ZtlLine){(uint32_t)line->start_index,(uint32_t)(line->start_index+line->length),s->length,dip(logical.x),dip(logical.y),dip(logical.width)+(line->length>0?s->spacing:0),dip(logical.height),dip(pango_layout_iter_get_baseline(iter))};
         if(index)out[index-1].next=(uint32_t)line->start_index;
         index++;
     }while(pango_layout_iter_next_line(iter));
