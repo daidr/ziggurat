@@ -74,7 +74,7 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 - 对辅助技术隐藏：`access_hidden = true` 让节点及其中的一切照常绘制、照常接收指针与键盘，但不进入可访问性树，如同 HTML 的 aria-hidden：叠在下面的卡片、交叉淡化时画出的旧文字副本不会被读屏读到，它们的文字不计入外层控件的名称（见下文无外观控件），辅助技术的请求也到不了它们。锚定在其中的浮层、菜单、列表与提示一并隐藏。与 `ignore_input` 同时设置即为惰性（inert）；`presentColumn` 正在退出的内容就是这样。检查器把这样的节点的角色显示为 ignored。
 - 对辅助技术禁用：`access_disabled = true` 告诉辅助技术节点及其中的一切不可用，如同 HTML 的 aria-disabled，但它们保留指针、键盘焦点、Tab 顺序中的位置和外观：读屏仍能到达并读出它们（读作不可用，连同说明原因的描述），只是不会按下或编辑它们（`Context` 丢弃这些请求）。点击和按键照常交给应用，由应用在不可用时忽略。不变暗；`enabled = false` 才一次做完全部。
 - 不进 Tab 顺序：`tab_stop = false` 让可聚焦节点不被 Tab 经过，如同 tabindex=-1，按下、组内方向键和 `Host.focusNode` 仍能聚焦它。
-- 角色：`role` 让容器或文本在辅助技术面前不只是分组或一段文字：`.region`（地标区域，用 `name` 命名）、`.navigation`、`.article`、`.group`、`.log`（聊天记录，新增的内容会被礼貌地读出）、`.timer`、`.alert`（出现或改变的内容立即打断朗读）、`.status`、`.separator`、`.heading`（级别取自字体：`Font.heading1` 为 1 级，依此类推）、`.grid`（单元格接收焦点与方向键的表格，如应用自绘的电子表格）、`.tree_grid`（行可展开的网格）、`.row` 与 `.cell`（这类表格的行与单元格）、`.deletion` 与 `.insertion`（差异视图里删去与加入的行、划掉的旧价格）。带角色的容器里的文本节点作为文本进入可访问性树，供实时区域朗读。
+- 角色：`role` 让容器或文本在辅助技术面前不只是分组或一段文字：`.region`（地标区域，用 `name` 命名）、`.navigation`、`.article`、`.group`、`.log`（聊天记录，新增的内容会被礼貌地读出）、`.timer`、`.alert`（出现或改变的内容立即打断朗读）、`.status`（状态信息，如“已选 3 行”“已保存”：其中的文字改变时整段礼貌地读出，如 aria-atomic；状态按元素 ID 与上一帧对照，前面会增删兄弟节点时给它 `key`，ID 变了视为新出现，不读；辅助技术刚接入时与状态第一次出现时不读；在 log、alert 或另一个 status 之内的只作为它们的一部分）、`.separator`、`.heading`（级别取自字体：`Font.heading1` 为 1 级，依此类推）、`.grid`（单元格接收焦点与方向键的表格，如应用自绘的电子表格）、`.tree_grid`（行可展开的网格）、`.row` 与 `.cell`（这类表格的行与单元格）、`.deletion` 与 `.insertion`（差异视图里删去与加入的行、划掉的旧价格）。带角色的容器里的文本节点作为文本进入可访问性树，供实时区域朗读。
 - 表格与集合的位置：`row_count`、`column_count`（aria-rowcount/aria-colcount，表头行计入，0 表示按已构建的数）放在表格或网格上，`row_index`、`column_index`（aria-rowindex/aria-colindex，从 1 起）放在行或单元格上，供只构建可见部分的表格读出“第 41 行，共 1000 行”；`position_in_set` 与 `set_size`（aria-posinset/aria-setsize，从 1 起，0 不设）放在自建的列表、列表框、树、菜单或标签列表的条目上，优先于内置集合按已构建的条目数出的位置。虚拟表格自己报出全部行数、列数和行、列头的索引。`multiselectable`（aria-multiselectable）声明自建的列表框、网格、树或树网格可以多选；`access_selected`（aria-selected）把标签、选项、行、单元格或树条目报为选中或未选中，而不画内置选中行的强调色，供用自己方式显示选择的条目使用。
 - 校验、方向与搜索：`invalid`（aria-invalid）把值标为不合法而不带消息，例如失焦时仍为空的必填字段；`orientation`（`.horizontal` 或 `.vertical`，aria-orientation）告诉辅助技术自建的滑块、分隔线、分栏、工具栏、标签列表或菜单朝哪个方向排列，不设时平台按形状猜；`search`（role=searchbox）让文本输入成为搜索框，`search` 区域里的输入自动如此。
 - ARIA 属性：`role_description`（aria-roledescription）、`key_shortcuts`（aria-keyshortcuts，如 "Control+S"）、`value_text`（aria-valuetext，如 "5 星中的 3 星"）、`busy`（aria-busy）、`current`（aria-current）、`popup`（aria-haspopup，给自己构建弹出内容的按钮）、`sort`（aria-sort）、`auto_complete`（aria-autocomplete）。三个平台分别映射到 ATK 的状态与对象属性、NSAccessibility 的属性（含旧 API 的 AXEnabled 等）与 UI Automation 的属性（LocalizedControlType、AriaProperties、AcceleratorKey、LiveSetting、LandmarkType、HeadingLevel）。
@@ -191,6 +191,7 @@ try v.end();
 
 - `popupButton(value, expanded, style)` 是一个显示 `value`（例如选中的日期）、画法和读法都像组合框的字段，按下、Enter 或 Space 激活的那一遍返回 true，应用在这个分支里切换紧随其后的浮层的开关。名称取 `Style.name`，在 `field` 里没有名称时取字段标签。
 - `popover(&open, placement, style)` 与 `end` 配对，在前一个节点（锚点）旁边开始一个浮在窗口上的面板，`open` 为 true 时返回 true，只在这时构建内容，无论返回什么都要 `end`。`Placement` 选择放在锚点的哪一侧（默认下方）、沿该侧如何对齐（默认起始边）、与锚点的间距和是否至少与锚点同宽；这一侧放不下而对侧空间更大时翻到对侧，并始终夹在窗口内（`view.placePopover` 是同一计算）。内边距默认 8 DIP，面板画成带边框的圆角矩形。
+- `popoverPresent(&open, &presence, transition, placement, style)` 是带进出动画的 `popover`：打开时从 `transition.hidden` 进入，`open` 清除后面板继续构建并按 `transition` 退出，退出结束前返回 true；退出期间面板不接收指针、键盘与焦点，也不进入可访问性树，不算作打开的浮层（Escape 与外部按下照常交给窗口）。减少动态效果时立即出现与消失。
 - 浮层打开时焦点移到其中第一个可聚焦的控件（构建可以用 `v.restore` 另选，`v.popover_opened` 在打开的那一遍非空）。Escape 或在面板与锚点之外按下会清除 `open`；Escape、或焦点在里面时由构建关闭，焦点回到锚点；在外面的按下照常交给下面的控件。锚点禁用时浮层关闭。同一时间最多一个浮层。
 - 由嵌入叶子组成的复合控件可以用 `takeEvent(id)` 取走本遍针对自己登记的子控件 id 的事件。
 
@@ -297,6 +298,7 @@ try v.text("zig build test", .{ .font = view.Font.code });
 
 - `tree(&selection, style)` 与 `end` 配对开始一棵树。`treeItem(id, expanded, label, style)` 打开一个以 `id` 为键的条目并加入它的行，返回 Enter 激活这一行的那一遍；子条目在它和对应的 `end` 之间构建，层级由嵌套决定。`expanded` 为 null 表示叶子；非 null 时行首画三角，按下三角只切换展开而不选择。应用只在 `expanded.*` 为 true 时构建子条目。
 - `table(columns, &sort, &selection, style)` 与 `end` 配对开始一个表格，先画一行列头，`Column` 给出标题、`Track`（默认 `fraction(1)`）和是否可排序。激活可排序的列头时 `sort` 变为该列升序，再次激活翻转方向；返回 true 的那一遍由应用按 `sort` 排列行。不可排序的列头不取焦点。`Style.gap` 是列间距，为 0 时取 8 DIP。
+- `tableWith(columns, &sort, &selection, style, .{ .header_cell = .{ .context, .call } })` 是带更多选项的 `table`：`header_cell.call(context, v, column)` 在构建每个列头时调用，`column` 是传入列数组的下标，它构建的内容放在列头标题与排序箭头之后、与标题同一行（如列的类型标记），列头仍按列对齐、仍可点击排序。
 - `tableRow(id, name, style)` 开始一行，`name` 是行的可访问名称（例如第一格），随后每列构建一个单元格，再 `end`。表头和所有行用同一组列宽：列宽在每次排列时由各列单元格（只计跨一列的）的最大内容尺寸统一求出，所以长文本不会让某一行错位。行放进 `scroll` 容器时表头保持不动。选中行以强调色填充，其中文本改用强调色上的前景色。
 - 行共享一个 Tab 停靠点，落在 `cursor` 行。Up/Down 移动并单选，Home/End 到首尾，PageUp/PageDown 按可见行数翻页；Ctrl+方向键只移动 `cursor`，Space 单选、Ctrl+Space 切换、Shift+方向键或 Shift+Space 从 `anchor` 选到当前行，Ctrl+Shift 把范围加入已有选择，Ctrl+A 全选（多选时）。树里 Right 展开折叠的条目，已展开时进入第一个子条目；Left 折叠展开的条目，否则回到父条目。指针按下同理：Ctrl 切换、Shift 选范围、Ctrl+Shift 追加范围。移动后的行以最小位移滚入外层滚动容器。
 - 行全部参与构建和排列，不做虚拟化；滚出可见区的行不绘制、也不登记命中（焦点行除外）。大量行请使用 `ziggurat_view_collections` 的[虚拟表格、大纲与网格视图](collections.md)，或 `ziggurat_ui` 的虚拟列表。`treeItem`、`tableRow` 在各自容器之外调用返回 `NotContainer`。
@@ -619,7 +621,7 @@ try v.embed(field.embed(), .{ .grow = 1, .key = 7 });
 
 放在 `field` 里时，文本框把字段的帮助或错误作为说明，错误时标为无效，`Options.name` 为空时用字段标签作为名称。
 
-`Options.placeholder` 是输入为空且没有输入法组合时显示的文字（例如“搜索”），为空时取外层 `search`、`tokenField` 或 `editableComboBox` 的 `Style.placeholder`；没有名称和字段标签时它也作为文本框的可访问名称。`placeholder_color` 是它的颜色，默认是主题的弱化文字色，只影响绘制，不改变输入的文字与主题。`Options.caret_width` 以 DIP 设定光标宽度，按设备像素取整、至少一个像素，用于块状光标、大字号主题或演示；0 或负数隐藏光标而字段仍可编辑。它只影响绘制，布局、输入法候选位置和闪烁不变；为 null 时沿用 `colors.caret_style` 或平台的一像素光标。
+`Options.placeholder` 是输入为空且没有输入法组合时显示的文字（例如“搜索”），为空时取外层 `search`、`tokenField` 或 `editableComboBox` 的 `Style.placeholder`；没有名称和字段标签时它也作为文本框的可访问名称。`placeholder_color` 是它的颜色，默认是主题的弱化文字色，只影响绘制，不改变输入的文字与主题。`Options.caret_width` 以 DIP 设定光标宽度，按设备像素取整、至少一个像素，用于块状光标、大字号主题或演示；0 或负数隐藏光标而字段仍可编辑。它只影响绘制，布局、输入法候选位置和闪烁不变；为 null 时沿用 `colors.caret_style` 或平台的一像素光标。`Options.max_length` 像 HTML 的 `maxlength` 那样限制用户能让文字达到的长度（UTF-16 码元）：键入、粘贴或输入法提交的文字截到光标处放得下的部分，放不下的按键什么也不改；应用设置的文字不截断，0 不限制，null 沿用 Field 自己的 `max_length`。`setMaxLength(n)` 之后改变它。
 
 TextField 与 Field 的地址必须保持稳定。节点 ID 用于注册，所以当前面的兄弟节点可能变化时要给它 `Style.key`；ID 改变会记录 `TextFieldIdChanged` 而不是静默重新注册。关闭时先调用 `field.detach()` 停止推迟的工作，再按 Field 的规则 `close`。投递或准备的失败记录在 `last_error`。
 
@@ -666,7 +668,7 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt`、上面的指针、`wheel` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或原生捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
-`h.recordSemantics(&context)` 让之后每次渲染都像窗口一样记录可访问性树（需要 `-Daccessibility=true` 构建，否则跳过测试），`h.accessible(query)` 或 `h.accessibleId(id)` 读出辅助技术会得到的内容：`role()`、`name()`、`value()`、`description()`、`roleDescription()`、`keyShortcuts()`、`valueText()`、`parent()`，以及 `entry` 里的各状态（`enabled`、`focusable_disabled`、`focused`、`checked`、`expanded`、`selected`、`busy`、`current`、`popup`、`level`、`controls`、`invalid`、`search`、`vertical`/`horizontal`、`position`/`set_size`、`row_count`/`column_count`/`row_index`/`column_index`、`described_by`、`error_message` 等）。`h.accessibleAll(&buffer)` 按记录顺序（绘制顺序，父节点在子节点之前）列出除窗口根之外的全部语义节点，返回写入的部分，缓冲区放不下时返回 `NoSpaceLeft`。`editCommand(EditKey)` 像编辑菜单那样发送一条编辑命令，让 `observeInput` 的列看到它。`codeDown` 与 `codeUp` 按位置按下与放开键。
+`h.recordSemantics(&context)` 让之后每次渲染都像窗口一样记录可访问性树（需要 `-Daccessibility=true` 构建，否则跳过测试），`h.accessible(query)` 或 `h.accessibleId(id)` 读出辅助技术会得到的内容：`role()`、`name()`、`value()`、`description()`、`roleDescription()`、`keyShortcuts()`、`valueText()`、`parent()`，以及 `entry` 里的各状态（`enabled`、`focusable_disabled`、`focused`、`checked`、`expanded`、`selected`、`busy`、`current`、`popup`、`level`、`controls`、`invalid`、`search`、`vertical`/`horizontal`、`position`/`set_size`、`row_count`/`column_count`/`row_index`/`column_index`、`described_by`、`error_message` 等）。`h.clipboard()` 给出 Harness 自己的剪贴板（`ui.editor.Clipboard`），测试把它交给要复制或粘贴的控件（文本框的 `clipboard`、检查器、终端等）代替系统剪贴板：`h.clipboardText()` 读出最后写入的文字，`h.setClipboardText(text)` 模拟别的应用复制，`h.failClipboard(err)` 让之后的写入失败并返回 `err`（如系统拒绝），传 null 恢复。`h.accessibleAll(&buffer)` 按记录顺序（绘制顺序，父节点在子节点之前）列出除窗口根之外的全部语义节点，返回写入的部分，缓冲区放不下时返回 `NoSpaceLeft`。`editCommand(EditKey)` 像编辑菜单那样发送一条编辑命令，让 `observeInput` 的列看到它。`codeDown` 与 `codeUp` 按位置按下与放开键。
 
 ## 背景效果
 

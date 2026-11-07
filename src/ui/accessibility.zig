@@ -445,16 +445,28 @@ test "subtree export copies labels and rejects complete graph before output" {
 /// alert's (`Role.alert`) as it appears or changes, at once. Screen
 /// readers read neither from the platforms' own live regions outside web
 /// content, but all read announcements. Alerts are told by their text,
-/// which an element's ID shifting as others appear before it keeps. The
-/// first publication says nothing: its content was there before.
+/// which an element's ID shifting as others appear before it keeps. A
+/// status (`Role.status`) is read as ARIA's is, politely and whole
+/// (aria-atomic), when its text changes: all the text inside it, after
+/// what is being read. A status is told from the last publication's by
+/// its entry's ID, which keyed elements and elements whose earlier
+/// siblings stay keep from frame to frame; one whose ID shifted is read as
+/// one appearing, which reads nothing, rather than as another's change. A
+/// status inside a log, an alert or another status is read as part of it,
+/// not on its own. Busy is not honoured, as for logs. The first
+/// publication says nothing: its content was there before.
 pub const Live = struct {
     pub const max_text = 512;
     pub const max_told = 8;
+    pub const max_statuses = 32;
+    const Status = struct { id: u64, hash: u64 };
     pub const Told = struct { text: []const u8, assertive: bool, buffer: [max_text]u8 = undefined };
     seen: [max_nodes]u64 = undefined,
     seen_len: usize = 0,
     alerts: [max_told]u64 = undefined,
     alerts_len: usize = 0,
+    statuses: [max_statuses]Status = undefined,
+    statuses_len: usize = 0,
     started: bool = false,
 
     fn contains(list: []const u64, id: u64) bool {
@@ -507,13 +519,14 @@ pub const Live = struct {
         const speak = self.started;
         self.started = true;
         var has = false;
-        for (tree.entries[0..tree.len]) |entry| if (entry.role == .log or entry.role == .alert) {
+        for (tree.entries[0..tree.len]) |entry| if (entry.role == .log or entry.role == .alert or entry.role == .status) {
             has = true;
             break;
         };
         if (!has) {
             self.seen_len = 0;
             self.alerts_len = 0;
+            self.statuses_len = 0;
             return told[0..0];
         }
         var count: usize = 0;
@@ -578,6 +591,38 @@ pub const Live = struct {
                 alerts_len += 1;
             }
         };
+        // Statuses outside the other live regions and statuses (entries
+        // follow their parents).
+        var inside: [max_nodes]bool = @splat(false);
+        var statuses: [max_statuses]Status = undefined;
+        var statuses_len: usize = 0;
+        for (tree.entries[0..tree.len], 0..) |entry, i| {
+            if (indexOf(tree, entry.parent)) |p| if (p < i) {
+                inside[i] = switch (tree.entries[p].role) {
+                    .log, .alert, .status => true,
+                    else => inside[p],
+                };
+            };
+            if (entry.role != .status or inside[i]) continue;
+            var buffer: [max_text]u8 = undefined;
+            const value = text(tree, i, &buffer);
+            const hash = std.hash.Wyhash.hash(0, value);
+            const before: ?u64 = for (self.statuses[0..self.statuses_len]) |status| {
+                if (status.id == entry.id) break status.hash;
+            } else null;
+            if (speak and value.len > 0 and count < told.len) if (before) |old| if (old != hash) {
+                told[count] = .{ .text = undefined, .assertive = false };
+                @memcpy(told[count].buffer[0..value.len], value);
+                told[count].text = told[count].buffer[0..value.len];
+                count += 1;
+            };
+            if (statuses_len < statuses.len) {
+                statuses[statuses_len] = .{ .id = entry.id, .hash = hash };
+                statuses_len += 1;
+            }
+        }
+        @memcpy(self.statuses[0..statuses_len], statuses[0..statuses_len]);
+        self.statuses_len = statuses_len;
         @memcpy(self.seen[0..seen_len], seen[0..seen_len]);
         self.seen_len = seen_len;
         @memcpy(self.alerts[0..alerts_len], alerts[0..alerts_len]);
@@ -608,6 +653,58 @@ test "live regions read what a log gained and what an alert shows" {
     try std.testing.expectEqualStrings("Disk full", said[1].text);
     try std.testing.expect(said[1].assertive);
     // The same alert says nothing again.
+    try std.testing.expectEqual(@as(usize, 0), live.update(&tree, &told).len);
+}
+
+fn statusTree(tree: *Tree, selected: []const u8, options: struct { status: bool = true, status_id: u64 = 2, logged: bool = false, banner: []const u8 = "" }) !void {
+    const bounds: z.Rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 };
+    try tree.reset("Window", bounds);
+    if (options.status) {
+        try tree.add(.{ .id = options.status_id, .role = .status, .name = "", .bounds = bounds });
+        try tree.add(.{ .id = options.status_id + 1, .parent = options.status_id, .role = .text, .name = selected, .bounds = bounds });
+        try tree.add(.{ .id = options.status_id + 2, .parent = options.status_id, .role = .text, .name = "rows selected", .bounds = bounds });
+    }
+    if (options.logged) {
+        try tree.add(.{ .id = 20, .role = .log, .name = "Messages", .bounds = bounds });
+        try tree.add(.{ .id = 21, .parent = 20, .role = .text, .name = "Hi", .bounds = bounds });
+        try tree.add(.{ .id = 22, .parent = 20, .role = .status, .name = selected, .bounds = bounds });
+    }
+    if (options.banner.len > 0) {
+        try tree.add(.{ .id = 30, .role = .alert, .name = "", .bounds = bounds });
+        try tree.add(.{ .id = 31, .parent = 30, .role = .status, .name = options.banner, .bounds = bounds });
+    }
+}
+
+test "a status reads its whole text politely when it changes" {
+    var tree: Tree = .{};
+    var live: Live = .{};
+    var told: [Live.max_told]Live.Told = undefined;
+    // Not as assistive technology came, nor when unchanged.
+    try statusTree(&tree, "3", .{});
+    try std.testing.expectEqual(@as(usize, 0), live.update(&tree, &told).len);
+    try std.testing.expectEqual(@as(usize, 0), live.update(&tree, &told).len);
+    try statusTree(&tree, "4", .{});
+    var said = live.update(&tree, &told);
+    try std.testing.expectEqual(@as(usize, 1), said.len);
+    try std.testing.expectEqualStrings("4 rows selected", said[0].text);
+    try std.testing.expect(!said[0].assertive);
+    try std.testing.expectEqual(@as(usize, 0), live.update(&tree, &told).len);
+    // Inside a log or an alert a status is read as part of it, not alone;
+    // the alert appearing is read as an alert.
+    try statusTree(&tree, "4", .{ .logged = true, .banner = "Saved" });
+    said = live.update(&tree, &told);
+    try std.testing.expectEqual(@as(usize, 1), said.len);
+    try std.testing.expect(said[0].assertive);
+    try statusTree(&tree, "6", .{ .logged = true, .banner = "Saved" });
+    said = live.update(&tree, &told);
+    try std.testing.expectEqual(@as(usize, 1), said.len);
+    try std.testing.expectEqualStrings("6 rows selected", said[0].text);
+    // A status whose ID shifted, or shown anew, reads nothing.
+    try statusTree(&tree, "7", .{ .status_id = 40 });
+    try std.testing.expectEqual(@as(usize, 0), live.update(&tree, &told).len);
+    try statusTree(&tree, "", .{ .status = false });
+    _ = live.update(&tree, &told);
+    try statusTree(&tree, "8", .{ .status_id = 40 });
     try std.testing.expectEqual(@as(usize, 0), live.update(&tree, &told).len);
 }
 

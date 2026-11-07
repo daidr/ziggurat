@@ -33,7 +33,14 @@ try owner.setMenu(&.{
 
 ### 菜单项图标
 
-命令项和 submenu 可以带 `icon`，显示在标签前，比如 VPN 托盘菜单里每个服务器的旗帜。`system.MenuIcon.fromPng(app, png, .{})` 从 PNG 字节做一个图标，非 PNG 返回 `InvalidPng`；每个图标做一次，给任意多个菜单项用。分隔符不能带图标（`InvalidMenuIcon`）。
+命令项和 submenu 可以带 `icon`，显示在标签前，比如 VPN 托盘菜单里每个服务器的旗帜。`system.MenuIcon.fromPng(app, png, .{})` 从 PNG 字节做一个图标，非 PNG 返回 `InvalidPng`；每个图标做一次，给任意多个菜单项用。分隔符不能带图标（`InvalidMenuIcon`）。`system.MenuIcon.fromPixels(app, bgra, width, height, stride, .{})` 从自上而下的预乘 BGRA8 像素做图标（内部编码成不压缩的 PNG 后交给 `fromPng`），SVG 图标由此而来：`ziggurat_view` 的 `SvgImage.raster(64, color)` 把 SVG 按长边 64 像素、以 `color` 作 `currentColor` 画成像素，做完图标后 `deinit` 释放：
+
+```zig
+var drawn = try svg_picture.raster(64, 0x000000);
+defer drawn.deinit();
+var gear = try system.MenuIcon.fromPixels(app, drawn.pixels, drawn.width, drawn.height, drawn.stride, .{ .template = true });
+defer gear.deinit();
+```
 
 ```zig
 var japan = try system.MenuIcon.fromPng(app, japan_png, .{});

@@ -283,6 +283,59 @@ test "the wheel over a tooltip scrolls what lies under it" {
     try testing.expectEqual((try h.find(.{ .key = 1 })).id, id.?);
 }
 
+const Fading = struct {
+    open: bool = false,
+    presence: view.Presence = .{},
+    clicks: usize = 0,
+    fn build(self: *Fading, v: *View) anyerror!void {
+        try v.column(.{ .gap = 4 });
+        _ = try v.button("Anchor", .{});
+        const transition: view.Transition = .{
+            .hidden = .{},
+            .enter = .{ .tween = .{ .duration_ns = 100, .easing = .linear } },
+            .exit = .{ .tween = .{ .duration_ns = 100, .easing = .linear } },
+        };
+        if (try v.popoverPresent(&self.open, &self.presence, transition, .{ .gap = 0 }, .{ .name = "Panel", .width = 120 })) _ = try v.button("Inside", .{});
+        try v.end();
+        if (try v.button("Under", .{})) self.clicks += 1;
+        try v.end();
+    }
+};
+
+fn popoverNode(h: *const Harness) ?*const view.Node {
+    for (h.nodes()) |*node| if (node.kind == .popover) return node;
+    return null;
+}
+
+test "a popover enters as it opens and stays until its exit ends" {
+    var storage: Storage = .{};
+    var app: Fading = .{};
+    var h = Harness.init(&app, Fading.build, storage.buffers(), .{});
+    try h.render();
+    try testing.expect(!popoverNode(&h).?.checked);
+    app.open = true;
+    try h.render();
+    try h.advance(50);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), popoverNode(&h).?.style.opacity, 1e-3);
+    try h.advance(100);
+    try testing.expectApproxEqAbs(@as(f32, 1), popoverNode(&h).?.style.opacity, 1e-3);
+    _ = try h.find(.{ .text = "Inside" });
+    // Closed, it fades out, still shown, but takes no input.
+    app.open = false;
+    try h.render();
+    try h.advance(50);
+    const leaving = popoverNode(&h).?;
+    try testing.expect(leaving.checked and leaving.leaving and leaving.passthrough and leaving.access_hidden);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), leaving.style.opacity, 1e-3);
+    try testing.expect(h.view.overlay.popover == null);
+    try h.click(.{ .text = "Under" });
+    try testing.expectEqual(@as(usize, 1), app.clicks);
+    try testing.expect(!app.open);
+    try h.advance(100);
+    try testing.expect(!popoverNode(&h).?.checked);
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Inside" }));
+}
+
 const Pages = struct {
     step: u8 = 0,
     back: bool = false,
