@@ -102,7 +102,9 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 
 自己滚动、不经滚动容器的视图（终端、富文本编辑器、虚拟表格与大纲）用 `ui.scroll.Bar` 画滚动条，外观与滚动容器一致，跟随主题：`box` 是滑块所沿的视图（右边缘，`leading` 时左边缘，横向时底边），`view`、`content`、`offset` 是可见长度、总长度与偏移，单位任意（终端用行数）。`Frame.scrollbar(bar, .{ .dragging, .color })` 画滑块：默认主题的 `track` 色，`color` 给自有配色的视图（如终端）替换；拖动时向内容一侧加宽 2 DIP；无处可滚时什么也不画。`thumb` 给出滑块矩形，`offsetAt(start)` 把拖动中滑块起点换算成偏移，`hit(point)` 判断指针是否在边缘 12 DIP 的条带上。终端与富文本编辑器只在指针位于其上或拖动滑块时显示滚动条；虚拟集合与滚动容器一样常显。
 
-Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions` 个，按绘制顺序），滚轮事件落在其中时交给最内层的那个，作为一个携带 `Event.scroll` 的构建遍立即作用于模型并消费该事件；不在任何滚动容器内的滚轮照常交给 Context。目前没有滚动条拖动、键盘滚动、焦点自动显露和横向滚动。
+Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions` 个，按绘制顺序），滚轮事件落在其中时交给最内层的那个，作为一个携带 `Event.scroll` 的构建遍立即作用于模型并消费该事件；不在任何滚动容器内的滚轮照常交给 Context。目前没有滚动条拖动、焦点自动显露和横向滚动。
+
+滚动容器也可以用键盘滚动：控件与应用都没有处理的按键里，Up/Down 滚一行（40 DIP），PageUp/PageDown 与 Space/Shift+Space 滚一页（视口高度减一行，至少半个视口），Home/End（macOS 上还有 Cmd+Up/Down）滚到顶或底。按键交给焦点所在、在这个方向上还能滚的最内层滚动容器；焦点不在滚动容器里时交给指针下的。焦点接收文本时（`focusTakesText`）Space 不翻页，照常输入空格。
 
 `Style.sticky`（`Sticky{ top, right, bottom, left }`，单位 DIP）让节点如 CSS 的 `position: sticky` 停在最近的滚动容器（没有时是窗口）边缘：滚动让它越过设定的距离时，它连同后代平移回来停住，直到它的父容器的内容区滚走、把它推出去。分节列表的标题因此停在顶部，下一节的标题到来时把它顶走。停住的节点画在兄弟节点之上，命中与可访问性边界跟随平移后的位置。
 
@@ -220,9 +222,10 @@ try v.end();
 - `popoverMenu(style)` 与 `end` 配对，以前一个节点为锚点，菜单打开时返回 true，只在这时构建菜单项，无论返回什么都要 `end`。在锚点上按下次键（右键）时菜单在指针处打开；焦点在锚点内时按菜单键或 Shift+F10，菜单在锚点下方打开并高亮第一项。锚点嵌套时最内层的锚点打开自己的菜单，右键落在锚点里的控件上也一样。
 - `menuItem(label, options, style)` 在选中它的那一遍返回 true（按下、Enter 或 Space），菜单随之关闭，焦点回到打开菜单之前的控件。`MenuItemOptions.checked` 非空时是复选项，加上 `radio` 画成单选的圆点；`shortcut` 只显示在项的末端并作为描述朗读，快捷键本身用 `bindKey` 绑定。禁用的项画成灰色，不能高亮，也不能选择。
 - `submenu(label, style)` 加一项并开始它的子菜单，与 `end` 配对，子菜单显示时返回 true。子菜单放在这一项的末端一侧、与它顶部对齐，放不下时翻到另一侧；顶层菜单在右下放不下时向左、向上翻，并夹在窗口内。`menuSeparator()` 在两组项之间画一条线。面板最窄 160 DIP，内边距默认 4 DIP，最多 8 层。
+- 项还可以带 `ItemOptions.subtitle`（标签下方的第二行小字）、`trailing`（快捷键之前的尾部值，如“125%”）、`danger`（危险操作：文字与图标用主题的 `danger` 色，高亮时与强调色对比不足 3:1 就改用强调色上的文字色）与 `icon_color`（图标颜色）；副标题、尾部值与提示或快捷键依次作为描述朗读。`Style.key` 给项一个稳定的身份。`menuItemState(label, options, style)` 与 `menuItem` 相同，但返回 `MenuItemState`，`highlighted` 让应用在键盘或指针停在某项时预览它（例如字号菜单在高亮时就预览字号）。`menuItemContent(label, options, style)` 打开一个画法与普通项相同的项容器（默认竖排，带普通项的内边距），里面的内容由应用构建并 `end`，`label` 用于命名与首字母跳转，返回 `MenuItemState`。菜单面板的 `Style.max_width` 限制面板宽度，过长的标签以省略号截断，子菜单沿用它。
 - `ItemOptions.keep_open` 让菜单项被选中（按下、Enter 或 Space）后菜单保持打开、高亮留在该项上，例如账户菜单里切换主题的一排单选项。
 - 打开期间菜单接管按键：Up、Down、Home、End 在最深一层的可用项之间移动高亮并循环，字母移到下一个以它开头的项；Right、Enter 或 Space 打开子菜单并高亮其第一项，Left 或 Escape 关闭最深一层子菜单，顶层的 Escape 与 Tab 关闭菜单并交还焦点。从右到左时 Left 与 Right 互换。指针移到项上会高亮它并打开它的子菜单、关闭更深的子菜单；在所有面板之外按下会关闭菜单，并照常交给下面的控件；面板上的滚轮不会滚动下面的内容。
-- `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，Up 打开并高亮最后一项（WAI-ARIA 菜单按钮模式），菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。
+- `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，Up 打开并高亮最后一项（WAI-ARIA 菜单按钮模式），菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。按钮读作打开菜单（`has_popup`）。`popoverMenuButtonWith(label, .{ .placement, .open, .max_width }, style)` 另外给出：`placement`（`view.Placement`）让菜单像浮层一样附着在按钮的某一边与对齐方式上，放不下时翻转并夹在窗口内，从右到左时镜像；`open`（`*bool`）由应用持有菜单是否打开，应用把它设为 true 或 false 就打开或关闭菜单，用户打开或关闭菜单时它也随之更新；`max_width` 限制面板宽度。
 - 没有外观的菜单，用于项的布局由应用决定的菜单，例如头像加名字或色块：`menuButtonBase(style)` 打开一个作为菜单按钮的容器，应用在其中构建按钮内容，`end` 后用 `popoverMenuBase(style)` 构建菜单；`popoverMenuBase` 跟在任意节点之后则是它的右键菜单，打开方式与 `popoverMenu` 相同。菜单面板只画 `style` 给出的背景、边框与圆角，没有默认的内边距和最小宽度。`menuItemBase(options, style)` 打开一个项容器（默认横排），由应用填充并在 `highlighted` 时自己画高亮，`end` 关闭；返回的 `MenuItemState` 带 `clicked`（选中，菜单随之关闭）与 `highlighted`。`options.checked` 与 `radio` 让它成为复选项或单选项，读屏报告选中与否；`shortcut` 作为描述朗读。`submenuItemBase(style)` 打开一个会展开子菜单的项，`end` 后用 `submenuBase(style)` 构建子菜单，子菜单以该项命名。项以 `Style.name` 或其中的文字命名，首字母跳转也用它。按键、焦点和语义与 `popoverMenuButton` 和 `popoverMenu` 完全相同；分隔线和小标题是应用自己放在项之间的节点。`menuGroupBase(style)` 在面板里打开一行由按键当作一站的项（`end` 关闭），例如账户菜单里“浅色、深色、跟随系统”三个 `keep_open` 单选项：Up、Down、Home 与 End 落在这一行时停在其中选中的项（没有则第一项），Left 与 Right 在行内循环移动（从右到左时反过来）；辅助技术看到一个以 `Style.name` 命名、包含这些项的分组。
 - 右键菜单的位置相对锚点的整个盒子计算，所以锚点部分滚出视野时菜单仍在指针处打开。
 - 焦点跟随高亮，辅助技术读出键盘所在的项；用指针打开时焦点在第一项上但不高亮。同一时间最多打开一个菜单；锚点不再构建或被禁用时菜单关闭。
@@ -517,6 +520,7 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 - `clicked` 与 `clicks`：主键在它上面按下、又在它上面松开，`clicks` 是这次按下的连击数（同一区域上 500 ms 内、相距 4 DIP 内的按下依次计为 2、3……）；`double_clicked` 在第二次按下时报告；`right_clicked` 与 `middle_clicked` 分别是副键与中键的单击，同样在松开时计数。`pressed_now` 是这一遍按下的键，`modifiers` 是按下时的修饰键。
 - 这些事件各自在单独的一遍交付，和控件返回 true 一样，应用在那一遍里处理；之后的绘制遍只保留 `hovered`、`pressed`、`position` 与 `bounds`。`bounds` 是上一次排列的窗口边界，第一帧之前为 null。
 - 按下先交给控件：落在区域内按钮上的按下属于按钮，副键与中键在控件上也不交给区域。最内层的区域得到按下。窗口失去焦点或捕获被取消时按下作废，不计为单击。禁用的区域只报告 `bounds`。
+- `AreaOptions.observe` 让区域只观察指针，不参与按下的路由：按下照常落到它里面的控件和其他区域上，它仍报告 `hovered` 与 `position`，并在里面的控件被按住期间报告 `pressed`，例如聊天行在按住其中的按钮时画出按下的样子。
 - 区域在指针进入和离开时重绘；`AreaOptions.track` 让它随指针移动重绘，使 `position` 跟随。每遍最多 `max_pointer_areas`（32）个区域参与路由。
 
 `Style.cursor`（`view.Cursor`，即 `z.Cursor`）设置指针在节点及其后代上的形状，除箭头、文本、指针、移动、缩放与禁止等之外还有 `progress`、`wait`、`help`、`cell`、`zoom_in`、`zoom_out`、`all_scroll` 与 `no_drop`（Linux 与浏览器用 CSS 名字，macOS 用系统光标，没有对应的回退到相近的形状，Windows 用系统光标）。Host 从指针下最内层的节点向外找：第一个设置了形状的节点决定形状；先遇到没有设置形状的控件则显示默认箭头，因此按钮里不会出现外层的形状。链接默认显示 `pointer`，分栏的分隔条显示 `resize_ew`（左右排列）或 `resize_ns`（上下排列），`Embed.cursor` 回调让嵌入叶子按点回答（`ziggurat_view_text` 的文本字段显示 `text`，虚拟表格在列头右缘显示 `resize_ew`）。按下期间保持按下时的形状，松开后更新。Host 在指针移动、松开和每帧之后通过 `Window.setCursor` 设置，形状不变时不调用原生接口；Harness 用 `cursor()` 返回当前指针位置的形状。
@@ -527,7 +531,7 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 
 - `v.focusWithin(id)` 告诉焦点是否在节点 `id` 本身或它里面（`:focus-within`），浮层、菜单和列表按它们锚定的节点算在里面；`v.focusLeft(id)` 在焦点刚从节点里离开（到了外面或窗口失去键盘）后构建的那一遍报告一次，例如表单在离开字段组时校验。焦点链来自上一遍的树，读过它们的帧在焦点移动后多构建一遍，使按焦点画出的样子随即更新。
 - `v.focusTakesText()` 告诉焦点是否接收文本输入：嵌入叶子用 `Embed.takes_text` 回答，文本字段在可编辑时、富文本编辑器在非只读时、终端总是为真。单键快捷键用它让位，命令面板里字段在打字时不抢字母键。
-- `observeInput(style)` 与 `end` 配对，开始一个观察其中输入但不拿走输入的列：焦点在它本身或里面时按下与松开的键（含按住重复）、输入的文本与输入法组合，以及在它上面按下与松开的指针键，各自以 `Observed` 在单独的一遍先于正常路由送达（外层的先），之后输入照常交给持有焦点的控件、快捷键与 Tab；其他遍返回 null。演示在第一次按键时停下，面板在其中的字段被输入后隐去提示。移动焦点的键（如 Tab）的松开在焦点到达处观察到。`v.observing()` 告诉上一遍是否有这样的列。
+- `observeInput(style)` 与 `end` 配对，开始一个观察其中输入但不拿走输入的列：焦点在它本身或里面时按下与松开的键（含按住重复）、输入的文本与输入法组合、编辑命令（`edit`：编辑菜单发出的复制、粘贴、撤销等，以对应的按键表示；键入的快捷键会先作为 `key_down` 出现），以及在它上面按下与松开的指针键，各自以 `Observed` 在单独的一遍先于正常路由送达（外层的先），之后输入照常交给持有焦点的控件、快捷键与 Tab；其他遍返回 null。演示在第一次按键时停下，面板在其中的字段被输入后隐去提示。移动焦点的键（如 Tab）的松开在焦点到达处观察到。`v.observing()` 告诉上一遍是否有这样的列。
 - 延后出现的内容（`presentColumn` 的 `unseen` 阶段）里请求的焦点等内容出现后再给出，除非焦点期间已移到别处。打开列表或菜单并用方向键高亮条目时，提示跟随高亮项（aria-activedescendant），而不是持有焦点的输入框。
 
 ## 换行文本
@@ -635,7 +639,7 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 
 - `Query` 按 `kind`、精确的 `text`（标签或文本内容）、`name`（`Style.name`）和 `key` 匹配，所有给出的字段都必须相符。匹配多于一个返回 `Ambiguous`，用 `nth` 按构建顺序选其中之一；没有匹配返回 `NotFound`。`find` 返回节点，`count` 返回匹配数。
 - `click` 只接受按钮、链接、复选框、开关、单选、分段、标签和折叠区；`change` 只接受滑块、步进器和分栏，`ValueChange` 与原生输入相同；`scroll(query, delta)` 只接受滚动容器，`wheel(x, y, delta)` 像 Host 一样把滚轮交给该点最内层的可见滚动容器。目标禁用返回 `Disabled`，被自身尺寸或任一裁剪祖先完全遮住返回 `Hidden`，位于显示中的对话框之外返回 `Inert`，种类不符返回 `NotActivatable` 或 `NotAdjustable`。
-- `click`、`clickWith` 与 `rightClick(query)` 在发送任何输入之前，像指针那样检查匹配到的元素：窗口里看不到它的任何部分（自身尺寸、裁剪祖先、裁剪内缩或窗口边界）返回 `Hidden`；它可见部分的中心（`clickWith` 是按下的那一点，行的右端）会落到另一个控件、嵌入叶子、打开的菜单或弹出层、浮层的面板上，或落在不接收按下的地方（例如 `ignore_input` 的节点）返回 `Covered`。它们不会把目标滚动到视野里，也不另找未被遮挡的点；`find` 仍返回这样的元素（`visible` 可能为 null），`clickAt` 仍在给定的坐标按下，不检查目标。`rightClick` 还要求那一点打开的上下文菜单是元素自己的，或包住它的最近元素的，然后像 `clickButtonAt(…, .secondary, …)` 一样发送次键点击并返回是否有菜单或指针区域接收。
+- `click`、`clickWith` 与 `rightClick(query)` 在发送任何输入之前，像指针那样检查匹配到的元素：窗口里看不到它的任何部分（自身尺寸、裁剪祖先、裁剪内缩或窗口边界）返回 `Hidden`；它可见部分的中心（`clickWith` 是按下的那一点，行的右端）会落到另一个控件、嵌入叶子、打开的菜单或弹出层、浮层的面板上，或落在不接收按下的地方（例如 `ignore_input` 的节点）返回 `Covered`。它们不会把目标滚动到视野里，也不另找未被遮挡的点；`find` 仍返回这样的元素（`visible` 可能为 null），`clickAt` 仍在给定的坐标按下，不检查目标。`rightClick` 还要求那一点打开的上下文菜单是元素自己的，或包住它的最近元素的，然后像 `clickButtonAt(…, .secondary, …)` 一样发送次键点击并返回是否有菜单或指针区域接收；元素自己没有菜单、而那一点打开的菜单的锚点在它里面时也接受，例如右键点到行里的内容列，打开的是行的菜单。
 - 事件遍若没有控件消费该事件（构建已不再产生这个节点），返回 `Stale`，不会静默忽略。成功的事件之后自动重新渲染，节点与 `frames` 反映新状态。
 - `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形，`view.divider(node)` 给出分栏的分隔条矩形。
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
@@ -662,7 +666,7 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt`、上面的指针、`wheel` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或原生捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
-`h.recordSemantics(&context)` 让之后每次渲染都像窗口一样记录可访问性树（需要 `-Daccessibility=true` 构建，否则跳过测试），`h.accessible(query)` 或 `h.accessibleId(id)` 读出辅助技术会得到的内容：`role()`、`name()`、`value()`、`description()`、`roleDescription()`、`keyShortcuts()`、`valueText()`、`parent()`，以及 `entry` 里的各状态（`enabled`、`focusable_disabled`、`focused`、`checked`、`expanded`、`selected`、`busy`、`current`、`popup`、`level`、`controls`、`invalid`、`search`、`vertical`/`horizontal`、`position`/`set_size`、`row_count`/`column_count`/`row_index`/`column_index`、`described_by`、`error_message` 等）。`codeDown` 与 `codeUp` 按位置按下与放开键。
+`h.recordSemantics(&context)` 让之后每次渲染都像窗口一样记录可访问性树（需要 `-Daccessibility=true` 构建，否则跳过测试），`h.accessible(query)` 或 `h.accessibleId(id)` 读出辅助技术会得到的内容：`role()`、`name()`、`value()`、`description()`、`roleDescription()`、`keyShortcuts()`、`valueText()`、`parent()`，以及 `entry` 里的各状态（`enabled`、`focusable_disabled`、`focused`、`checked`、`expanded`、`selected`、`busy`、`current`、`popup`、`level`、`controls`、`invalid`、`search`、`vertical`/`horizontal`、`position`/`set_size`、`row_count`/`column_count`/`row_index`/`column_index`、`described_by`、`error_message` 等）。`h.accessibleAll(&buffer)` 按记录顺序（绘制顺序，父节点在子节点之前）列出除窗口根之外的全部语义节点，返回写入的部分，缓冲区放不下时返回 `NoSpaceLeft`。`editCommand(EditKey)` 像编辑菜单那样发送一条编辑命令，让 `observeInput` 的列看到它。`codeDown` 与 `codeUp` 按位置按下与放开键。
 
 ## 背景效果
 

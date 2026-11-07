@@ -171,6 +171,8 @@ Give `Segments.headers` the hunks' headers (`partial.headers`, as
 included, shows its header in a band across both sides over its text, in
 `Colors.header` with the text in `Colors.line_number`; the band replaces the
 divider line there. `rowInfo` content rectangles start below the band.
+In a split view the header text stops at the end of the old side and
+ellipsizes there, so it never runs into the new side's text.
 
 Changing `line_numbers` or the numbering reshapes the visible rows once at
 the new width. Numbers are recorded as ordinary label commands in `draw`,
