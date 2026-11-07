@@ -10,6 +10,8 @@ const native_utf16 = web or builtin.os.tag == .windows or builtin.os.tag == .mac
 pub const drawing = @import("ziggurat_drawing_resources");
 const fonts = @import("ziggurat_fonts");
 pub const outlines = @import("text_layout_outline.zig");
+/// The language Han characters are drawn in (see the file).
+pub const han = @import("han.zig");
 pub const OutlineSnapshot = outlines.Snapshot;
 pub const OutlineOptions = outlines.Options;
 
@@ -87,6 +89,7 @@ pub const Engine = opaque {
         errdefer allocator.destroy(state);
         state.* = .{ .allocator = allocator, .owner = process_main_thread, .limits = limits };
         try nativeResult(ztl_engine_init(&state.native, &state.last_error));
+        if (builtin.os.tag == .windows and !web) userHanLocale(&state.han_locale);
         return @ptrCast(state);
     }
     pub fn close(self: *Engine) !void {
@@ -334,7 +337,24 @@ pub const Prepared = opaque {
     }
 };
 
-const NativeOptions = extern struct { size: f32, width: f32, weight: u32, italic: u32, wrap: u32, rtl: u32, family: [*:0]const u8, locale: [*:0]const u8 };
+const NativeOptions = extern struct {
+    size: f32,
+    width: f32,
+    weight: u32,
+    italic: u32,
+    wrap: u32,
+    rtl: u32,
+    family: [*:0]const u8,
+    locale: [*:0]const u8,
+    /// The language of the Han characters of `han_runs`, empty for none:
+    /// those of text in a language that does not write them, which take
+    /// the user's (`han.userLanguage`). DirectWrite only.
+    han_locale: [*:0]const u8 = "",
+    han_runs: ?[*]const han.Run = null,
+    han_count: u32 = 0,
+};
+/// The most runs of Han characters a layout tells the engine apart.
+const max_han_runs = 256;
 const NativeCell = extern struct { position: u32, line: u32 = 0, rect: Rect = .{}, rtl: u32 = 0, valid: u32 = 0 };
 const NativeCluster = extern struct { storage: [2]u32 };
 const NativeRange = extern struct { storage: [9]u32 };
@@ -370,12 +390,39 @@ const EngineState = struct {
     busy: bool = false,
     closing: bool = false,
     last_error: NativeError = .{},
+    /// The language Han characters in no language that writes them take,
+    /// as `han.userLanguage` says, empty when they keep the engine's.
+    han_locale: [han_locale_capacity:0]u8 = @splat(0),
     native: [256]u8 align(16) = @splat(0),
     fn check(self: *const EngineState) !void {
         try requireOwner(self.owner);
         if (self.closing) return error.Closed;
     }
 };
+const han_locale_capacity = 85;
+
+const MUI_LANGUAGE_NAME = 0x8;
+extern "kernel32" fn GetUserPreferredUILanguages(flags: u32, count: *u32, buffer: ?[*]u16, size: *u32) callconv(.winapi) i32;
+
+/// Writes into `out` the language Han characters of text in no language
+/// that writes them take on Windows, as `han.userLanguage` picks it from
+/// the user's preferred languages (GetUserPreferredUILanguages) for en-US,
+/// the locale layouts without one fall back by; empty for none.
+fn userHanLocale(out: *[han_locale_capacity:0]u8) void {
+    if (builtin.os.tag != .windows) return;
+    var count: u32 = 0;
+    var units: [1024]u16 = undefined;
+    var size: u32 = units.len;
+    if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, &units, &size) == 0 or size == 0 or size > units.len) return;
+    var bytes: [3 * units.len]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&bytes, units[0..size]) catch return;
+    var languages: [64][]const u8 = undefined;
+    const lang = han.userLanguage("en-US", han.splitMultiString(bytes[0..len], &languages)) orelse return;
+    if (lang.len >= han_locale_capacity) return;
+    @memcpy(out[0..lang.len], lang);
+    out[lang.len] = 0;
+}
+
 const Scalar = struct { bytes: u32, utf16: u32 };
 const Grapheme = struct { byte_offset: u32, upstream: Rect, downstream: Rect };
 const Edge = struct { caret: Caret, x: f32, line: usize };
@@ -862,7 +909,19 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
     state.operation_busy = false;
     state.closing = false;
     state.allocator = allocator;
-    const native_options: NativeOptions = .{ .size = captured_options.size, .width = captured_options.width, .weight = captured_options.weight, .italic = @intFromBool(captured_options.italic), .wrap = @backingInt(captured_options.wrap), .rtl = @intFromBool(captured_options.direction == .rtl), .family = family.ptr, .locale = locale.ptr };
+    var native_options: NativeOptions = .{ .size = captured_options.size, .width = captured_options.width, .weight = captured_options.weight, .italic = @intFromBool(captured_options.italic), .wrap = @backingInt(captured_options.wrap), .rtl = @intFromBool(captured_options.direction == .rtl), .family = family.ptr, .locale = locale.ptr };
+    // Han characters left in the engine's locale take the first of the
+    // user's languages that writes them, when the locale does not.
+    var han_runs: [max_han_runs]han.Run = undefined;
+    if (engine.han_locale[0] != 0) {
+        // DirectWrite falls back by en-US when the layout names no locale.
+        const found = han.runs(utf16, if (locale.len > 0) locale else "en-US", &han_runs);
+        if (found.len > 0) {
+            native_options.han_locale = &engine.han_locale;
+            native_options.han_runs = found.ptr;
+            native_options.han_count = @intCast(found.len);
+        }
+    }
     try nativeResult(ztl_layout_init(&state.native, &engine.native, text.ptr, @intCast(text.len), utf16.ptr, @intCast(utf16.len), &native_options, &engine.last_error));
     errdefer ztl_layout_close(&state.native);
     var calls: usize = 1;
@@ -1064,6 +1123,10 @@ fn prepareLayout(parent: *LayoutState, scale: f32, options: PrepareOptions) !*Pr
     state.stats = .{ .owned_bytes = owned_bytes, .peak_plane_bytes = owned_bytes + native_plane_bytes, .pixels = pixels, .elapsed_ns = if (timer) |*t| t.read() else null };
     parent.prepared_count += 1;
     return @ptrCast(state);
+}
+
+test {
+    _ = han;
 }
 
 test "word partition query uses logical affinity without scanning text" {

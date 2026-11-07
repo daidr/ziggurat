@@ -53,6 +53,11 @@ int ztl_layout_init(void *storage,void *engine,const char *utf8,uint32_t n8,cons
        would wrap the line's last cluster. Lines wrap a thousandth of a pixel
        past the width. */
     hr=IDWriteFactory_CreateTextLayout(s->engine->factory,text,length,format,options->wrap?(options->width>0?options->width+1e-3f:options->width):1000000.0f,10000000.0f,&s->layout);OWN(s->layout);
+    /* Han characters left in the locale take the first of the user's
+       languages that writes them, when the locale does not: DirectWrite's
+       fallback for English draws Chinese in a Japanese font where it has the
+       characters and a Traditional Chinese one where it lacks them. */
+    if(SUCCEEDED(hr)&&options->han_count&&options->han_locale&&options->han_locale[0]){WCHAR han[86];if(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,options->han_locale,-1,han,86))for(uint32_t i=0;i<options->han_count&&SUCCEEDED(hr);++i){DWRITE_TEXT_RANGE range={options->han_runs[i].start,options->han_runs[i].end-options->han_runs[i].start};hr=IDWriteTextLayout_SetLocaleName(s->layout,han,range);}}
     if(SUCCEEDED(hr)){DWRITE_TEXT_METRICS metrics;hr=IDWriteTextLayout_GetMetrics(s->layout,&metrics);if(SUCCEEDED(hr)&&!options->wrap)hr=IDWriteTextLayout_SetMaxWidth(s->layout,metrics.widthIncludingTrailingWhitespace);if(SUCCEEDED(hr))hr=IDWriteTextLayout_SetMaxHeight(s->layout,metrics.height);}
 done:DROP(format);if(FAILED(hr)){DROP(s->layout);return status(hr,error);}InterlockedIncrement(&layouts);return ZTL_OK;
 }
