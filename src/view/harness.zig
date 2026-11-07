@@ -51,6 +51,10 @@ pub const Config = struct {
     /// same key, which share one state, with error.DuplicateKey; the
     /// mistake is in `Harness.issue`. A window notes it in the inspector.
     strict: bool = true,
+    /// The desktop's preferences, which the first frame follows, as a
+    /// window's do once its application sets them: a view built under
+    /// reduced motion starts no animation in its first frames.
+    preferences: view.Preferences = .{},
 };
 
 /// A semantic node as `Harness.accessible` reads it: `entry` holds its
@@ -107,12 +111,16 @@ pub const Harness = struct {
     /// Renders record the semantic tree as a window's would; see
     /// `recordSemantics`.
     semantics: bool = false,
+    /// What presses, set with `usePointer`.
+    pointer_device: z.PointerDevice = .mouse,
+    pointer_pressure: ?f32 = null,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: view.Buffers, config: Config) Harness {
         var built = View.init(buffers);
         built.tooltip_delay = config.options.tooltip_delay;
         built.layout_direction = config.options.direction;
         built.icons = config.options.icons;
+        built.preferences = config.preferences;
         return .{ .view = built, .build = view.Build.bind(state, build), .config = config };
     }
 
@@ -136,6 +144,12 @@ pub const Harness = struct {
         self.setFocus(id);
     }
 
+    /// Follow other desktop preferences from the next frame, as
+    /// `Host.setPreferences` does.
+    pub fn setPreferences(self: *Harness, value: view.Preferences) anyerror!void {
+        self.view.preferences = value;
+        try self.render();
+    }
     /// Build and arrange the current state, as a paint would.
     pub fn render(self: *Harness) anyerror!void {
         const tools = self.config.options.tools();
@@ -188,6 +202,7 @@ pub const Harness = struct {
     /// Type `text` into the inspector's find bar while it has the
     /// keyboard, then render; error.NoTextTarget otherwise.
     pub fn typeText(self: *Harness, text: []const u8) anyerror!void {
+        try self.observe(.{ .text = text });
         const tools = self.config.options.tools() orelse return error.NoTextTarget;
         if (!tools.typeText(text)) return error.NoTextTarget;
         try self.render();
@@ -196,6 +211,7 @@ pub const Harness = struct {
     /// Replay a key release to the focused embedded leaf, then render if it
     /// took it, as Host does. True when it took it.
     pub fn keyUp(self: *Harness, input: z.KeyInput) anyerror!bool {
+        try self.observe(.{ .key_up = input });
         if (self.view.releaseKey(input)) try self.render();
         self.view.focus = self.focusId();
         if (!self.view.embedKeyUp(input) and !self.applicationKey(input, true)) return false;
@@ -400,8 +416,16 @@ pub const Harness = struct {
     /// shortcuts, Tab, range keys, group arrows, spatial arrows, Home/End,
     /// then Enter/Space activation. Delivers any resulting event, renders,
     /// and returns whether a control handled the key. Needs `attachInput`.
+    /// Run the pass in which `observeInput` containers see input, as Host
+    /// runs it before routing the input on, while there are some.
+    fn observe(self: *Harness, seen: view.Observed) anyerror!void {
+        if (!self.view.observing()) return;
+        try self.run(.{ .observe = seen });
+        try self.render();
+    }
     pub fn key(self: *Harness, input: z.KeyInput) anyerror!bool {
         const context = self.input orelse return error.NoInput;
+        try self.observe(.{ .key_down = input });
         if (self.view.holdKey(input)) try self.render();
         // The inspector's keys come before the view's, as in Host.
         if (self.config.options.tools()) |tools| if (tools.key(input)) {
@@ -750,8 +774,21 @@ pub const Harness = struct {
     /// embedded leaf under it, which captures the pointer when it takes it.
     /// Otherwise a tree or table row selects, and a press on something the
     /// pointer drags is followed by `moveTo` and `release`. Renders.
+    /// Have the presses and moves after it come from `device` pressing
+    /// that hard, as a pen or a finger; null pressure for a device that
+    /// tells none, which presses 0.5 while a button is down.
+    pub fn usePointer(self: *Harness, device: z.PointerDevice, pressure: ?f32) void {
+        self.pointer_device = device;
+        self.pointer_pressure = pressure;
+    }
+    fn sample(self: *Harness, down: bool) void {
+        self.view.pointer_sample = .{ .device = self.pointer_device, .pressure = if (down) self.pointer_pressure orelse 0.5 else 0 };
+    }
     pub fn press(self: *Harness, x: f32, y: f32, modifiers: z.KeyModifiers) anyerror!void {
         self.pressed = null;
+        self.sample(true);
+        try self.observe(.{ .pointer_down = .{ .position = .{ .x = x, .y = y }, .button = .primary, .modifiers = modifiers } });
+        _ = self.view.pressedAt(.{ .x = x, .y = y }, .primary, modifiers);
         if (try self.inspectorPress(x, y, modifiers)) return self.render();
         switch (self.view.pointerDown(.{ .x = x, .y = y })) {
             .consumed => {
@@ -786,6 +823,7 @@ pub const Harness = struct {
             return self.render();
         };
         _ = self.view.pointerMoved(.{ .x = x, .y = y });
+        self.sample(self.view.capture != null or self.view.area_press != null);
         if (self.view.captureMove(.{ .x = x, .y = y })) |result| if (result.consumed) {
             // A drag takes the press from the control under it.
             if (result.cancel_press) self.pressed = null;
@@ -798,6 +836,8 @@ pub const Harness = struct {
     /// never dragged activates the control it began on when released over
     /// it. Renders.
     pub fn release(self: *Harness, x: f32, y: f32) anyerror!void {
+        self.view.pointer_sample.pressure = 0;
+        try self.observe(.{ .pointer_up = .{ .position = .{ .x = x, .y = y }, .button = .primary } });
         if (self.config.options.tools()) |tools| if (tools.pointerUp(.{ .x = x, .y = y })) return self.render();
         if (self.view.areaRelease(.{ .x = x, .y = y }, .primary)) |event| {
             self.pressed = null;
@@ -833,6 +873,7 @@ pub const Harness = struct {
         }
         const point: view.Point = .{ .x = x, .y = y };
         _ = self.view.pointerMoved(point);
+        _ = self.view.pressedAt(point, button, modifiers);
         if (self.view.pointerDown(point) == .consumed) {
             self.restoreFocus();
             try self.render();
@@ -3028,7 +3069,7 @@ const Explorer = struct {
     fn build(self: *Explorer, v: *View) anyerror!void {
         try v.row(.{ .gap = 20 });
         try v.column(.{ .key = 1, .gap = 4, .name = "Files" });
-        try v.dragRows(file_kind);
+        _ = try v.dragRows(file_kind);
         try v.text("a.txt", .{ .key = 10, .height = 30 });
         // A folder among the rows takes the rows dropped on it.
         switch (try v.dropTarget(.{ .kind = file_kind }, .{ .key = 11, .height = 30 })) {
@@ -3084,7 +3125,7 @@ test "a container cannot both drag its rows out and reorder them" {
     var v = View.init(storage.buffers());
     v.reset(.{}, null);
     try v.column(.{});
-    try v.dragRows(1);
+    _ = try v.dragRows(1);
     try std.testing.expectError(error.InvalidValue, v.reorder());
     try v.end();
     try v.column(.{});
@@ -3106,7 +3147,7 @@ const Sheet = struct {
     fn build(self: *Sheet, v: *View) anyerror!void {
         _ = try v.table(&.{.{ .title = "Name" }}, &self.sort, &self.selection, .{ .name = "Sheet" });
         if (self.drag_out) {
-            try v.dragRows(7);
+            _ = try v.dragRows(7);
         } else if (self.reorder) {
             if (try v.reorder()) |move| self.moved = move;
         } else try v.dragSelect();

@@ -30,7 +30,8 @@ enum {
     ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW,
     ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU,
     ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT,
-    ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING, ROLE_COUNT
+    ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING,
+    ROLE_GRID, ROLE_TREE_GRID, ROLE_DELETION, ROLE_INSERTION, ROLE_COUNT
 };
 /* NativeNode flags, as accessibility.zig packs them. */
 enum {
@@ -47,17 +48,25 @@ typedef struct NativeNode {
     /* Place among all of the list's items from 1, how many a list has and
        a tree item's depth from 1; 0 when not given. */
     uint32_t position, set_size, level;
-    /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED and
-       VERTICAL, then the popup kind (bits 8 to 10), current (11 to 13),
+    /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED,
+       VERTICAL, SEARCH and HORIZONTAL, then the popup kind (bits 8 to 10), current (11 to 13),
        sort (14, 15) and autocomplete (16, 17). */
     uint32_t states;
     uint32_t role_description_start, role_description_len, key_shortcuts_start, key_shortcuts_len;
-    uint32_t value_text_start, value_text_len, reserved0, reserved1;
+    /* Rows and columns of a table or grid, built or not (aria-rowcount,
+       aria-colcount); 0 for those built. */
+    uint32_t value_text_start, value_text_len, row_count, column_count;
     /* The node this one controls (aria-controls), 0 for none. */
     uint64_t controls;
+    /* A row's or cell's place among all rows and columns from 1
+       (aria-rowindex, aria-colindex); 0 when not given. */
+    uint32_t row_index, column_index;
+    /* The nodes describing it (aria-describedby) and holding its error
+       message (aria-errormessage), 0 for none. */
+    uint64_t described_by, error_message;
 } NativeNode;
-_Static_assert(sizeof(NativeNode) == 184, "semantic node ABI");
-enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16 };
+_Static_assert(sizeof(NativeNode) == 208, "semantic node ABI");
+enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16, SEARCH = 32, HORIZONTAL = 64 };
 enum { POPUP_NONE, POPUP_MENU, POPUP_LIST_BOX, POPUP_TREE, POPUP_GRID, POPUP_DIALOG };
 enum { CURRENT_NONE, CURRENT_ITEM, CURRENT_PAGE, CURRENT_STEP, CURRENT_LOCATION, CURRENT_DATE, CURRENT_TIME };
 enum { SORT_NONE, SORT_ASCENDING, SORT_DESCENDING, SORT_OTHER };
@@ -116,7 +125,7 @@ static BOOL textual(uint32_t role) { return role == ROLE_TEXT_BOX || role == ROL
 static BOOL menu_item(uint32_t role) { return role == ROLE_MENU_ITEM || role == ROLE_MENU_ITEM_CHECKBOX || role == ROLE_MENU_ITEM_RADIO; }
 static BOOL item(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || role == ROLE_LIST_ITEM || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
 static BOOL row(uint32_t role) { return role == ROLE_LIST_ITEM || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
-static BOOL rows_container(uint32_t role) { return role == ROLE_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE; }
+static BOOL rows_container(uint32_t role) { return role == ROLE_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE || role == ROLE_GRID || role == ROLE_TREE_GRID; }
 /* Roles whose activation is a press, as UI Automation's Invoke, Toggle,
    SelectionItem and ExpandCollapse are on Windows. */
 static BOOL pressable(uint32_t role) {
@@ -125,7 +134,7 @@ static BOOL pressable(uint32_t role) {
 }
 static BOOL focusable(uint32_t role) {
     return pressable(role) || role == ROLE_TOKEN || role == ROLE_TEXT_BOX || role == ROLE_SLIDER || role == ROLE_STEPPER ||
-        role == ROLE_SPLITTER || role == ROLE_LIST || role == ROLE_CALENDAR || role == ROLE_TOKEN_FIELD;
+        role == ROLE_SPLITTER || role == ROLE_LIST || role == ROLE_CALENDAR || role == ROLE_TOKEN_FIELD || role == ROLE_GRID || role == ROLE_TREE_GRID;
 }
 /* Controls show their name, which AppKit's own give as their title; other
    elements are described by it. */
@@ -142,6 +151,7 @@ static NSAccessibilityRole role_of(const NativeNode *n, NSAccessibilitySubrole *
     case ROLE_TEXT: return NSAccessibilityStaticTextRole;
     case ROLE_TEXT_BOX: case ROLE_TOKEN_FIELD:
         if (n->flags & PASSWORD) *subrole = NSAccessibilitySecureTextFieldSubrole;
+        else if (n->states & SEARCH) *subrole = NSAccessibilitySearchFieldSubrole;
         return NSAccessibilityTextFieldRole;
     case ROLE_CHECKBOX: return NSAccessibilityCheckBoxRole;
     case ROLE_RADIO: return NSAccessibilityRadioButtonRole;
@@ -185,6 +195,10 @@ static NSAccessibilityRole role_of(const NativeNode *n, NSAccessibilitySubrole *
     case ROLE_ROW_HEADER: case ROLE_CELL: return NSAccessibilityCellRole;
     case ROLE_OPTION: *subrole = NSAccessibilityTableRowSubrole; return NSAccessibilityRowRole;
     case ROLE_HEADING: return @"AXHeading";
+    /* Grids are tables whose cells take the focus, as WebKit's. */
+    case ROLE_GRID: case ROLE_TREE_GRID: return NSAccessibilityTableRole;
+    case ROLE_DELETION: *subrole = @"AXDeleteStyleGroup"; return NSAccessibilityGroupRole;
+    case ROLE_INSERTION: *subrole = @"AXInsertStyleGroup"; return NSAccessibilityGroupRole;
     default: return NSAccessibilityGroupRole;
     }
 }
@@ -721,6 +735,14 @@ static NSString *const ZuaScrollToVisible = @"AXScrollToVisible";
     if (key_shortcuts) [more addObject:@"AXKeyShortcutsValue"];
     if (value_text) [more addObject:NSAccessibilityValueDescriptionAttribute];
     if (node.controls) [more addObject:NSAccessibilityLinkedUIElementsAttribute];
+    /* NSAccessibilityElement neither lists nor answers AXHelp in the older
+       API for what setAccessibilityHelp: sets. */
+    if (self.accessibilityHelp.length) [more addObject:NSAccessibilityHelpAttribute];
+    if (node.row_count) [more addObject:@"AXARIARowCount"];
+    if (node.column_count) [more addObject:@"AXARIAColumnCount"];
+    if (node.row_index) [more addObject:@"AXARIARowIndex"];
+    if (node.column_index) [more addObject:@"AXARIAColumnIndex"];
+    if (node.error_message && (node.flags & INVALID)) [more addObject:@"AXErrorMessageElements"];
     for (id extra in more) if (![names containsObject:extra]) names = [names arrayByAddingObject:extra];
     return names;
 }
@@ -740,6 +762,17 @@ static NSString *const ZuaScrollToVisible = @"AXScrollToVisible";
     if ([attribute isEqualToString:NSAccessibilityLinkedUIElementsAttribute] && node.controls) {
         ZuaHost *h = host;
         ZuaElement *other = h ? h->elements[@(node.controls)] : nil;
+        return other ? @[other] : @[];
+    }
+    if ([attribute isEqualToString:NSAccessibilityHelpAttribute]) return self.accessibilityHelp;
+    if ([attribute isEqualToString:@"AXARIARowCount"]) return node.row_count ? @(node.row_count) : nil;
+    if ([attribute isEqualToString:@"AXARIAColumnCount"]) return node.column_count ? @(node.column_count) : nil;
+    if ([attribute isEqualToString:@"AXARIARowIndex"]) return node.row_index ? @(node.row_index) : nil;
+    if ([attribute isEqualToString:@"AXARIAColumnIndex"]) return node.column_index ? @(node.column_index) : nil;
+    if ([attribute isEqualToString:@"AXErrorMessageElements"]) {
+        if (!node.error_message || !(node.flags & INVALID)) return nil;
+        ZuaHost *h = host;
+        ZuaElement *other = h ? h->elements[@(node.error_message)] : nil;
         return other ? @[other] : @[];
     }
     if ([attribute isEqualToString:@"AXMenuItemMarkChar"]) {
@@ -862,6 +895,9 @@ static BOOL apply(ZuaElement *el, const NativeNode *n, NSString *name, NSString 
     if (fresh || ((n->flags ^ o.flags) & (EXPANDABLE | EXPANDED))) [el setAccessibilityExpanded:(n->flags & EXPANDABLE) && (n->flags & EXPANDED)];
     if (n->role == ROLE_HEADING && (fresh || n->level != o.level)) [el setAccessibilityDisclosureLevel:(NSInteger)n->level];
     if (n->role == ROLE_SEPARATOR && (fresh || ((n->states ^ o.states) & VERTICAL)))
+        [el setAccessibilityOrientation:(n->states & VERTICAL) ? NSAccessibilityOrientationVertical : NSAccessibilityOrientationHorizontal];
+    /* Which way it runs, as the application tells (aria-orientation). */
+    else if ((n->states & (VERTICAL | HORIZONTAL)) && (fresh || ((n->states ^ o.states) & (VERTICAL | HORIZONTAL))))
         [el setAccessibilityOrientation:(n->states & VERTICAL) ? NSAccessibilityOrientationVertical : NSAccessibilityOrientationHorizontal];
     if (cell(n->role) && (fresh || ((n->states ^ o.states) & (SELECTABLE | SELECTED)))) [el setAccessibilitySelected:(n->states & SELECTED) != 0];
     if (fresh || ((n->flags ^ o.flags) & REQUIRED)) [el setAccessibilityRequired:(n->flags & REQUIRED) != 0];
@@ -1029,15 +1065,20 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
         ZuaElement *el = live[key];
         if (!rows_container(el->node.role) || el->virtual_list) continue;
         NSMutableArray *rows = [NSMutableArray array], *shown = [NSMutableArray array], *chosen = [NSMutableArray array];
+        /* A list with no size of its own takes its rows' (aria-setsize),
+           and a grid its count of rows (aria-rowcount). */
+        NSInteger size = el->node.set_size > 0 ? (NSInteger)el->node.set_size : (NSInteger)el->node.row_count;
         for (ZuaElement *kid in children[key] ?: @[]) {
             if (!row(kid->node.role)) continue;
-            [kid setAccessibilityIndex:kid->node.position > 0 ? (NSInteger)kid->node.position - 1 : (NSInteger)rows.count];
+            if (size == 0 && kid->node.set_size > 0) size = (NSInteger)kid->node.set_size;
+            NSInteger at = kid->node.position > 0 ? (NSInteger)kid->node.position - 1 : kid->node.row_index > 0 ? (NSInteger)kid->node.row_index - 1 : (NSInteger)rows.count;
+            [kid setAccessibilityIndex:at];
             [rows addObject:kid];
             if (!(kid->node.flags & OFFSCREEN)) [shown addObject:kid];
             if (kid->node.flags & CHECKED) [chosen addObject:kid];
         }
         [el setAccessibilityRows:rows];
-        [el setAccessibilityRowCount:el->node.set_size > 0 ? (NSInteger)el->node.set_size : (NSInteger)rows.count];
+        [el setAccessibilityRowCount:size > 0 ? size : (NSInteger)rows.count];
         [el setAccessibilityVisibleRows:shown];
         [el setAccessibilitySelectedRows:chosen];
     }

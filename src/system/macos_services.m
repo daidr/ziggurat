@@ -462,7 +462,8 @@ enum { ZSD_MONITORS = 1, ZSD_PREFERENCES = 2, ZSD_POWER = 4, ZSD_NETWORK = 8 };
 enum { ZSD_OK = 0, ZSD_UNSUPPORTED = 1, ZSD_FAILED = 2, ZSD_CAPACITY = 3, ZSD_NO_MEMORY = 4 };
 typedef struct ZsdRect { int32_t x, y; uint32_t width, height; } ZsdRect;
 typedef struct ZsdMonitor { ZsdRect bounds, work; float scale; uint32_t primary, refresh_millihz; } ZsdMonitor;
-typedef struct ZsdPreferences { int32_t scheme; uint32_t high_contrast, reduce_motion; float text_scale; int32_t accent, reduce_transparency; } ZsdPreferences;
+/* pointer, any_pointer, no_hover and no_any_hover stay a mouse's (0). */
+typedef struct ZsdPreferences { int32_t scheme; uint32_t high_contrast, reduce_motion; float text_scale; int32_t accent, reduce_transparency, pointer, any_pointer, no_hover, no_any_hover; } ZsdPreferences;
 typedef struct ZsdPower { int32_t source, percent, saver; } ZsdPower;
 typedef struct ZsdNetwork { int32_t state, metered; } ZsdNetwork;
 typedef void (*ZsdChanged)(void *owner, uint32_t bits);

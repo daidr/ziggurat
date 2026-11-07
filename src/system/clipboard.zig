@@ -6,6 +6,7 @@ const z = @import("ziggurat");
 const native = if (builtin.is_test) @import("clipboard_unsupported.zig") else if (builtin.cpu.arch == .wasm32) @import("clipboard_web.zig") else if (builtin.os.tag == .windows) @import("clipboard_windows.zig") else if (builtin.os.tag == .linux or builtin.os.tag == .macos) @import("clipboard_linux.zig") else @import("clipboard_unsupported.zig");
 const web = struct {
     extern "ziggurat" fn zw_clipboard_write(text: [*]const u8, length: u32) void;
+    extern "ziggurat" fn zw_clipboard_write_then(text: [*]const u8, length: u32, token: u32) void;
     extern "ziggurat" fn zw_clipboard_read(destination: [*]u8, capacity: u32) i32;
 };
 extern fn zsc_text_write(text: [*]const u8, len: usize) c_int;
@@ -30,6 +31,70 @@ pub fn writeText(window: z.Window, text: []const u8) !void {
     if (comptime builtin.os.tag != .windows) return error.UnsupportedCapability;
     const hwnd = window.nativeHandle() orelse return error.Closed;
     try z.windows_text.writeClipboard(hwnd, text);
+}
+
+/// A write of text whose outcome comes later, as a copy button showing
+/// "Copied" or "Failed": the caller keeps it at a stable address until
+/// `done` runs, once, on the owner thread, with null when the text got on
+/// the clipboard or the error that kept it off, as another app holding the
+/// clipboard, or a browser refusing a write the user did not act for.
+pub const Write = struct {
+    context: *anyopaque,
+    done: *const fn (context: *anyopaque, err: ?anyerror) void,
+    app: ?*z.App = null,
+    err: ?anyerror = null,
+    token: u32 = 0,
+    fn finish(ptr: *anyopaque) void {
+        const self: *Write = @ptrCast(@alignCast(ptr));
+        self.done(self.context, self.err);
+    }
+};
+/// Writes in flight in a browser, which answers as
+/// `navigator.clipboard.writeText` settles.
+const max_pending_writes = 8;
+var pending_writes: [max_pending_writes]?*Write = @splat(null);
+var next_write_token: u32 = 1;
+
+/// Writes UTF-8 text as `writeText` does, and tells the outcome through
+/// `write.done` in a task of the owner thread, never before this returns:
+/// the native clipboards answer at once and the task carries the answer to
+/// the next turn; a browser answers once its clipboard settles (it rejects
+/// without transient user activation, and outside secure contexts there is
+/// none). An error returned here means `done` will not run.
+pub fn writeTextThen(window: z.Window, text: []const u8, write: *Write) !void {
+    window.app.assertOwner();
+    write.app = window.app;
+    write.err = null;
+    if (comptime builtin.cpu.arch == .wasm32) {
+        if (window.isClosed()) return error.Closed;
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+        const slot = for (&pending_writes) |*entry| {
+            if (entry.* == null) break entry;
+        } else return error.Busy;
+        write.token = next_write_token;
+        next_write_token +%= 1;
+        if (next_write_token == 0) next_write_token = 1;
+        slot.* = write;
+        web.zw_clipboard_write_then(text.ptr, @intCast(text.len), write.token);
+        return;
+    }
+    writeText(window, text) catch |err| switch (err) {
+        error.Closed, error.InvalidUtf8, error.UnsupportedCapability => return err,
+        else => write.err = err,
+    };
+    try window.app.post(.{ .context = write, .call = Write.finish });
+}
+/// The page's clipboard settled a write `writeTextThen` began.
+fn written(token: u32, ok: u32) callconv(.c) void {
+    for (&pending_writes) |*entry| if (entry.*) |write| if (write.token == token) {
+        entry.* = null;
+        write.err = if (ok != 0) null else error.ClipboardWriteFailed;
+        write.done(write.context, write.err);
+        return;
+    };
+}
+comptime {
+    if (builtin.cpu.arch == .wasm32) @export(&written, .{ .name = "ziggurat_clipboard_written" });
 }
 
 /// Reads UTF-8 into caller storage. CapacityExceeded leaves ownership unchanged;

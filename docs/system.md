@@ -158,7 +158,7 @@ macOS 把通知交给通知中心（`UNUserNotificationCenter`），这要求进
 
 ## 剪贴板
 
-`system.clipboard.writeText(window, utf8)` 和 `readText(window, destination)` 是 Windows 与 macOS 的同步文本 helper（macOS 剪贴板为空时 readText 返回 `ClipboardUnavailable`）：容量不足、文本无效或剪贴板被占用时返回错误，不重试或等待。完整剪贴板服务是 `clipboard.Board`。
+`system.clipboard.writeText(window, utf8)` 和 `readText(window, destination)` 是 Windows 与 macOS 的同步文本 helper（macOS 剪贴板为空时 readText 返回 `ClipboardUnavailable`）：容量不足、文本无效或剪贴板被占用时返回错误，不重试或等待。`system.clipboard.writeTextThen(window, utf8, &write)` 在所有平台写入文本并稍后在主线程以 `write.done(context, err)` 告知结果（成功时 `err` 为 null）：桌面上同步写入后投递结果，浏览器等 `navigator.clipboard.writeText` 的承诺兑现或被拒绝（例如页面没有焦点或权限被拒）后回调，按钮可以据此显示“已复制”或失败提示。`Write` 由调用方持有，回调前保持有效。完整剪贴板服务是 `clipboard.Board`。
 
 `try board.init(app, .{ .context, .on_changed, .render_on_stop })` 在 App owner 线程原地初始化，地址稳定到 `deinit`，必须早于 `App.deinit` 结束；初始化失败不留下需要 deinit 的状态。Board 注册 App stop 节点：停机时取消所有 pending 读取（不回调）并结束 lazy offer。不可在 Board 自己的回调中 deinit。所有调用和回调都在 owner 线程。
 

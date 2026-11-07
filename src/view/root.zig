@@ -70,6 +70,8 @@ pub const AreaOptions = pointer_controls.Options;
 pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit, SelectionFull } || layout.Error;
 
 pub const max_depth = 32;
+/// Nodes around the focus that `View.focusWithin` and `focusLeft` follow.
+pub const max_focus_chain = 64;
 /// Longest name a control without a look takes from the text inside it, in
 /// bytes; text past it is left out.
 pub const max_plain_name = 256;
@@ -299,6 +301,39 @@ pub const Style = struct {
     sort: ui.accessibility.Sort = .none,
     /// What a text input completes as one types, as aria-autocomplete.
     auto_complete: ui.accessibility.AutoComplete = .none,
+    /// Which way a slider, separator, splitter, toolbar, tab list or menu
+    /// of the application's own runs, as aria-orientation; null leaves the
+    /// platform's guess from its shape.
+    orientation: ?Orientation = null,
+    /// The node's value fails the application's validation, as aria-invalid
+    /// alone: a required field left empty on blur. `View.errorMessage`
+    /// names the node holding the message.
+    invalid: bool = false,
+    /// A text input for searching, as role=searchbox.
+    search: bool = false,
+    /// A list box, grid, tree or tree grid of the application's own whose
+    /// items can be chosen together, as aria-multiselectable.
+    multiselectable: bool = false,
+    /// Chosen or not, as aria-selected, for a tab, option, row, cell or
+    /// tree item that shows its choice its own way, without the accent a
+    /// selected built-in row paints; null says nothing.
+    access_selected: ?bool = null,
+    /// The place of an item of a list, list box, tree, menu or tab list of
+    /// the application's own among all of its set's, from 1, and the
+    /// size of that set, as aria-posinset and aria-setsize, for one built
+    /// only where it shows or laid out flat; 0 leaves either unset. It wins
+    /// over the place a built-in list counts from what it builds.
+    position_in_set: u32 = 0,
+    set_size: u32 = 0,
+    /// On a table, grid or tree grid: how many rows and columns it has,
+    /// built or not, header rows counted, as aria-rowcount and
+    /// aria-colcount; 0 for those built.
+    row_count: u32 = 0,
+    column_count: u32 = 0,
+    /// On a row or cell: which of all of the table's rows and columns it
+    /// is, from 1, header rows counted, as aria-rowindex and aria-colindex.
+    row_index: u32 = 0,
+    column_index: u32 = 0,
     /// Where content `View.presentColumn` takes out of this container in
     /// a build goes, in place of its transition's way out: a page of a
     /// wizard or a calendar stepping back goes the way of the step that
@@ -531,6 +566,21 @@ pub const AccessRole = enum {
     separator,
     /// A heading, as role=heading with `Style.font`'s level when it is one.
     heading,
+    /// A table whose cells take the focus and the arrow keys, as
+    /// role=grid: a spreadsheet the application draws.
+    grid,
+    /// A grid whose rows open and close, as role=treegrid.
+    tree_grid,
+    /// A row of a table, grid or tree grid of the application's own, as
+    /// role=row.
+    row,
+    /// A cell of such a row, as role=gridcell.
+    cell,
+    /// Content deleted, as a diff's removed line or a struck-out old price:
+    /// role=deletion.
+    deletion,
+    /// Content inserted, as a diff's added line: role=insertion.
+    insertion,
     fn semantic(self: AccessRole) ui.accessibility.Role {
         return switch (self) {
             .group => .group,
@@ -543,9 +593,17 @@ pub const AccessRole = enum {
             .status => .status,
             .separator => .separator,
             .heading => .heading,
+            .grid => .grid,
+            .tree_grid => .tree_grid,
+            .row => .table_row,
+            .cell => .cell,
+            .deletion => .deletion,
+            .insertion => .insertion,
         };
     }
 };
+/// Which way a control runs, for `Style.orientation`.
+pub const Orientation = enum { horizontal, vertical };
 
 /// How `Style.clip_inset` cuts a node's box: by `top`, `right`, `bottom`
 /// and `left` DIP from its edges, or percent of its height (top and bottom)
@@ -676,6 +734,23 @@ pub const Preferences = struct {
     /// Backdrop effects draw opaque fills.
     reduce_transparency: bool = false,
     high_contrast: bool = false,
+    /// What the pointing devices can do, as Media Queries 4's `pointer`,
+    /// `any-pointer`, `hover` and `any-hover`, whose zero is a mouse's:
+    /// how accurately the primary one points and the most accurate of all,
+    /// and that the primary one, or every one, cannot hover. A touch-first
+    /// layout gives a coarse pointer larger targets, and shows on hover
+    /// alone only what a pointer that hovers can reach. The application
+    /// gives them from `system.desktop.Preferences`.
+    pointer: z.PointerAccuracy = .fine,
+    any_pointer: z.PointerAccuracy = .fine,
+    no_hover: bool = false,
+    no_any_hover: bool = false,
+    pub fn hover(self: Preferences) bool {
+        return !self.no_hover;
+    }
+    pub fn anyHover(self: Preferences) bool {
+        return !self.no_any_hover;
+    }
 };
 pub const LoadingKind = ui.loading.Kind;
 /// How a loading indicator looks and moves; see `View.loadingIndicator`.
@@ -1097,6 +1172,11 @@ pub const Embed = struct {
     /// Register the leaf as a Tab stop under its node id, so it can hold
     /// focus and receive keys through `input`.
     focusable: bool = false,
+    /// Whether the leaf takes typed or composed text now, as a text field
+    /// that is not read only, a terminal or an editor does, for
+    /// `View.focusTakesText`. Called during passes; it must not allocate
+    /// or block.
+    takes_text: ?*const fn (*anyopaque) bool = null,
     /// Whether native content the leaf shows, such as a web page, has the
     /// keyboard itself. A Tab that leaves such content past its ends
     /// (`KeyInput.from_page`) moves the focus on from this leaf. Called
@@ -1138,6 +1218,9 @@ pub const PointerPress = struct {
     /// 1 for a single press, 2 for the second of a double press, and so on.
     count: u8 = 1,
     modifiers: z.KeyModifiers = .{},
+    /// What presses and how hard, as Pointer Events' `pointerType` and
+    /// `pressure`; see `z.PointerSample`.
+    pointer: z.PointerSample = .{ .pressure = 0.5 },
 };
 /// The pointer moving while it presses a leaf that took the press.
 pub const PointerDrag = struct {
@@ -1149,6 +1232,9 @@ pub const PointerDrag = struct {
     /// The pointer has gone `drag_threshold` from the origin during this
     /// press; it stays set once reached.
     dragging: bool,
+    /// What presses and how hard as of this move: a signature pad widens
+    /// its stroke with a pen's pressure.
+    pointer: z.PointerSample = .{ .pressure = 0.5 },
 };
 /// A wheel or touchpad scroll over a leaf, in DIP; positive y scrolls down.
 pub const PointerWheel = struct { position: Point, delta: Point };
@@ -1265,6 +1351,15 @@ pub const DropState = union(enum) {
     /// Something dropped on it in this pass, at a window point.
     dropped: struct { data: Dropped, position: Point },
 };
+/// A payload dragged out of a `dragRows` container let go over no target.
+pub const DragMiss = struct { payload: Payload, position: Point };
+/// What a `dragSourceState` tells of its drag.
+pub const DragSourceState = struct {
+    /// Dragged now, to show it dimmed.
+    dragging: bool = false,
+    /// Let go over no target in this pass, at this window point.
+    missed: ?Point = null,
+};
 /// Items of a `reorder` container moving: the item at `from` goes before
 /// the item at `to`, where the count of items means after the last. Both
 /// count the items in build order before the move.
@@ -1368,6 +1463,8 @@ pub const Node = struct {
     graphic: ?Graphic = null,
     /// A pointer area repaints as the pointer moves over it.
     track: bool = false,
+    /// A container that observes the input inside it (`observeInput`).
+    observes: bool = false,
     /// The node or one around it is `Style.hidden`, or it floats from an
     /// anchor that is: it takes no room, paints nothing and takes no input.
     concealed: bool = false,
@@ -1376,6 +1473,9 @@ pub const Node = struct {
     /// A control without a look: a container its application fills and
     /// draws, which keeps the control's input, focus and semantics.
     plain: bool = false,
+    /// A row of menu items the keys take as one stop (`menuGroupBase`): on
+    /// the row, its own id; on an item inside it, the row's.
+    menu_group: u64 = 0,
     /// Laid out in its place but not drawn, nor its descendants, which
     /// take no input either: content waiting to come in.
     unseen: bool = false,
@@ -1396,6 +1496,12 @@ pub const Node = struct {
     label_for: u64 = 0,
     /// The node this one controls (`View.controls`), by id.
     controls: u64 = 0,
+    /// The nodes describing this one (`View.describedBy`) and holding the
+    /// message of its error (`View.errorMessage`), by id, and the
+    /// description they make, the message first while it is invalid.
+    described_by: u64 = 0,
+    error_message: u64 = 0,
+    access_description: []const u8 = "",
     /// A shared element flying (`Match.fly`) paints over the rest of its
     /// layer, out of the clips and opacity around it: 1 for the one a
     /// flight leaves, under 2 for the one flying in; 0 in place.
@@ -1515,6 +1621,36 @@ pub const Event = union(enum) {
     reorder: struct { id: u64, move: Move },
     /// A press, release or lost press of a `pointerArea`.
     pointer: PointerEvent,
+    /// A value dragged from a `dragSource`, or a row of a `dragRows`
+    /// container, let go over no target taking it, at a window point.
+    drag_missed: struct { id: u64, payload: Payload, position: Point },
+    /// Input on its way to where the focus or the pointer is, which the
+    /// containers around it that `observeInput` see first.
+    observe: Observed,
+};
+
+/// Input an `observeInput` container sees, without taking it, before the
+/// focused node or the node under the pointer gets it.
+pub const Observed = union(enum) {
+    /// A key pressed (with `repeat` for those of a key held) or released
+    /// while the focus is the container or inside it.
+    key_down: z.KeyInput,
+    key_up: z.KeyInput,
+    /// Text typed, or the composition an input method shows, while the
+    /// focus is inside it; borrowed for the pass.
+    text: []const u8,
+    composition: []const u8,
+    /// A button went down or came up over the container.
+    pointer_down: struct { position: Point, button: z.PointerButton, modifiers: z.KeyModifiers },
+    pointer_up: struct { position: Point, button: z.PointerButton },
+
+    fn pointed(self: Observed) ?Point {
+        return switch (self) {
+            .pointer_down => |value| value.position,
+            .pointer_up => |value| value.position,
+            else => null,
+        };
+    }
 };
 
 /// What a press or key does to a tree or table row.
@@ -1574,6 +1710,9 @@ pub const PopupState = struct {
     within: ?u64 = null,
     /// Editable combo box whose button asked to close its list.
     close: ?u64 = null,
+    /// The select of its caller's own flag (`selectListBase`) whose list
+    /// its last build left open, which tells it what the view did since.
+    built_open: ?u64 = null,
 };
 
 /// Hover and timing of the tooltip, kept by the View across passes.
@@ -1859,6 +1998,22 @@ pub const View = struct {
     poses: posed.State = .{},
     /// Keyboard focus at the start of this pass, set by the host.
     focus: ?u64 = null,
+    /// The focused node and those around it, from it out, as of this pass's
+    /// start, found in the tree of the pass before (`focusWithin`); and
+    /// those the focus left since that pass (`focusLeft`). A popover, list
+    /// or menu counts as inside the node it opens from.
+    focus_chain: [max_focus_chain]u64 = undefined,
+    focus_chain_len: usize = 0,
+    focus_left_ids: [max_focus_chain]u64 = undefined,
+    focus_left_len: usize = 0,
+    /// This pass read where the focus is; see `finish`.
+    focus_read: bool = false,
+    /// The focus takes text, as of this pass's start (`focusTakesText`).
+    focus_text: bool = false,
+    /// Containers observing the input inside them in the pass built last,
+    /// so that the host runs passes for them only while there are some.
+    observers: usize = 0,
+    observers_built: usize = 0,
     /// A control the host should focus after this pass, such as a combo box
     /// whose list just closed.
     restore: ?u64 = null,
@@ -1914,6 +2069,12 @@ pub const View = struct {
     tools: ?*const Inspector = null,
     /// The pointer area a button went down on, until it comes up.
     area_press: ?pointer_controls.Press = null,
+    /// The device and pressure of the latest pointer event, which Host
+    /// takes from the window as each comes (`z.Window.pointerSample`).
+    pointer_sample: z.PointerSample = .{},
+    /// A press anywhere, for the areas around it to learn of in the first
+    /// pass built after it; set with `pressedAt`.
+    press_inside: ?pointer_controls.InsidePress = null,
     /// The last press on a pointer area, to count double presses.
     area_last: pointer_controls.Last = .{},
     /// What the pointer hovered at the last move, to tell when to repaint.
@@ -2014,6 +2175,9 @@ pub const View = struct {
 
     /// Start a pass with an implicit root column.
     pub fn reset(self: *View, root_style: Style, event: ?Event) void {
+        self.trackFocus();
+        self.focus_read = false;
+        self.observers_built = 0;
         @memcpy(self.exits_before[0..self.exits_len], self.exits[0..self.exits_len]);
         self.exits_before_len = self.exits_len;
         self.exits_len = 0;
@@ -2335,6 +2499,49 @@ pub const View = struct {
         if (self.nodeById(controlled) == null) return error.InvalidValue;
         target.controls = controlled;
     }
+    /// The text of the node with id `hint`, a hint or help text the view
+    /// draws under or beside the control with id `control`, describes the
+    /// control after its name and value, as aria-describedby does, even
+    /// while the hint is hidden from assistive technology
+    /// (`Style.access_hidden`). Call it once both are built:
+    ///
+    ///     _ = try v.textInput(&app.password, .{});
+    ///     const field = v.lastNode().id;
+    ///     try v.text("At least 12 characters", .{ .access_hidden = true });
+    ///     try v.describedBy(field, v.lastNode().id);
+    pub fn describedBy(self: *View, control: u64, hint: u64) Error!void {
+        if (control == hint) return error.InvalidValue;
+        const target = self.nodeById(control) orelse return error.InvalidValue;
+        if (self.nodeById(hint) == null) return error.InvalidValue;
+        target.described_by = hint;
+        try self.describe(target);
+    }
+    /// The node with id `message` holds the message of the error of the
+    /// control with id `control`, as aria-errormessage: while the control
+    /// is invalid (`Style.invalid`, or its field's), assistive technology
+    /// reads the message first in its description and can move to it.
+    /// Call it once both are built.
+    pub fn errorMessage(self: *View, control: u64, message: u64) Error!void {
+        if (control == message) return error.InvalidValue;
+        const target = self.nodeById(control) orelse return error.InvalidValue;
+        if (self.nodeById(message) == null) return error.InvalidValue;
+        target.error_message = message;
+        try self.describe(target);
+    }
+    /// The description `describedBy` and `errorMessage` give `node`.
+    fn describe(self: *View, node: *Node) Error!void {
+        const hint = if (node.described_by != 0) self.labelText(node.described_by) orelse "" else "";
+        const invalid = node.style.invalid or self.annotationOf(node).invalid;
+        const message = if (node.error_message != 0 and invalid) self.labelText(node.error_message) orelse "" else "";
+        if (message.len == 0 or hint.len == 0) {
+            node.access_description = if (message.len > 0) message else hint;
+            return;
+        }
+        var both: [max_description]u8 = undefined;
+        const joined = std.fmt.bufPrint(&both, "{s}. {s}", .{ message, hint }) catch both[0..];
+        node.access_description = try self.copy(joined);
+    }
+    const max_description = 512;
     /// What a press on the label with `id` does (`labelledBy`): the
     /// control it focuses, and the one it clicks, a checkbox, switch or
     /// radio button. Null when `id` labels nothing.
@@ -2401,10 +2608,12 @@ pub const View = struct {
     pub const menuItemBase = menu_controls.menuItemBase;
     pub const submenuItemBase = menu_controls.submenuItemBase;
     pub const submenuBase = menu_controls.submenuBase;
+    pub const menuGroupBase = menu_controls.menuGroupBase;
     pub const openMenuAt = menu_controls.openAt;
     pub const areaPress = pointer_controls.press;
     pub const areaRelease = pointer_controls.release;
     pub const areaCancel = pointer_controls.cancel;
+    pub const pressedAt = pointer_controls.pressedAt;
     pub const pointerMoved = pointer_controls.moved;
     pub const cursorAt = pointer_controls.cursorAt;
 
@@ -2456,6 +2665,8 @@ pub const View = struct {
             .drop => |value| value.id,
             .reorder => |value| value.id,
             .pointer => |value| value.id,
+            .drag_missed => |value| value.id,
+            .observe => return null,
         };
         if (target != id) return null;
         self.event = null;
@@ -2561,6 +2772,21 @@ pub const View = struct {
         if (presence.moving()) if (presence.channel.?.nextWake(self.now, self.frameStep()) catch null) |deadline| self.wakeAt(deadline);
         return true;
     }
+    /// Whether the node with `id` is inside content `presentColumn` holds
+    /// back while other content leaves (`Transition.after_exits`), in the
+    /// pass built last.
+    pub fn heldBack(self: *const View, id: u64) bool {
+        for (self.buffers.nodes[1..@max(self.len, 1)], 1..) |*node, index| if (node.id == id) {
+            var at: u32 = @intCast(index);
+            while (at != none and at != 0) {
+                const inner = &self.buffers.nodes[at];
+                if (inner.unseen) return true;
+                at = inner.parent;
+            }
+            return false;
+        };
+        return false;
+    }
     /// Content `presentColumn` is taking out of the container `parent`.
     fn noteExit(self: *View, parent: u64) void {
         if (std.mem.indexOfScalar(u64, self.exits[0..self.exits_len], parent) != null) return;
@@ -2616,7 +2842,7 @@ pub const View = struct {
                 };
             };
             if (self.popover_shown) |id| if (id == node.id) {
-                self.popover_within = self.focusWithin(node);
+                self.popover_within = self.focusWithinNode(node);
             };
         }
         if (node.kind == .token_field and self.removed_token == index) {
@@ -2766,6 +2992,40 @@ pub const View = struct {
     /// Selects `option` on activation; true when the selection changed.
     pub fn tab(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
         return self.choice(.tab, .tab_list, T, selected, option, label, style);
+    }
+    /// A tab without a look in `tabs`: opens a container, a row by
+    /// default, that the application fills and draws, as an icon and a
+    /// title on a background of its own while it is chosen; close it with
+    /// `end`. It chooses `option` as `tab` does, shares the list's Tab stop,
+    /// and the arrows, Home and End move the choice and the focus, passing
+    /// over a tab with `Style.enabled` false. Assistive technology reads a
+    /// tab named by `Style.name` or the text inside it, the chosen one
+    /// selected. True when the choice changed.
+    pub fn tabBase(self: *View, comptime T: type, selected: *T, option: T, style: Style) Error!bool {
+        return self.choiceBase(.tab, .tab_list, T, selected, option, style);
+    }
+    /// An option without a look in `listBox`, as `tabBase` is a tab: the
+    /// application fills and draws the container, which chooses `option`
+    /// as `listItem` does. True when the choice changed.
+    pub fn listItemBase(self: *View, comptime T: type, selected: *T, option: T, style: Style) Error!bool {
+        const changed = try self.choiceBase(.list_item, .list_box, T, selected, option, style);
+        if (changed) self.reveal = self.buffers.nodes[self.stack[self.depth - 1]].id;
+        return changed;
+    }
+    fn choiceBase(self: *View, kind: Kind, container: Kind, comptime T: type, selected: *T, option: T, style: Style) Error!bool {
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.kind != container) return error.NotContainer;
+        const group = parent.id;
+        const node = try self.open(kind, style);
+        node.plain = true;
+        node.radio_group = group;
+        var changed = false;
+        if (self.take(node.id) != null and node.style.enabled and !std.meta.eql(selected.*, option)) {
+            selected.* = option;
+            changed = true;
+        }
+        node.checked = std.meta.eql(selected.*, option);
+        return changed;
     }
     /// Starts a single-selection list of full-width options bound to one
     /// value, named by `Style.name`. Put it in a `scroll` container for long
@@ -3037,6 +3297,44 @@ pub const View = struct {
         leaf.level = level;
         leaf.semantic_parent = semantic;
         return self.rowState(leaf, id, expanded);
+    }
+
+    /// What a `treeItemBase` row learned in this pass.
+    pub const TreeRowState = struct {
+        /// Enter activated the row.
+        activated: bool = false,
+        /// The row is in the tree's `Selection`: draw it so.
+        selected: bool = false,
+        /// The row holds the tree's cursor, where its Tab stop is.
+        cursor: bool = false,
+        /// How deep the row is, from 0, to indent it by.
+        level: u16 = 0,
+    };
+    /// A tree row without a look for the application's item `id`: opens
+    /// the row, a container the application fills and draws (an indent of
+    /// `level`, a chevron, an icon and a title, the background of a
+    /// selected row); close it with `end`, then build its children while
+    /// `expanded` is set, and close the item with a second `end`. It keeps
+    /// `treeItem`'s selection, keys and semantics: Up and Down move, Right
+    /// and Left open and close it, a press selects it. `expanded` is null
+    /// for a leaf; a chevron of the application's own flips it. Assistive
+    /// technology reads a tree item named by `Style.name` or the text
+    /// inside it.
+    pub fn treeItemBase(self: *View, id: u64, expanded: ?*bool, style: Style) Error!TreeRowState {
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.kind != .tree and parent.kind != .tree_item) return error.NotContainer;
+        const nested = parent.kind == .tree_item;
+        const level: u16 = if (nested) self.buffers.nodes[parent.first_child].level +| 1 else 0;
+        const semantic = if (nested) self.buffers.nodes[parent.first_child].id else parent.id;
+        _ = try self.open(.tree_item, .{ .key = id, .enabled = style.enabled });
+        var value = style;
+        value.key = null;
+        const leaf = try self.open(.tree_row, value);
+        leaf.plain = true;
+        leaf.level = level;
+        leaf.semantic_parent = semantic;
+        const activated = try self.rowState(leaf, id, expanded);
+        return .{ .activated = activated, .selected = leaf.checked, .cursor = leaf.cursor, .level = level };
     }
 
     /// Starts a table: a header row with one sortable title per column,
@@ -3528,6 +3826,119 @@ pub const View = struct {
         self.picked = true;
         self.restore = input_id;
         return true;
+    }
+    /// A row of a suggestions list or combo box list saying that nothing
+    /// matches, as "No matches": it keeps the list open while the input
+    /// has the focus, takes neither the highlight nor a press, and reads
+    /// as an unavailable option.
+    pub fn noSuggestions(self: *View, label: []const u8, style: Style) Error!void {
+        const list = self.enclosingPopup() orelse return error.NotContainer;
+        var value = style;
+        value.enabled = false;
+        _ = try self.popupItem(list, label, value);
+    }
+
+    /// A select without a look: opens the trigger, a container the
+    /// application fills and draws with the current choice; close it with
+    /// `end`, then build its list with `selectListBase`. It has
+    /// `comboBox`'s keys and semantics: a press, Enter, Space, Down or Up
+    /// opens the list, read as a combo box named by `Style.name` or the
+    /// text inside it, expanded while the list shows.
+    pub fn selectBase(self: *View, style: Style) Error!void {
+        const node = try self.open(.combo_box, style);
+        node.plain = true;
+    }
+    /// The list of the `selectBase` just closed, drawn as `style` draws it:
+    /// build its options with `selectOptionBase` only when this returns
+    /// true, and close it with `end` either way. With `is_open`, the caller
+    /// owns whether it shows: setting it opens the list and clearing it
+    /// closes it, and the view writes back what the user did, as a press of
+    /// the trigger, Escape, a press outside or a choice.
+    pub fn selectListBase(self: *View, is_open: ?*bool, style: Style) Error!bool {
+        if (self.depth == 0) return error.UnbalancedContainer;
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.last_child == none) return error.NotContainer;
+        const anchor_index = parent.last_child;
+        const anchor = &self.buffers.nodes[anchor_index];
+        if (anchor.kind != .combo_box or !anchor.plain) return error.NotContainer;
+        const id = anchor.id;
+        const popup = &self.popup;
+        if (is_open) |flag| {
+            const was = if (popup.built_open) |owner| owner == id else false;
+            const now = if (popup.open) |owner| owner == id else false;
+            // What the view did since the last pass wins over the flag;
+            // otherwise the flag says.
+            if (was != now) flag.* = now else if (flag.* != now) {
+                if (flag.*) {
+                    popup.open = id;
+                    popup.highlight = null;
+                } else {
+                    popup.open = null;
+                    popup.highlight = null;
+                    if (self.focusWithinNode(anchor)) self.restore = id;
+                }
+            }
+        }
+        if (self.take(id) != null and anchor.style.enabled) {
+            const was_open = if (popup.open) |owner| owner == id else false;
+            popup.open = if (was_open) null else id;
+            popup.highlight = null;
+            if (was_open) self.restore = id;
+            if (is_open) |flag| flag.* = !was_open;
+        }
+        var value = style;
+        if (value.name.len == 0) value.name = anchor.style.name;
+        const list = try self.open(.popup, value);
+        list.anchor = anchor_index;
+        list.concealed = list.concealed or self.buffers.nodes[anchor_index].concealed;
+        list.access_hidden = list.access_hidden or self.buffers.nodes[anchor_index].access_hidden;
+        if (!anchor.style.enabled) if (is_open) |flag| {
+            flag.* = false;
+        };
+        const shown = if (popup.open) |owner| owner == id and anchor.style.enabled else false;
+        // What the flag now says, against which the next pass tells what
+        // the view did meanwhile, a choice in this pass included.
+        if (shown) popup.built_open = id else if (popup.built_open) |owner| if (owner == id) {
+            popup.built_open = null;
+        };
+        return shown;
+    }
+    /// What a `selectOptionBase` learned in this pass.
+    pub const OptionState = struct {
+        /// The user chose it; the list closes.
+        changed: bool = false,
+        /// The pointer or the arrows are on it: draw it so.
+        highlighted: bool = false,
+        /// It is the current choice.
+        selected: bool = false,
+    };
+    /// An option without a look of a `selectListBase`: opens a container
+    /// the application fills and draws; close it with `end`. A press or
+    /// Enter chooses `value`, closes the list and gives the focus back to
+    /// the trigger; the arrows, Home and End pass over an option with
+    /// `Style.enabled` false. Read as an option named by `Style.name` or
+    /// the text inside it.
+    pub fn selectOptionBase(self: *View, comptime T: type, selected: *T, value: T, style: Style) Error!OptionState {
+        const list = self.enclosingPopup() orelse return error.NotContainer;
+        const anchor = &self.buffers.nodes[list.anchor];
+        if (anchor.kind != .combo_box) return error.NotContainer;
+        const anchor_id = anchor.id;
+        const group = list.id;
+        const node = try self.open(.list_item, style);
+        node.plain = true;
+        node.radio_group = group;
+        node.highlighted = if (self.popup.highlight) |id| id == node.id else false;
+        var state: OptionState = .{ .highlighted = node.highlighted };
+        if (self.take(node.id) != null and node.style.enabled) {
+            state.changed = !std.meta.eql(selected.*, value);
+            selected.* = value;
+            self.popup.open = null;
+            self.popup.highlight = null;
+            self.restore = anchor_id;
+        }
+        node.checked = std.meta.eql(selected.*, value);
+        state.selected = node.checked;
+        return state;
     }
     fn enclosingPopup(self: *const View) ?*Node {
         var depth = self.depth;
@@ -4237,7 +4648,7 @@ pub const View = struct {
             const again = last.id == entry.id and now >= last.time and now - last.time <= double_press_time and distance(last.at, point) <= double_press_distance;
             const count: u8 = if (again) last.count +| 1 else 1;
             self.last_press = .{ .id = entry.id, .time = now, .at = point, .count = count };
-            if (entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_down = .{ .position = local(entry, point), .count = count, .modifiers = modifiers } })) {
+            if (entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_down = .{ .position = local(entry, point), .count = count, .modifiers = modifiers, .pointer = self.pointer_sample } })) {
                 self.capture = .{ .target = .{ .embed = entry.id }, .origin = point, .position = point, .modifiers = modifiers, .embed_context = entry.embed.context };
                 result.consumed = true;
                 result.repaint = true;
@@ -4309,7 +4720,7 @@ pub const View = struct {
                 self.capture = null;
                 return result;
             };
-            result.repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_drag = .{ .position = local(entry, point), .origin = local(entry, capture.origin), .delta = delta, .dragging = capture.dragging } });
+            result.repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_drag = .{ .position = local(entry, point), .origin = local(entry, capture.origin), .delta = delta, .dragging = capture.dragging, .pointer = self.pointer_sample } });
             result.settle = result.repaint;
             // The leaf hands the drag over to carry a payload out of it.
             const ask = entry.embed.drag orelse return result;
@@ -4386,12 +4797,14 @@ pub const View = struct {
         switch (capture.target) {
             .embed => unreachable,
             .area => |id| result.push(.{ .drag = .{ .id = id, .phase = .end, .origin = capture.origin, .position = point, .delta = .{ .x = point.x - capture.position.x, .y = point.y - capture.position.y }, .modifiers = capture.modifiers } }),
+            // Let go over no target that takes it: the source learns where,
+            // which may be outside the window, as to tear a tab out.
             .source => |source| if (self.dropTargetAt(point, .{ .value = source.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = source.payload }, .position = point } });
-            },
+            } else result.push(.{ .drag_missed = .{ .id = source.id, .payload = source.payload, .position = point } }),
             .rows => |rows| if (self.dropTargetAt(point, .{ .value = rows.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = rows.payload }, .position = point } });
-            },
+            } else result.push(.{ .drag_missed = .{ .id = rows.list, .payload = rows.payload, .position = point } }),
             .leaf => |leaf| if (self.dropTargetAt(point, .{ .value = leaf.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = leaf.payload }, .position = point } });
             },
@@ -4647,7 +5060,10 @@ pub const View = struct {
     fn settleTooltip(self: *View) void {
         const all = self.buffers.nodes[0..self.len];
         var candidate: u32 = none;
-        inline for (.{ self.tip.hover, self.focus }) |wanted| if (candidate == none) if (wanted) |id| {
+        // The focus counts for the option it gives the keys to, its active
+        // descendant, as a list's highlight: that one's tip shows.
+        const descendant: ?u64 = if (self.focus != null and self.overlay.popup != null) self.popup.highlight else null;
+        inline for (.{ self.tip.hover, descendant, self.focus }) |wanted| if (candidate == none) if (wanted) |id| {
             for (all, 0..) |*node, i| if (node.id == id and node.tooltip.len > 0) {
                 candidate = @intCast(i);
                 break;
@@ -4747,9 +5163,21 @@ pub const View = struct {
     /// drags. True while it is dragged, to show it dimmed. Close it with
     /// `end`.
     pub fn dragSource(self: *View, payload: Payload, style: Style) Error!bool {
+        return (try self.dragSourceState(payload, style)).dragging;
+    }
+    /// `dragSource`, telling also, in the pass after the release, that the
+    /// payload was let go over no `dropTarget` taking it, and where in the
+    /// window's coordinates: outside the window when it was let go past its
+    /// edge, as to tear a tab out into a window of its own. A drag given up
+    /// with Escape, or lost as the system cancels the press, is not missed.
+    pub fn dragSourceState(self: *View, payload: Payload, style: Style) Error!DragSourceState {
         const node = try self.open(.drag_source, style);
         node.payload = payload;
-        return self.dragging(.source, node.id);
+        var state: DragSourceState = .{ .dragging = self.dragging(.source, node.id) };
+        if (self.take(node.id)) |event| if (event == .drag_missed) {
+            state.missed = event.drag_missed.position;
+        };
+        return state;
     }
 
     /// Starts a drop target, laid out as a column, that takes what `accept`
@@ -4809,14 +5237,18 @@ pub const View = struct {
     /// the application finds among its `Selection`, and how many go shows
     /// beside the pointer. Escape gives the drag up. A tree cannot drag its
     /// rows out, and a container cannot both `dragRows` and `reorder` or
-    /// `dragSelect`.
-    pub fn dragRows(self: *View, kind: u64) Error!void {
+    /// `dragSelect`. In the pass after a release over no target taking
+    /// the payload it returns that payload and where it was let go, in the
+    /// window's coordinates, as `dragSourceState` tells it; null otherwise.
+    pub fn dragRows(self: *View, kind: u64) Error!?DragMiss {
         const index = self.stack[self.depth - 1];
         if (index == 0) return error.NotContainer;
         const node = &self.buffers.nodes[index];
         if (node.kind == .tree or node.drag_select or node.reorder) return error.InvalidValue;
         if (node.kind != .table and node.child_count != 0) return error.InvalidValue;
         node.drag_rows = kind;
+        if (self.take(node.id)) |event| if (event == .drag_missed) return .{ .payload = event.drag_missed.payload, .position = event.drag_missed.position };
+        return null;
     }
 
     /// Let a primary drag from a row of the tree or table just opened select
@@ -4866,8 +5298,19 @@ pub const View = struct {
 
     /// Validate balance after the build function returns.
     pub fn finish(self: *View) Error!void {
+        // The areas around a press learned of it in this pass.
+        self.press_inside = null;
+        self.observers = self.observers_built;
         if (self.depth != 1) return error.UnbalancedContainer;
         self.buffers.nodes[0].end = self.len;
+        // A pass that read where the focus is, in a tree that moved the
+        // focused node in or out of what it read, is drawn again, so that
+        // it reads it right.
+        if (self.focus_read) {
+            var chain: [max_focus_chain]u64 = undefined;
+            const len = self.focusChain(&chain);
+            if (!std.mem.eql(u64, chain[0..len], self.focus_chain[0..self.focus_chain_len])) self.wakeAt(self.now);
+        }
         try router_controls.finish(self);
         if (self.arrow_focus) |id| {
             self.arrow_focus = null;
@@ -6088,8 +6531,11 @@ pub const View = struct {
         if (node.kind == .popup) {
             const anchor = &all[node.anchor];
             const name = if (node.style.name.len > 0) node.style.name else anchor.style.name;
-            target.roundedRect(bounds, 4, ui.Color.rgb(theme.palette.border));
-            target.roundedRect(inset(bounds, theme.metrics.border / 2), 4, ui.Color.rgb(theme.palette.inset));
+            // A select's list without a look is what its style draws.
+            if (anchor.plain) paintBox(target, node.style, bounds) else {
+                target.roundedRect(bounds, 4, ui.Color.rgb(theme.palette.border));
+                target.roundedRect(inset(bounds, theme.metrics.border / 2), 4, ui.Color.rgb(theme.palette.inset));
+            }
             // A combo box owns its list; a text input's list stays at the
             // root because the input may publish its semantics later.
             try target.popupList(node.id, bounds, name, if (anchor.kind == .combo_box) anchor.id else ui.accessibility.root_id);
@@ -6456,7 +6902,7 @@ pub const View = struct {
                         .table_row => try target.tableRow(node.id, bounds, node.text, self.rowOptions(node, control)),
                         .token_field, .combo_field => {
                             if (node.kind == .token_field) try target.tokenField(node.id, bounds, style.name, node.semantic_parent) else try target.comboField(node.id, bounds, node.text, node.checked, control);
-                            const focused = self.focusWithin(node);
+                            const focused = self.focusWithinNode(node);
                             target.roundedRect(bounds, 3, ui.Color.rgb(if (focused) theme.palette.focus else if (style.enabled) theme.palette.border else theme.palette.disabled_border));
                             target.roundedRect(inset(bounds, theme.metrics.border), 2, ui.Color.rgb(theme.palette.field));
                         },
@@ -6498,7 +6944,13 @@ pub const View = struct {
                     if (@TypeOf(target) == *ui.Frame and morphing == null and node.text.len > 0) try self.paintTextBehind(target, all, at, bounds);
                     if (morphing) |value| try self.paintMorph(target, node, color, value) else self.drawTextAt(target, node, bounds, color);
                 },
-                .tree_row => {
+                .tree_row => if (node.plain) {
+                    var name_buffer: [max_plain_name]u8 = undefined;
+                    var look = self.rowOptions(node, control);
+                    look.control.look = false;
+                    paintBox(target, style, bounds);
+                    try target.treeItem(node.id, bounds, if (style.name.len > 0) style.name else self.plainName(node, &name_buffer), look);
+                } else {
                     var row_control = control;
                     // The badge is announced with the row.
                     if (row_control.description.len == 0) row_control.description = node.badge;
@@ -6574,7 +7026,14 @@ pub const View = struct {
                     segment_options.radio_group = node.radio_group;
                     try target.segment(node.id, bounds, node.text, node.checked, segment_options);
                 },
-                .list_item => {
+                .list_item => if (node.plain) {
+                    var name_buffer: [max_plain_name]u8 = undefined;
+                    var item_options = control;
+                    item_options.radio_group = node.radio_group;
+                    item_options.look = false;
+                    paintBox(target, style, bounds);
+                    try target.listItem(node.id, bounds, if (style.name.len > 0) style.name else self.plainName(node, &name_buffer), node.checked, item_options);
+                } else {
                     var item_options = control;
                     item_options.radio_group = node.radio_group;
                     try target.listItem(node.id, bounds, node.text, node.checked, item_options);
@@ -6619,9 +7078,14 @@ pub const View = struct {
                     target.roundedRect(.{ .x = bounds.x + pad, .y = bounds.y + (bounds.height - line) / 2, .width = @max(0, bounds.width - 2 * pad), .height = line }, 0, ui.Color.rgb(theme.palette.border));
                 },
                 .tab => {
+                    var name_buffer: [max_plain_name]u8 = undefined;
                     var tab_options = control;
                     tab_options.radio_group = node.radio_group;
-                    try target.tab(node.id, bounds, node.text, node.checked, tab_options);
+                    if (node.plain) {
+                        tab_options.look = false;
+                        paintBox(target, style, bounds);
+                    }
+                    try target.tab(node.id, bounds, if (!node.plain) node.text else if (style.name.len > 0) style.name else self.plainName(node, &name_buffer), node.checked, tab_options);
                 },
                 .toggle_switch => try target.toggleSwitch(node.id, bounds, node.text, node.checked, control),
                 .progress => try target.progress(node.id, bounds, node.fraction, control),
@@ -6735,7 +7199,9 @@ pub const View = struct {
     /// semantic node its widget records, or null for nothing.
     fn extrasOf(self: *const View, node: *const Node) ?ui.NodeExtras {
         const style = node.style;
-        if (style.tab_stop and node.labelled_by == 0 and node.controls == 0 and !style.busy and style.current == .none and style.popup == null and style.sort == .none and style.auto_complete == .none and style.role_description.len == 0 and style.key_shortcuts.len == 0 and style.value_text.len == 0) return null;
+        // The text input of a search field is a search box.
+        const searching = style.search or (node.kind == .embed and node.parent != none and self.buffers.nodes[node.parent].kind == .search);
+        if (!searching and style.tab_stop and node.labelled_by == 0 and node.controls == 0 and node.described_by == 0 and node.error_message == 0 and !style.busy and style.current == .none and style.popup == null and style.sort == .none and style.auto_complete == .none and style.role_description.len == 0 and style.key_shortcuts.len == 0 and style.value_text.len == 0 and style.orientation == null and !style.invalid and !style.multiselectable and style.access_selected == null and style.position_in_set == 0 and style.set_size == 0 and style.row_count == 0 and style.column_count == 0 and style.row_index == 0 and style.column_index == 0) return null;
         return .{
             .id = node.id,
             .tab_stop = style.tab_stop,
@@ -6749,6 +7215,23 @@ pub const View = struct {
             .key_shortcuts = style.key_shortcuts,
             .value_text = style.value_text,
             .controls = if (node.controls != 0) self.focusTarget(node.controls) else 0,
+            .description = if (node.described_by != 0 or node.error_message != 0) node.access_description else null,
+            .described_by = node.described_by,
+            .error_message = node.error_message,
+            .invalid = style.invalid,
+            .search = searching,
+            .orientation = if (style.orientation) |way| switch (way) {
+                .horizontal => .horizontal,
+                .vertical => .vertical,
+            } else null,
+            .multiple = style.multiselectable,
+            .selected = style.access_selected,
+            .position = style.position_in_set,
+            .set_size = style.set_size,
+            .row_count = style.row_count,
+            .column_count = style.column_count,
+            .row_index = style.row_index,
+            .column_index = style.column_index,
         };
     }
     /// The text of the label with `id`, as `View.labelledBy` names by.
@@ -7007,8 +7490,108 @@ pub const View = struct {
         target.roundedRect(pill, pill.height / 2, ui.Color.rgb(if (node.checked) theme.palette.on_accent else theme.palette.control));
         target.label(.{ .x = pill.x + pad + 4, .y = pill.y, .width = @max(0, pill.width - 2 * (pad + 4)), .height = pill.height }, node.badge, if (node.checked) theme.palette.accent else theme.palette.text);
     }
+    /// The focused node and those around it in the tree built last, from
+    /// it out, into `chain`; none while the window lacks the keyboard. A
+    /// focus not in the tree counts itself alone.
+    fn focusChain(self: *const View, chain: *[max_focus_chain]u64) usize {
+        if (!self.window_focused) return 0;
+        const focused = self.focus orelse return 0;
+        var len: usize = 0;
+        for (self.buffers.nodes[1..@max(self.len, 1)], 1..) |*node, index| if (node.id == focused) {
+            var at: u32 = @intCast(index);
+            while (at != none and at != 0 and len < chain.len) {
+                const inner = &self.buffers.nodes[at];
+                chain[len] = inner.id;
+                len += 1;
+                at = if (inner.anchor != none) inner.anchor else inner.parent;
+            }
+            break;
+        };
+        if (len == 0) {
+            chain[0] = focused;
+            len = 1;
+        }
+        return len;
+    }
+    fn trackFocus(self: *View) void {
+        var chain: [max_focus_chain]u64 = undefined;
+        const len = self.focusChain(&chain);
+        self.focus_text = false;
+        if (self.window_focused) if (self.focus) |focused| for (self.buffers.nodes[1..@max(self.len, 1)]) |*node| if (node.id == focused) {
+            if (node.embed) |content| if (content.takes_text) |ask| {
+                self.focus_text = ask(content.context);
+            };
+            break;
+        };
+        self.focus_left_len = 0;
+        for (self.focus_chain[0..self.focus_chain_len]) |id| {
+            if (std.mem.indexOfScalar(u64, chain[0..len], id) != null) continue;
+            self.focus_left_ids[self.focus_left_len] = id;
+            self.focus_left_len += 1;
+        }
+        @memcpy(self.focus_chain[0..len], chain[0..len]);
+        self.focus_chain_len = len;
+    }
+    /// Whether the keyboard focus is on the node with `id` or inside it,
+    /// as CSS's `:focus-within`, while the window has the keyboard: the
+    /// popovers, lists and menus that open from it count as inside it. It
+    /// answers as of this pass's start, from where the nodes were in the
+    /// pass before, so a node built this pass for the first time asks with
+    /// its id from `lastNode`; a pass that reads it as the focus moves in a
+    /// tree that changes is drawn again.
+    pub fn focusWithin(self: *View, id: u64) bool {
+        self.focus_read = true;
+        return std.mem.indexOfScalar(u64, self.focus_chain[0..self.focus_chain_len], id) != null;
+    }
+    /// Whether the focus left the node with `id` since the pass before: it
+    /// was on the node or inside it, and is now outside it, or nowhere, as
+    /// the window lost the keyboard; the web's `focusout` whose
+    /// `relatedTarget` the node does not contain. A combo box of one's own
+    /// closes its list as the focus leaves it, but not as it moves into
+    /// that list, which opens from it.
+    pub fn focusLeft(self: *View, id: u64) bool {
+        self.focus_read = true;
+        return std.mem.indexOfScalar(u64, self.focus_left_ids[0..self.focus_left_len], id) != null;
+    }
+    /// Opens a column that sees the input coming to what is inside it, as
+    /// an ancestor hears the events that bubble up to it, without taking
+    /// it: the keys pressed and released and the text typed and composed
+    /// while the focus is the container or inside it, and the buttons
+    /// pressed and released over it. It returns the input in a pass of its
+    /// own that comes before the input goes on as it would (to the focused
+    /// control, the shortcuts and Tab), the outermost container first, and
+    /// null in other passes. A demo stops playing at the first key pressed
+    /// in it; a panel hides its hint once one of its fields is typed in. A
+    /// key that moved the focus, as Tab, comes up where the focus went.
+    /// Close it with `end`.
+    pub fn observeInput(self: *View, style: Style) Error!?Observed {
+        const node = try self.open(.column, style);
+        node.observes = true;
+        self.observers_built += 1;
+        const event = self.event orelse return null;
+        if (event != .observe) return null;
+        const observed = event.observe;
+        if (observed.pointed()) |point| {
+            const bounds = self.boundsOf(node.id) orelse return null;
+            if (!contains(bounds, point)) return null;
+        } else if (std.mem.indexOfScalar(u64, self.focus_chain[0..self.focus_chain_len], node.id) == null) return null;
+        return observed;
+    }
+    /// Whether a container observed the input in the pass built last, and
+    /// so whether input should go through a pass for them first.
+    pub fn observing(self: *const View) bool {
+        return self.observers != 0;
+    }
+    /// Whether the focus takes text, typed or composed: an embedded leaf
+    /// that says so (`Embed.takes_text`), as a text field that is not read
+    /// only, a terminal or an editor. The guard of single-key shortcuts: a
+    /// command palette's letters step aside while a field types them.
+    pub fn focusTakesText(self: *View) bool {
+        self.focus_read = true;
+        return self.focus_text;
+    }
     /// True when focus is on the node or a node inside it.
-    fn focusWithin(self: *const View, node: *const Node) bool {
+    fn focusWithinNode(self: *const View, node: *const Node) bool {
         const focused = self.focus orelse return false;
         const start = (@intFromPtr(node) - @intFromPtr(self.buffers.nodes.ptr)) / @sizeOf(Node);
         for (self.buffers.nodes[start..node.end]) |*inner| if (inner.id == focused) return true;
@@ -7431,6 +8014,9 @@ pub const Host = struct {
     /// The pending focus waited one more frame, for a text field that
     /// registers itself with the Context after the frame that placed it.
     focus_retried: bool = false,
+    /// A focus given to content held back until others leave, and the
+    /// focus as it was given, which another focus since overrides.
+    held_focus: ?struct { id: u64, was: ?u64 } = null,
     /// What `Options.fit_content` told.
     fit: FitState = .{},
 
@@ -7786,7 +8372,19 @@ pub const Host = struct {
         if (self.context.window == null or self.context.input_state.focused == id) return;
         if (self.context.input_state.available(id)) {
             self.focus_retried = false;
+            self.held_focus = null;
             self.focus(id);
+        } else if (self.view.heldBack(id)) {
+            // Content `Transition.after_exits` holds back keeps the focus
+            // given to it, and takes it as it shows, unless the focus went
+            // elsewhere meanwhile.
+            const was = if (self.held_focus) |held| held.was else self.context.input_state.focused;
+            if (self.held_focus != null and self.context.input_state.focused != was) {
+                self.held_focus = null;
+                return;
+            }
+            self.held_focus = .{ .id = id, .was = was };
+            self.pending_focus = id;
         } else if (!self.focus_retried) {
             // A text field attaches through a task of its own after the
             // frame; wait for the next frame once.
@@ -7826,6 +8424,18 @@ pub const Host = struct {
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return false;
+        // What points, and how hard, as the window tells it.
+        switch (event) {
+            .pointer_down, .pointer_up, .pointer_move => if (self.context.window) |window| {
+                self.view.pointer_sample = window.pointerSample();
+            },
+            else => {},
+        }
+        // The containers observing the input see it before anything else.
+        if (self.view.observing()) if (observedOf(event)) |seen| {
+            self.deliver(.{ .observe = seen });
+            self.invalidate();
+        };
         // The keys held count whatever takes them, the inspector too.
         if (event == .key_input and !event.key_input.from_page and self.view.holdKey(event.key_input)) self.invalidate();
         if (self.options.tools()) |tools| if (self.inspectorInput(tools, event)) return true;
@@ -7857,6 +8467,7 @@ pub const Host = struct {
                     }
                 }
                 const point: Point = .{ .x = press.position.x, .y = press.position.y };
+                if (areaButton(press.button)) |button| if (self.view.pressedAt(point, button, press.modifiers)) self.invalidate();
                 if (press.button != .primary) {
                     // Secondary and middle presses reach pointer areas where
                     // no control lies.
@@ -8022,6 +8633,10 @@ pub const Host = struct {
     fn onKeyRelease(ptr: *anyopaque, _: *ui.Context, input: z.KeyInput) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return;
+        if (self.view.observing()) {
+            self.deliver(.{ .observe = .{ .key_up = input } });
+            self.invalidate();
+        }
         if (self.view.releaseKey(input)) self.invalidate();
         self.view.focus = self.context.input_state.focused;
         if (self.view.embedKeyUp(input) or self.applicationKey(input, true)) self.settleEmbed(null);
@@ -8060,6 +8675,17 @@ pub const Host = struct {
         self.deliver(value);
         self.invalidate();
         return true;
+    }
+    /// What an `observeInput` container sees of a window event.
+    fn observedOf(event: z.Event) ?Observed {
+        return switch (event) {
+            .key_input => |input| if (input.from_page) null else .{ .key_down = input },
+            .text_input => |typed| .{ .text = typed.text },
+            .text_preedit => |composed| .{ .composition = composed.text },
+            .pointer_down => |press| .{ .pointer_down = .{ .position = .{ .x = press.position.x, .y = press.position.y }, .button = press.button, .modifiers = press.modifiers } },
+            .pointer_up => |release| .{ .pointer_up = .{ .position = .{ .x = release.position.x, .y = release.position.y }, .button = release.button } },
+            else => null,
+        };
     }
     fn areaButton(button: z.PointerButton) ?PointerButton {
         return switch (button) {
@@ -8883,6 +9509,8 @@ test {
     _ = @import("direction.zig");
     _ = @import("navigation_tests.zig");
     _ = @import("pointer_tests.zig");
+    _ = @import("input_tests.zig");
+    _ = @import("bases_tests.zig");
     _ = @import("inspector_tests.zig");
     _ = @import("inspector_editor.zig");
     _ = @import("gradient.zig");

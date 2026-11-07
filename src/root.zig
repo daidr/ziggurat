@@ -119,6 +119,17 @@ pub const ClickSample = pointer_press.Position;
 pub const ClickPolicy = pointer_clicks.Policy;
 pub const PointerPressSnapshot = pointer_press.Snapshot;
 pub const PointerDisposition = pointer_press.Disposition;
+/// How accurately a pointing device points, as Media Queries 4's
+/// `pointer`: `fine` for a mouse, a touchpad or a pen, `coarse` for a
+/// touch screen, `none` for none.
+pub const PointerAccuracy = enum(u8) { fine, coarse, none };
+/// What points, as Pointer Events' `pointerType`: a mouse or a touchpad, a
+/// pen on a tablet or a screen, or a finger on a touchscreen.
+pub const PointerDevice = enum(u8) { mouse, pen, touch };
+/// The device of the pointer's latest event and how hard it presses, from 0
+/// to 1, as Pointer Events' `pressure`: a device that tells no pressure, as
+/// a mouse, presses 0.5 while a button is down and 0 otherwise.
+pub const PointerSample = struct { device: PointerDevice = .mouse, pressure: f32 = 0 };
 pub const PointerButtonInput = struct {
     position: Point,
     button: PointerButton = .primary,
@@ -493,8 +504,11 @@ pub const WindowHit = enum(c_int) {
 };
 /// The shape of the pointer over the client area. Shapes a platform lacks
 /// fall back to the nearest one it has (on Windows, one-sided and column/row
-/// resizes use the two-sided ones, and copy, alias and context menu the
-/// arrow); `none` hides the pointer.
+/// resizes use the two-sided ones, copy, alias and context menu the arrow,
+/// and the zoom and cell cursors are drawn); `none` hides the pointer.
+/// `progress` is CSS's: busy but still taking input, as a control with
+/// `busy`, where `wait` takes none; `all_scroll` pans every way, and
+/// `no_drop` is a drag over a place that takes nothing.
 pub const Cursor = enum(u8) {
     default,
     pointer,
@@ -519,6 +533,14 @@ pub const Cursor = enum(u8) {
     alias,
     context_menu,
     none,
+    progress,
+    wait,
+    help,
+    cell,
+    zoom_in,
+    zoom_out,
+    all_scroll,
+    no_drop,
 };
 pub const HitTestHandler = struct { context: *anyopaque, query: *const fn (*anyopaque, Window, Point) WindowHit };
 pub const WindowRelationship = struct { owner: ?Window, modal: bool, modal_active: bool, modal_children: usize };
@@ -1539,6 +1561,17 @@ pub const Window = struct {
         scope.record.cursor = shape;
         backend.setCursor(scope.record, shape);
     }
+    /// The device of the latest pointer event in the window and how hard it
+    /// presses (`PointerSample`), read in the event's callback: macOS tells
+    /// a tablet's pen and its pressure, and a touch, from the mouse event's
+    /// subtype, Linux from GDK's source device and its pressure axis,
+    /// browsers from `PointerEvent`. Windows, and a platform that tells
+    /// none, report a mouse.
+    pub fn pointerSample(self: Window) PointerSample {
+        const scope = self.beginCallback() orelse return .{};
+        defer scope.end();
+        return scope.record.pointer_sample;
+    }
     /// The shape last given to `setCursor`.
     pub fn currentCursor(self: Window) Cursor {
         const scope = self.beginCallback() orelse return .default;
@@ -2122,6 +2155,11 @@ pub const WindowRecord = struct {
     vibrancy: Vibrancy = .none,
     background: ?u32 = null,
     pointer_state: ?*PointerState = null,
+    /// The device and pressure of the latest pointer event; see `notePointer`.
+    pointer_sample: PointerSample = .{},
+    /// The buttons down, by `PointerButton`, for the pressure of a device
+    /// that tells none.
+    pointer_buttons: u8 = 0,
     content: ?Content = null,
     /// Set by invalidate, cleared once the content is given a paint.
     frame_requested: bool = false,
@@ -2587,13 +2625,36 @@ pub const WindowRecord = struct {
         self.text_busy = false;
         if (blurred) self.revokeTextClient(.focus_lost, true) catch |err| self.window.report(.{ .domain = .core, .operation = .text_input, .err = err });
     }
+    /// A backend records the device of a pointer event before emitting it:
+    /// `pressure` null for one that tells none, `phase` null for a move.
+    pub fn notePointer(self: *WindowRecord, device: PointerDevice, pressure: ?f32, phase: ?PointerPhase, button: PointerButton) void {
+        if (phase) |value| {
+            const bit = @as(u8, 1) << @backingInt(button);
+            if (value == .down) self.pointer_buttons |= bit else self.pointer_buttons &= ~bit;
+        }
+        const told = if (pressure) |value| if (std.math.isFinite(value)) std.math.clamp(value, 0, 1) else null else null;
+        self.pointer_sample = .{ .device = device, .pressure = told orelse if (self.pointer_buttons != 0) 0.5 else 0 };
+    }
+    /// Decode the device and pressure a backend's wire carries: `code` 0
+    /// for none told, 1 a mouse, 2 a pen and 3 a finger; `pressure` below
+    /// zero for none told.
+    pub fn notePointerWire(self: *WindowRecord, code: u32, pressure: f64, phase: ?PointerPhase, button: PointerButton) void {
+        const device: PointerDevice = switch (code) {
+            2 => .pen,
+            3 => .touch,
+            else => .mouse,
+        };
+        self.notePointer(device, if (pressure >= 0) @floatCast(pressure) else null, phase, button);
+    }
     pub fn emit(self: *WindowRecord, event: Event) void {
         if (self.phase != .open) return;
         switch (event) {
             .focus => |focused| if (!focused) {
+                self.pointer_buttons = 0;
                 _ = self.invalidatePointer(false);
             },
             .cancel_input => {
+                self.pointer_buttons = 0;
                 _ = self.invalidatePointer(false);
             },
             .resize, .window_position => {
@@ -2813,4 +2874,25 @@ test {
     _ = @import("pointer_press_test.zig");
     _ = @import("window_policy_test.zig");
     _ = @import("zoom_test.zig");
+}
+
+test "a pointer that tells no pressure presses 0.5 while a button is down" {
+    var record: WindowRecord = undefined;
+    record.pointer_buttons = 0;
+    record.notePointerWire(1, -1, null, .primary);
+    try std.testing.expectEqual(PointerSample{ .device = .mouse, .pressure = 0 }, record.pointer_sample);
+    record.notePointerWire(1, -1, .down, .primary);
+    try std.testing.expectEqual(@as(f32, 0.5), record.pointer_sample.pressure);
+    record.notePointerWire(1, -1, .down, .secondary);
+    record.notePointerWire(1, -1, .up, .primary);
+    try std.testing.expectEqual(@as(f32, 0.5), record.pointer_sample.pressure);
+    record.notePointerWire(1, -1, .up, .secondary);
+    try std.testing.expectEqual(@as(f32, 0), record.pointer_sample.pressure);
+    // A pen tells its own, a move that changes it alone a move.
+    record.notePointerWire(2, 0.25, .down, .primary);
+    try std.testing.expectEqual(PointerSample{ .device = .pen, .pressure = 0.25 }, record.pointer_sample);
+    record.notePointerWire(2, 1.5, null, .primary);
+    try std.testing.expectEqual(@as(f32, 1), record.pointer_sample.pressure);
+    record.notePointerWire(3, 0, .up, .primary);
+    try std.testing.expectEqual(PointerDevice.touch, record.pointer_sample.device);
 }

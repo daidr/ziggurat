@@ -10,7 +10,7 @@ const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struc
 pub const max_nodes = 128;
 pub const text_capacity = 32768;
 pub const root_id: u64 = 0;
-pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image, tree, tree_item, table, table_header, column_header, table_row, token_field, token, popup, calendar, color_well, dialog, alert_dialog, menu, menu_item, menu_item_checkbox, menu_item_radio, region, log, timer, alert, separator, row_header, option, article, cell, heading };
+pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image, tree, tree_item, table, table_header, column_header, table_row, token_field, token, popup, calendar, color_well, dialog, alert_dialog, menu, menu_item, menu_item_checkbox, menu_item_radio, region, log, timer, alert, separator, row_header, option, article, cell, heading, grid, tree_grid, deletion, insertion };
 /// The kind of popup an element opens, as ARIA's aria-haspopup.
 pub const Popup = enum(u3) { none, menu, list_box, tree, grid, dialog };
 /// Which item an element is the current one of, as ARIA's aria-current:
@@ -94,6 +94,27 @@ pub const Node = struct {
     /// The node whose content or presence this one controls, as the region
     /// a disclosure opens: aria-controls. 0 for none.
     controls: u64 = 0,
+    /// On a table, grid or tree grid: how many rows and columns it has,
+    /// built or not, header rows counted, as aria-rowcount and
+    /// aria-colcount; 0 for those built.
+    row_count: u32 = 0,
+    column_count: u32 = 0,
+    /// On a row or cell: which of all of the table's rows and columns it
+    /// is, from 1, as aria-rowindex and aria-colindex; 0 for none given.
+    row_index: u32 = 0,
+    column_index: u32 = 0,
+    /// The node whose text describes this one beyond its name, as a hint
+    /// drawn under a field: aria-describedby. Its text is in `description`;
+    /// this ties the two for assistive technology. 0 for none.
+    described_by: u64 = 0,
+    /// The node holding the message of an invalid value, as
+    /// aria-errormessage, read while `invalid`. 0 for none.
+    error_message: u64 = 0,
+    /// A text box for searching, as role=searchbox.
+    search: bool = false,
+    /// Runs left to right, told by the application as aria-orientation;
+    /// with `vertical` false and this false the platform's own guess holds.
+    horizontal: bool = false,
     /// Native content inside the node whose own tree assistive technology
     /// reads there, such as a web view's page: its GtkWidget on Linux,
     /// whose accessible becomes the node's first child, or its NSView on
@@ -147,6 +168,14 @@ pub const Entry = struct {
     key_shortcuts_len: usize = 0,
     value_text_len: usize = 0,
     controls: u64 = 0,
+    row_count: u32 = 0,
+    column_count: u32 = 0,
+    row_index: u32 = 0,
+    column_index: u32 = 0,
+    described_by: u64 = 0,
+    error_message: u64 = 0,
+    search: bool = false,
+    horizontal: bool = false,
 
     fn extraLen(self: Entry) usize {
         return self.role_description_len + self.key_shortcuts_len + self.value_text_len;
@@ -245,7 +274,7 @@ pub const Tree = struct {
             const value_text = text[used..][0..entry.value_text_len];
             @memcpy(value_text, entry.valueText(&self.storage));
             used += value_text.len;
-            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .password = entry.password, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end, .position = entry.position, .set_size = entry.set_size, .level = entry.level, .native = entry.native, .focusable_disabled = entry.focusable_disabled, .busy = entry.busy, .selected = entry.selected, .vertical = entry.vertical, .popup = entry.popup, .current = entry.current, .sort = entry.sort, .auto_complete = entry.auto_complete, .role_description = role_description, .key_shortcuts = key_shortcuts, .value_text = value_text, .controls = entry.controls };
+            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .password = entry.password, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end, .position = entry.position, .set_size = entry.set_size, .level = entry.level, .native = entry.native, .focusable_disabled = entry.focusable_disabled, .busy = entry.busy, .selected = entry.selected, .vertical = entry.vertical, .popup = entry.popup, .current = entry.current, .sort = entry.sort, .auto_complete = entry.auto_complete, .role_description = role_description, .key_shortcuts = key_shortcuts, .value_text = value_text, .controls = entry.controls, .row_count = entry.row_count, .column_count = entry.column_count, .row_index = entry.row_index, .column_index = entry.column_index, .described_by = entry.described_by, .error_message = entry.error_message, .search = entry.search, .horizontal = entry.horizontal };
             written += 1;
         };
         return nodes[0..written];
@@ -339,6 +368,14 @@ pub const Tree = struct {
             .key_shortcuts_len = node.key_shortcuts.len,
             .value_text_len = node.value_text.len,
             .controls = node.controls,
+            .row_count = node.row_count,
+            .column_count = node.column_count,
+            .row_index = node.row_index,
+            .column_index = node.column_index,
+            .described_by = node.described_by,
+            .error_message = node.error_message,
+            .search = node.search,
+            .horizontal = node.horizontal,
         };
         self.used += node.name.len + node.value.len + node.description.len + extra_len;
         self.len += 1;
@@ -634,9 +671,13 @@ const NativeNode = extern struct {
     key_shortcuts_len: u32 = 0,
     value_text_start: u32 = 0,
     value_text_len: u32 = 0,
-    reserved0: u32 = 0,
-    reserved1: u32 = 0,
+    row_count: u32 = 0,
+    column_count: u32 = 0,
     controls: u64 = 0,
+    row_index: u32 = 0,
+    column_index: u32 = 0,
+    described_by: u64 = 0,
+    error_message: u64 = 0,
 };
 /// What `NativeNode.states` packs, beside `flags`: the 1-bit states, then
 /// the popup kind (bits 8 to 10), current (11 to 13), sort (14, 15) and
@@ -647,12 +688,16 @@ pub const NativeState = struct {
     pub const selectable: u32 = 4;
     pub const selected: u32 = 8;
     pub const vertical: u32 = 16;
+    pub const search: u32 = 32;
+    pub const horizontal: u32 = 64;
     pub fn pack(entry: anytype) u32 {
         var bits: u32 = 0;
         if (entry.focusable_disabled) bits |= focusable_disabled;
         if (entry.busy) bits |= busy;
         if (entry.selected) |chosen| bits |= selectable | (if (chosen) selected else 0);
         if (entry.vertical) bits |= vertical;
+        if (entry.search) bits |= search;
+        if (entry.horizontal and !entry.vertical) bits |= horizontal;
         bits |= @as(u32, @backingInt(entry.popup)) << 8;
         bits |= @as(u32, @backingInt(entry.current)) << 11;
         bits |= @as(u32, @backingInt(entry.sort)) << 14;
@@ -661,7 +706,7 @@ pub const NativeState = struct {
     }
 };
 comptime {
-    if (@sizeOf(NativeNode) != 184) @compileError("semantic node ABI mismatch");
+    if (@sizeOf(NativeNode) != 208) @compileError("semantic node ABI mismatch");
 }
 const NativeAction = extern struct {
     context: ?*anyopaque,
@@ -867,7 +912,13 @@ pub const Bridge = struct {
                 .key_shortcuts_len = @intCast(key_shortcuts_len),
                 .value_text_start = @intCast(value_text_start),
                 .value_text_len = @intCast(value_text_len),
+                .row_count = entry.row_count,
+                .column_count = entry.column_count,
                 .controls = entry.controls,
+                .row_index = entry.row_index,
+                .column_index = entry.column_index,
+                .described_by = entry.described_by,
+                .error_message = entry.error_message,
             };
         }
         if (window.isClosed() or self.native == null) return error.Closed;

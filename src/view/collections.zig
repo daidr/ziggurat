@@ -1452,7 +1452,10 @@ pub const TableState = struct {
         core.focused = focused;
         const outline_state = self.outline;
         const tree_look = outline_state != null and core.header_height == 0 and self.column_count <= 1;
-        try frame.semantic(.{ .id = id, .role = if (tree_look) .tree else .table, .name = core.name(), .bounds = bounds, .enabled = core.enabled, .focused = focused and core.cursorIndex() == null, .multiple = core.multiple(), .set_size = semanticCount(core.rows.count) });
+        // How many rows and columns a table has, all of them, its header row
+        // counted, as aria-rowcount and aria-colcount.
+        const header_rows: usize = @intFromBool(core.header_height > 0);
+        try frame.semantic(.{ .id = id, .role = if (tree_look) .tree else .table, .name = core.name(), .bounds = bounds, .enabled = core.enabled, .focused = focused and core.cursorIndex() == null, .multiple = core.multiple(), .set_size = semanticCount(core.rows.count), .row_count = if (tree_look) 0 else semanticCount(core.rows.count + header_rows), .column_count = if (tree_look) 0 else semanticCount(self.column_count) });
         frame.rect(bounds, palette.inset);
         try frame.pushClip(bounds);
         const g = self.geometry(bounds.width);
@@ -1552,7 +1555,7 @@ pub const TableState = struct {
                 frame.labelFont(self.aligned(text_rect, spec.title, null, spec.alignment), spec.title, text_color, .{ .weight = .semibold });
                 frame.rect(.{ .x = cell.x + cell.width - 1, .y = cell.y + 4, .width = 1, .height = @max(0, cell.height - 8) }, palette.track);
                 const value: []const u8 = if (sort) |order| @tagName(order.direction) else "";
-                try frame.semantic(.{ .id = partId(id, column_part ^ self.ids[column]), .parent = header_id, .role = .column_header, .name = spec.title, .value = value, .bounds = cell, .enabled = core.enabled, .read_only = true });
+                try frame.semantic(.{ .id = partId(id, column_part ^ self.ids[column]), .parent = header_id, .role = .column_header, .name = spec.title, .value = value, .bounds = cell, .enabled = core.enabled, .read_only = true, .row_index = 1, .column_index = semanticCount(position + 1) });
             }
             if (self.move_target) |target| if (target < self.column_count) {
                 const x = self.screenX(&g, target);
@@ -1661,6 +1664,7 @@ pub const TableState = struct {
                 .expanded = if (entry) |value| (if (value.branch) value.open else null) else null,
                 .position = semanticCount(row + 1),
                 .level = if (entry) |value| @as(u32, value.depth) + 1 else 0,
+                .row_index = if (tree_look) 0 else semanticCount(row + 1 + @intFromBool(core.header_height > 0)),
             });
             core.exposed[core.exposed_len] = key;
             core.exposed_len += 1;

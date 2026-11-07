@@ -166,3 +166,72 @@ test "Enter follows a focused link and Space does not" {
     _ = try h.key(.{ .key = .enter });
     try testing.expectEqual(@as(usize, 1), app.followed);
 }
+
+const Grid = struct {
+    agree: bool = false,
+    box: u64 = 0,
+    fn build(self: *Grid, v: *View) anyerror!void {
+        try v.column(.{ .key = 1, .role = .grid, .name = "Sheet", .row_count = 1000, .column_count = 3, .multiselectable = true });
+        try v.row(.{ .key = 2, .role = .row, .row_index = 41, .access_selected = true });
+        try v.text("A41", .{ .key = 3, .role = .cell, .column_index = 1, .access_selected = false });
+        try v.text("B41", .{ .key = 4, .role = .cell, .column_index = 2, .access_selected = true });
+        try v.end();
+        try v.end();
+        try v.text("Old price", .{ .key = 5, .role = .deletion });
+        try v.text("New price", .{ .key = 6, .role = .insertion });
+        try v.column(.{ .key = 7, .role = .separator, .orientation = .horizontal, .width = 2, .height = 40 });
+        try v.end();
+        _ = try v.checkbox(&self.agree, "Terms", .{ .key = 8, .invalid = !self.agree });
+        self.box = v.lastNode().id;
+        try v.text("You must agree to continue", .{ .key = 9 });
+        try v.errorMessage(self.box, v.lastNode().id);
+        try v.text("Read them first", .{ .key = 10, .access_hidden = true });
+        try v.describedBy(self.box, v.lastNode().id);
+        try v.column(.{ .key = 11, .role = .group, .position_in_set = 5, .set_size = 50 });
+        try v.end();
+    }
+};
+
+test "a grid of the application's own tells its rows and columns, choices, relations and orientation" {
+    var storage: Storage = .{};
+    var app: Grid = .{};
+    var h = Harness.init(&app, Grid.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    h.recordSemantics(&context) catch |err| if (err == error.SkipZigTest) return error.SkipZigTest else return err;
+    try h.render();
+    const grid = try h.accessible(.{ .key = 1 });
+    try testing.expectEqual(ui.accessibility.Role.grid, grid.role());
+    try testing.expectEqual(@as(u32, 1000), grid.entry.row_count);
+    try testing.expectEqual(@as(u32, 3), grid.entry.column_count);
+    try testing.expect(grid.entry.multiple);
+    const row = try h.accessible(.{ .key = 2 });
+    try testing.expectEqual(ui.accessibility.Role.table_row, row.role());
+    try testing.expectEqual(@as(u32, 41), row.entry.row_index);
+    try testing.expect(row.entry.checked);
+    const first = try h.accessible(.{ .key = 3 });
+    try testing.expectEqual(ui.accessibility.Role.cell, first.role());
+    try testing.expectEqual(@as(?bool, false), first.entry.selected);
+    try testing.expectEqual(@as(u32, 1), first.entry.column_index);
+    try testing.expectEqual(@as(?bool, true), (try h.accessible(.{ .key = 4 })).entry.selected);
+    try testing.expectEqual(ui.accessibility.Role.deletion, (try h.accessible(.{ .key = 5 })).role());
+    try testing.expectEqual(ui.accessibility.Role.insertion, (try h.accessible(.{ .key = 6 })).role());
+    // Told horizontal, though it stands taller than wide.
+    const line = try h.accessible(.{ .key = 7 });
+    try testing.expect(line.entry.horizontal and !line.entry.vertical);
+    // Invalid: the message is read first, then the hint, though the hint is
+    // hidden from assistive technology.
+    const terms = try h.accessibleId(app.box);
+    try testing.expect(terms.entry.invalid);
+    try testing.expectEqualStrings("You must agree to continue. Read them first", terms.description());
+    try testing.expect(terms.entry.error_message != 0 and terms.entry.described_by != 0);
+    try testing.expectError(error.NotFound, h.accessible(.{ .key = 10 }));
+    const item = try h.accessible(.{ .key = 11 });
+    try testing.expectEqual(@as(u32, 5), item.entry.position);
+    try testing.expectEqual(@as(u32, 50), item.entry.set_size);
+    // Once valid, only the hint describes it.
+    try h.click(.{ .key = 8 });
+    const agreed = try h.accessibleId(app.box);
+    try testing.expect(!agreed.entry.invalid);
+    try testing.expectEqualStrings("Read them first", agreed.description());
+}

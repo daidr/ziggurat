@@ -143,7 +143,24 @@ pub fn preferences() desktop.Preferences {
     if (dword(L("Software\\Microsoft\\Accessibility"), L("TextScaleFactor"))) |percent| {
         if (percent >= 100 and percent <= 500) result.text_scale = @as(f32, @floatFromInt(percent)) / 100;
     }
+    pointing(&result);
     return result;
+}
+
+/// What the pointing devices can do, as Chromium tells them: a mouse or a
+/// pen points finely and hovers, a touch screen coarsely without hovering,
+/// and the touch screen is the primary one in tablet mode.
+fn pointing(result: *desktop.Preferences) void {
+    const mouse = c.GetSystemMetrics(19) != 0; // SM_MOUSEPRESENT
+    const digitizer: u32 = @bitCast(c.GetSystemMetrics(94)); // SM_DIGITIZER
+    const touch = digitizer & 0x80 != 0 and digitizer & 0x03 != 0; // NID_READY, touch
+    const pen = digitizer & 0x80 != 0 and digitizer & 0x0c != 0; // NID_READY, pen
+    const tablet = touch and c.GetSystemMetrics(0x2003) == 0; // SM_CONVERTIBLESLATEMODE
+    const fine = mouse or pen;
+    result.any_pointer = if (fine) .fine else if (touch) .coarse else .none;
+    result.no_any_hover = !fine;
+    result.pointer = if (tablet or !fine) (if (touch) .coarse else .none) else .fine;
+    result.no_hover = result.pointer != .fine;
 }
 
 pub fn power() !desktop.Power {

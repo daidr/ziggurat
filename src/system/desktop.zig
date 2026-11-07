@@ -74,6 +74,24 @@ pub const Preferences = struct {
     reduce_transparency: ?bool = null,
     /// Text scaling relative to the platform default of 1.0.
     text_scale: f32 = 1,
+    /// What the pointing devices can do, as Media Queries 4's interaction
+    /// features, whose zero is a mouse's: how accurately the primary one
+    /// points (`pointer`) and the most accurate of all (`any_pointer`), and
+    /// that the primary one, or every one, cannot hover (`no_hover`,
+    /// `no_any_hover`). Linux reads the default seat's devices and follows
+    /// them as they come and go; Windows whether a mouse, a pen or a touch
+    /// screen is there, the touch screen primary in tablet mode; browsers
+    /// answer the media queries; macOS's are a mouse's.
+    pointer: z.PointerAccuracy = .fine,
+    any_pointer: z.PointerAccuracy = .fine,
+    no_hover: bool = false,
+    no_any_hover: bool = false,
+    pub fn hover(self: Preferences) bool {
+        return !self.no_hover;
+    }
+    pub fn anyHover(self: Preferences) bool {
+        return !self.no_any_hover;
+    }
 };
 pub const PowerSource = enum { ac, battery, unknown };
 pub const Power = struct { source: PowerSource = .unknown, battery_percent: ?u8 = null, saver: ?bool = null };
@@ -128,6 +146,17 @@ pub fn preferences(app: *z.App) !Preferences {
         .reduce_motion = native.reduce_motion != 0,
         .reduce_transparency = if (native.reduce_transparency < 0) null else native.reduce_transparency != 0,
         .text_scale = native.text_scale,
+        .pointer = accuracy(native.pointer),
+        .any_pointer = accuracy(native.any_pointer),
+        .no_hover = native.no_hover != 0,
+        .no_any_hover = native.no_any_hover != 0,
+    };
+}
+fn accuracy(value: i32) z.PointerAccuracy {
+    return switch (value) {
+        1 => .coarse,
+        2 => .none,
+        else => .fine,
     };
 }
 
@@ -309,8 +338,9 @@ fn check(value: c_int) !void {
 
 const NativeRect = extern struct { x: i32, y: i32, width: u32, height: u32 };
 const NativeMonitor = extern struct { bounds: NativeRect, work: NativeRect, scale: f32, primary: u32, refresh_millihz: u32 };
-/// accent is 0xRRGGBB or -1; reduce_transparency is 0, 1 or -1 (unknown).
-const NativePreferences = extern struct { scheme: i32, high_contrast: u32, reduce_motion: u32, text_scale: f32, accent: i32, reduce_transparency: i32 };
+/// accent is 0xRRGGBB or -1; reduce_transparency is 0, 1 or -1 (unknown);
+/// pointer and any_pointer 0 fine, 1 coarse, 2 none.
+const NativePreferences = extern struct { scheme: i32, high_contrast: u32, reduce_motion: u32, text_scale: f32, accent: i32, reduce_transparency: i32, pointer: i32, any_pointer: i32, no_hover: i32, no_any_hover: i32 };
 const NativePower = extern struct { source: i32, percent: i32, saver: i32 };
 const NativeNetwork = extern struct { state: i32, metered: i32 };
 extern fn zsd_monitors([*]NativeMonitor, u32, *u32) c_int;

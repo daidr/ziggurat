@@ -410,7 +410,11 @@ pub const TerminalView = struct {
     /// The leaf to emit with `View.embed`. Give it a `Style.key` when
     /// siblings before it can change.
     pub fn embed(self: *TerminalView) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .input = hoverInput };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .input = hoverInput, .takes_text = takesText };
+    }
+    /// A terminal types what its keys type.
+    fn takesText(_: *anyopaque) bool {
+        return true;
     }
 
     /// Unregister from the Context and stop deferred work. Call before the

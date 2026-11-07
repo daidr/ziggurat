@@ -459,7 +459,11 @@ pub const Editor = struct {
     /// The leaf to emit with `View.embed`. Give it a `Style.key` when
     /// siblings before it can change.
     pub fn embed(self: *Editor) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .status = status, .input = hoverInput };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .status = status, .input = hoverInput, .takes_text = takesText };
+    }
+    fn takesText(ptr: *anyopaque) bool {
+        const self: *Editor = @ptrCast(@alignCast(ptr));
+        return !self.options.read_only;
     }
 
     /// Emits the leaf and asks for the passes the caret's blinking needs.
