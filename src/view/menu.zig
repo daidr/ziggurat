@@ -66,6 +66,23 @@ pub const ItemOptions = struct {
     /// item's text color. The items of a panel with one keep its column,
     /// so their labels line up.
     icon: ?view.Icon = null,
+    /// The icon in this color (0xRRGGBB) rather than the text's, as a red
+    /// trash can by Delete; on the highlight it takes the highlight's text
+    /// color, as the label does, and a disabled item's is dimmed.
+    icon_color: ?u32 = null,
+    /// A second, smaller line under the label, in the shortcut's color,
+    /// as "Last backup: 3 minutes ago"; assistive technology reads it as
+    /// the item's description, before its tooltip.
+    subtitle: []const u8 = "",
+    /// A value at the end of the item, before its shortcut, in the
+    /// shortcut's color, as a file's size; read in the description.
+    trailing: []const u8 = "",
+    /// An item that deletes or discards, drawn in the theme's `danger`
+    /// color, its label, mark and icon; on the highlight its label keeps
+    /// it where it is legible there, else takes the accent's text. The
+    /// color tells no one using assistive technology: let the label say
+    /// what the item does, as "Delete…".
+    danger: bool = false,
 };
 
 /// Side of a menu item's icon, and the room its column takes, in DIP.
@@ -174,13 +191,41 @@ fn openMenu(self: *View, style: Style, plain: bool) Error!bool {
 /// Build the items only when this returns true, and close the menu with
 /// `end` either way. Named by `Style.name`, or by `label`.
 pub fn popoverMenuButton(self: *View, label: []const u8, style: Style) Error!bool {
-    const button = try self.appendNode(.popup_button, style);
+    return popoverMenuButtonWith(self, label, .{}, style);
+}
+
+/// Where a menu button's menu goes and who holds whether it shows.
+pub const ButtonOptions = struct {
+    /// Where the menu goes beside the button, as a popover's `Placement`:
+    /// `.{ .alignment = .end }` lines it up with the button's end, for a
+    /// ⋯ button at the window's end, `.{ .side = .top }` puts it above. It
+    /// still goes to the other side where the window has no room. Null
+    /// keeps it below the button, lined up with its start, without a gap.
+    placement: ?view.Placement = null,
+    /// Whether the menu shows, held by the application: the button keeps it
+    /// current as the user opens and closes the menu, and the application
+    /// sets it to open the menu, or clears it to close it, as when what the
+    /// menu acts on goes away. A menu the application opens takes the focus
+    /// with no item highlighted, and gives it back to where it was as it
+    /// closes. Another menu opening closes it, clearing it.
+    open: ?*bool = null,
+    /// The menu's most width in DIP, as `Style.max_width` of `popoverMenu`.
+    max_width: f32 = std.math.inf(f32),
+};
+
+/// `popoverMenuButton` with its menu placed and held as `options` say.
+pub fn popoverMenuButtonWith(self: *View, label: []const u8, options: ButtonOptions, style: Style) Error!bool {
+    const button = try self.appendNode(.popup_button, opensMenu(style));
     button.text = try self.copyText(label);
     const button_id = button.id;
     const button_index: u32 = @intCast(button - self.buffers.nodes.ptr);
     const pressed = self.takeEvent(button_id) != null and button.style.enabled;
-    var shown = try popoverMenu(self, .{ .name = if (style.name.len > 0) style.name else label });
+    var shown = try popoverMenu(self, .{ .name = if (style.name.len > 0) style.name else label, .max_width = options.max_width });
     const node = &self.buffers.nodes[self.stack[self.depth - 1]];
+    if (options.placement) |placement| {
+        node.placement = placement;
+        node.menu_placed = true;
+    }
     if (pressed) {
         if (shown) {
             close(self, true);
@@ -192,36 +237,129 @@ pub fn popoverMenuButton(self: *View, label: []const u8, style: Style) Error!boo
         }
         node.checked = shown;
     }
+    if (options.open) |held| shown = hold(self, node, held, shown);
     self.buffers.nodes[button_index].checked = shown;
     return shown;
 }
 
+/// Keeps `held`, the application's word on whether the menu `node` shows,
+/// and the menu in step: a change the application made since the last
+/// pass opens or closes the menu, and otherwise the menu's state, as the
+/// user left it, is written back. Returns whether it shows.
+fn hold(self: *View, node: *Node, held: *bool, shown_now: bool) bool {
+    const id = node.id;
+    const told = self.menu_held.contains(id);
+    var shown = shown_now;
+    if (held.* and !told and !shown) {
+        // Opened by the application: the focus goes to the menu.
+        if (!node.concealed and node.style.enabled) {
+            self.menu = .{ .open = id, .opener = self.focus, .refocus = true };
+            shown = true;
+        }
+    } else if (!held.* and told and shown) {
+        close(self, true);
+        shown = false;
+    }
+    node.checked = shown;
+    held.* = shown;
+    self.menu_held.set(id, shown);
+    return shown;
+}
+
+/// The menus whose application-held state was last written open, so that
+/// a pass tells the application's change from the user's.
+pub const Held = struct {
+    ids: [8]u64 = @splat(0),
+    fn contains(self: *const Held, id: u64) bool {
+        return std.mem.indexOfScalar(u64, &self.ids, id) != null;
+    }
+    fn set(self: *Held, id: u64, open: bool) void {
+        const at = std.mem.indexOfScalar(u64, &self.ids, id);
+        if (open) {
+            if (at != null) return;
+            const free = std.mem.indexOfScalar(u64, &self.ids, 0) orelse 0;
+            self.ids[free] = id;
+        } else if (at) |index| self.ids[index] = 0;
+    }
+};
+
 /// An item of the menu being built. True for the pass that delivers its
-/// choice, by press, Enter or Space; the menu then closes.
+/// choice, by press, Enter or Space; the menu then closes. `Style.key`
+/// gives it an identity of its own, which keeps the choice and the
+/// highlight on it while its label changes or items before it come and go.
 pub fn menuItem(self: *View, label: []const u8, options: ItemOptions, style: Style) Error!bool {
+    return (try menuItemState(self, label, options, style)).clicked;
+}
+
+/// `menuItem`, telling also whether the item is highlighted, as the
+/// pointer or the keys are on it, as of the menu's last pass: the build
+/// can show what goes with the item the user is on, as a preview of a
+/// theme. The menu builds again as the highlight moves. Give the items a
+/// `Style.key` when what is built changes with the highlight.
+pub fn menuItemState(self: *View, label: []const u8, options: ItemOptions, style: Style) Error!ItemState {
     const panel = try currentPanel(self);
-    const panel_ref = panel;
-    const panel_id = panel.id;
-    const panel_has_icons = panel.menu_icons;
     const node = try item(self, panel, label, style);
+    return finishItem(self, panel, node, options);
+}
+
+/// An item showing content of the application's own in place of its label
+/// and subtitle: opens a column between the item's mark and icon and its
+/// trailing value and shortcut, which the application fills, as a progress
+/// bar under a download's name; close it with `end`. The item keeps its
+/// look, highlight, keys and choice: a press on the content chooses it,
+/// closing the menu, unless a control inside takes the press. Its label
+/// still names it to assistive technology and is what typing goes to.
+/// What it returns tells whether it was chosen and highlighted, for the
+/// content to draw in the highlight's colors.
+pub fn menuItemContent(self: *View, label: []const u8, options: ItemOptions, style: Style) Error!ItemState {
+    const panel = try currentPanel(self);
+    const icons = panel.menu_icons or options.icon != null;
+    // The content's room: the item's padding keeps the mark, the icon and
+    // the trailing value, the shortcut and the arrow out of it.
+    const metrics: ui.theme.Metrics = .{};
+    const trailing_width = if (options.trailing.len > 0) self.measurer.textSize(options.trailing, null).width + metrics.label_gap else 0;
+    const shortcut_width = if (options.shortcut.len > 0) self.measurer.textSize(options.shortcut, null).width + metrics.label_gap else 0;
+    const start = metrics.content_inset + ui.widgets.menu_mark_width + (if (icons) icon_column else 0) + metrics.label_gap / 2;
+    const finish_room = metrics.content_inset + trailing_width + shortcut_width;
+    var value = style;
+    // Right to left, the row mirrors its content to the other side.
+    value.padding = .{ .left = start, .right = finish_room, .top = metrics.content_inset / 2 + 2, .bottom = metrics.content_inset / 2 + 2 };
+    const node = try itemNode(self, panel, label, value, true);
+    node.plain = false;
+    node.menu_content = true;
+    return finishItem(self, panel, node, options);
+}
+
+fn finishItem(self: *View, panel: *Node, node: *Node, options: ItemOptions) Error!ItemState {
+    const panel_id = panel.id;
     node.mark = if (options.checked == null) .none else if (options.radio) .radio else .check;
     node.checked = options.checked orelse false;
     node.badge = try self.copyText(options.shortcut);
     if (options.tooltip.len > 0) node.tooltip = try self.copyText(options.tooltip);
+    if (options.subtitle.len > 0) node.subtitle = try self.copyText(options.subtitle);
+    if (options.trailing.len > 0) node.trailing = try self.copyText(options.trailing);
+    node.danger = options.danger;
+    node.icon_color = options.icon_color;
     if (options.icon) |which| {
         node.menu_icon = which;
-        if (!panel_has_icons) {
+        if (!panel.menu_icons) {
             // The items built before keep the column too.
             const all = self.buffers.nodes[0..self.len];
             for (all) |*other| if (other.kind == .menu_item and other.semantic_parent == panel_id) {
                 other.menu_icons = true;
             };
-            panel_ref.menu_icons = true;
+            panel.menu_icons = true;
         }
     }
-    if (self.takeEvent(node.id) == null or !node.style.enabled) return false;
-    if (options.keep_open) self.menu.highlight = node.id else close(self, true);
-    return true;
+    const highlighted = node.highlighted;
+    if (self.takeEvent(node.id) == null or !node.style.enabled) return .{ .highlighted = highlighted };
+    if (options.keep_open) {
+        self.menu.highlight = node.id;
+        node.highlighted = true;
+        return .{ .clicked = true, .highlighted = true };
+    }
+    close(self, true);
+    return .{ .clicked = true };
 }
 
 /// An item that opens a submenu beside it, and starts that submenu: build
@@ -231,6 +369,7 @@ pub fn submenu(self: *View, label: []const u8, style: Style) Error!bool {
     const panel = try currentPanel(self);
     const level = panel.level;
     const panel_id = panel.id;
+    const panel_max = panel.style.max_width;
     const node = try item(self, panel, label, style);
     const index: u32 = @intCast(node - self.buffers.nodes.ptr);
     const id = node.id;
@@ -242,7 +381,7 @@ pub fn submenu(self: *View, label: []const u8, style: Style) Error!bool {
     const shown = node.style.enabled and state.path_len > level and state.path[level] == id;
     node.expanded = shown;
     if (level + 1 >= max_depth) return error.NestingTooDeep;
-    const inner = try self.openNode(.menu, panelStyle(.{ .name = label }));
+    const inner = try self.openNode(.menu, panelStyle(.{ .name = label, .max_width = panel_max }));
     inner.anchor = index;
     inner.level = level + 1;
     inner.semantic_parent = panel_id;
@@ -269,7 +408,7 @@ pub const ItemState = struct {
 /// Up on its last, and assistive technology sees it expanded while the menu shows, named
 /// by `Style.name` or the text inside it.
 pub fn menuButtonBase(self: *View, style: Style) Error!void {
-    const node = try self.openNode(.popup_button, style);
+    const node = try self.openNode(.popup_button, opensMenu(style));
     node.plain = true;
 }
 
@@ -383,6 +522,14 @@ pub fn submenuBase(self: *View, style: Style) Error!bool {
 pub fn menuSeparator(self: *View) Error!void {
     _ = try currentPanel(self);
     _ = try self.appendNode(.menu_separator, .{});
+}
+
+/// A menu button tells assistive technology that it opens a menu, as
+/// aria-haspopup="menu", unless the application says otherwise.
+fn opensMenu(style: Style) Style {
+    var value = style;
+    if (value.popup == null) value.popup = .menu;
+    return value;
 }
 
 fn panelStyle(style: Style) Style {
@@ -517,12 +664,31 @@ pub fn finish(self: *View) void {
 pub fn bounds(self: *const View, node: *const Node, window: Rect) Rect {
     const anchor = self.buffers.nodes[node.anchor].bounds;
     const preferred = node.measured.preferred;
-    const width = @min(@max(preferred.width, node.style.min_width), window.width);
+    // A panel is never narrower than its least width, whatever its most.
+    const width = @min(@max(@min(preferred.width, node.style.max_width), node.style.min_width), window.width);
     const height = @min(preferred.height, window.height);
     const right = window.x + window.width;
     const bottom = window.y + window.height;
     var x: f32 = undefined;
     var y: f32 = undefined;
+    if (node.level == 0 and node.menu_placed and self.menu.at == null) {
+        // A menu button's menu placed as its options say, mirrored right
+        // to left as a popover is.
+        var placement = node.placement;
+        if (node.rtl) {
+            placement.alignment = switch (placement.alignment) {
+                .start => .end,
+                .center => .center,
+                .end => .start,
+            };
+            placement.side = switch (placement.side) {
+                .left => .right,
+                .right => .left,
+                else => placement.side,
+            };
+        }
+        return view.placePopover(window, anchor, .{ .width = width, .height = height }, placement);
+    }
     if (node.level == 0) {
         const point: Point = if (self.menu.at) |at| .{ .x = anchor.x + at.x, .y = anchor.y + at.y } else .{ .x = if (node.rtl) anchor.x + anchor.width else anchor.x, .y = anchor.y + anchor.height };
         x = if (node.rtl) point.x - width else point.x;

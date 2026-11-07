@@ -55,6 +55,7 @@ pub const menu = menu_controls;
 pub const MenuItemOptions = menu_controls.ItemOptions;
 pub const MenuState = menu_controls.State;
 pub const MenuItemState = menu_controls.ItemState;
+pub const MenuButtonOptions = menu_controls.ButtonOptions;
 const wrap_text = @import("wrap.zig");
 const inspector_panel = @import("inspector.zig");
 const view_options = @import("ziggurat_view_options");
@@ -1448,8 +1449,19 @@ pub const Node = struct {
     badge: []const u8 = "",
     /// What marks a menu item; see `MenuItemOptions`.
     mark: ui.widgets.MenuMark = .none,
-    /// The icon a menu item shows before its label.
+    /// The icon a menu item shows before its label, and its own color.
     menu_icon: ?Icon = null,
+    icon_color: ?u32 = null,
+    /// A menu item's subtitle line and trailing value, and whether it
+    /// deletes or discards (`MenuItemOptions`).
+    subtitle: []const u8 = "",
+    trailing: []const u8 = "",
+    danger: bool = false,
+    /// A menu button's menu goes where `placement` says.
+    menu_placed: bool = false,
+    /// A menu item holding content of the application's own in place of
+    /// its label (`menuItemContent`).
+    menu_content: bool = false,
     /// A menu item keeps the room of its panel's icon column, or a menu
     /// panel has one, as an item of it shows an icon.
     menu_icons: bool = false,
@@ -1525,7 +1537,7 @@ pub const Node = struct {
     bounds: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 
     pub fn isContainer(self: *const Node) bool {
-        if (self.plain) return true;
+        if (self.plain or self.menu_content) return true;
         return switch (self.kind) {
             .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area, .menu => true,
             else => false,
@@ -2039,6 +2051,8 @@ pub const View = struct {
     effects: ?*const ui.effects.Library = null,
     popup: PopupState = .{},
     menu: MenuState = .{},
+    /// Menus whose open state the application holds (`MenuButtonOptions.open`).
+    menu_held: menu_controls.Held = .{},
     tip: TooltipState = .{},
     /// The pointer rests on a toast, which stops the toasts' time.
     toast_hover: bool = false,
@@ -2600,7 +2614,10 @@ pub const View = struct {
     pub const pointerArea = pointer_controls.pointerArea;
     pub const popoverMenu = menu_controls.popoverMenu;
     pub const popoverMenuButton = menu_controls.popoverMenuButton;
+    pub const popoverMenuButtonWith = menu_controls.popoverMenuButtonWith;
     pub const menuItem = menu_controls.menuItem;
+    pub const menuItemState = menu_controls.menuItemState;
+    pub const menuItemContent = menu_controls.menuItemContent;
     pub const submenu = menu_controls.submenu;
     pub const menuSeparator = menu_controls.menuSeparator;
     pub const menuButtonBase = menu_controls.menuButtonBase;
@@ -5374,8 +5391,12 @@ pub const View = struct {
                 // Room for the mark, the label, the shortcut and the arrow.
                 const mark = ui.widgets.menu_mark_width;
                 const shortcut = if (node.badge.len > 0) measurer.textSize(node.badge, null).width + metrics.label_gap else 0;
+                const trailing_room = if (node.trailing.len > 0) measurer.textSize(node.trailing, null).width + metrics.label_gap else 0;
                 const lead: f32 = if (node.menu_icons) menu_controls.icon_column else 0;
-                break :blk .{ .width = 2 * metrics.content_inset + mark + lead + metrics.label_gap / 2 + text_size.width + shortcut + (if (node.expanded != null) mark else 0), .height = @max(text_size.height, if (node.menu_icons) menu_controls.icon_size else 0) + metrics.content_inset + 4 };
+                const subtitle = if (node.subtitle.len > 0) measurer.textSize(node.subtitle, ui.widgets.menu_subtitle_font) else Size{};
+                const label_width = @max(text_size.width, subtitle.width);
+                const lines = text_size.height + (if (node.subtitle.len > 0) subtitle.height else 0);
+                break :blk .{ .width = 2 * metrics.content_inset + mark + lead + metrics.label_gap / 2 + label_width + trailing_room + shortcut + (if (node.expanded != null) mark else 0), .height = @max(lines, if (node.menu_icons) menu_controls.icon_size else 0) + metrics.content_inset + 4 };
             },
             .menu_separator => .{ .width = 0, .height = menu_controls.separator_height },
             .button, .tab, .segment => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
@@ -5403,6 +5424,9 @@ pub const View = struct {
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
+            // A menu narrower than its labels ends them with an ellipsis;
+            // marks, icons, shortcuts and arrows keep their room.
+            .menu_item => .{ .width = size.width - text_size.width - (if (node.trailing.len > 0) measurer.textSize(node.trailing, null).width else 0) - (if (node.subtitle.len > 0) @max(0, measurer.textSize(node.subtitle, ui.widgets.menu_subtitle_font).width - text_size.width) else 0), .height = size.height },
             else => size,
         };
         return .{ .minimum = minimum, .preferred = size };
@@ -7062,10 +7086,16 @@ pub const View = struct {
                         .shortcut_width = if (node.badge.len > 0) self.measurer.textSize(node.badge, null).width else 0,
                         .rtl = node.rtl,
                         .lead = if (node.menu_icons) menu_controls.icon_column else 0,
+                        .subtitle = node.subtitle,
+                        .trailing = node.trailing,
+                        .trailing_width = if (node.trailing.len > 0) self.measurer.textSize(node.trailing, null).width else 0,
+                        .danger = node.danger,
+                        .content = node.menu_content,
                     });
                     if (node.menu_icon) |which| if (@TypeOf(target) == *ui.Frame) if (self.icons) |painter| {
                         const palette = theme.palette;
-                        const color = if (!node.style.enabled) palette.disabled_text else if (node.highlighted) palette.on_accent else palette.text;
+                        const lit = node.highlighted and node.style.enabled;
+                        const color = if (!node.style.enabled) palette.disabled_text else if (lit) palette.on_accent else node.icon_color orelse if (node.danger) palette.danger else palette.text;
                         const side = menu_controls.icon_size;
                         const pad = theme.metrics.content_inset;
                         const x = if (node.rtl) bounds.x + bounds.width - pad - ui.widgets.menu_mark_width - side else bounds.x + pad + ui.widgets.menu_mark_width;
