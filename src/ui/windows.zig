@@ -567,7 +567,15 @@ pub const Renderer = struct {
         }
     }
     pub fn textFont(self: *Renderer, r: Rect, utf8: []const u8, rgb: u32, key: commands.FontKey) !void {
+        return self.textSpaced(r, utf8, rgb, key, 0);
+    }
+    /// A label with `spacing` DIP after each character, as GDI's extra
+    /// character spacing in whole pixels.
+    pub fn textSpaced(self: *Renderer, r: Rect, utf8: []const u8, rgb: u32, key: commands.FontKey, spacing: f32) !void {
         _ = try self.bounds(r);
+        if (!std.math.isFinite(spacing)) return error.InvalidGeometry;
+        const scaled: f32 = @round(spacing * self.scale);
+        const extra: c_int = if (scaled >= 32767) 32767 else if (scaled <= -32768) -32768 else @intFromFloat(scaled);
         var buffer: [2048]u16 = undefined;
         if (utf8.len > buffer.len) return error.TextTooLong;
         const count = try std.unicode.utf8ToUtf16Le(&buffer, utf8);
@@ -587,7 +595,9 @@ pub const Renderer = struct {
             for (clear[1]..clear[3]) |y| @memset(scratch.pixels.?[y * scratch.width + clear[0] .. y * scratch.width + clear[2]], 0);
             _ = c.SetTextColor(scratch.dc, 0xffffff);
             var text_rect = try self.bounds(r);
+            const kept_extra = c.SetTextCharacterExtra(scratch.dc, extra);
             _ = c.DrawTextW(scratch.dc, &buffer, @intCast(count), &text_rect, c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS);
+            _ = c.SetTextCharacterExtra(scratch.dc, kept_extra);
             if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
             for (box[1]..box[3]) |y| for (box[0]..box[2]) |x| {
                 const index = @as(usize, y) * self.width + x;
@@ -604,7 +614,9 @@ pub const Renderer = struct {
         defer if (previous) |font| {
             _ = c.SelectObject(self.dc, font);
         };
+        const kept_extra = c.SetTextCharacterExtra(self.dc, extra);
         _ = c.DrawTextW(self.dc, &buffer, @intCast(count), &rect, c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS);
+        _ = c.SetTextCharacterExtra(self.dc, kept_extra);
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
         try view.validate();
@@ -781,7 +793,7 @@ pub const Renderer = struct {
             },
             .text => |text_command| {
                 if (text_command.offset > text_bytes.len or text_command.len > text_bytes.len - text_command.offset) return error.InvalidTextRange;
-                try self.textFont(text_command.bounds, text_bytes[text_command.offset..][0..text_command.len], text_command.color, text_command.font);
+                try self.textSpaced(text_command.bounds, text_bytes[text_command.offset..][0..text_command.len], text_command.rgb(), text_command.font, text_command.letterSpacing(text_bytes));
             },
             .prepared_text => |value| {
                 if (value.resource >= prepared.len) return error.MissingResources;

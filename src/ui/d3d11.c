@@ -7,6 +7,7 @@
 #include <dxgi1_3.h>
 #include <d2d1_1.h>
 #include <dwrite.h>
+#include <dwrite_1.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -685,21 +686,29 @@ static IDWriteTextFormat *variant_format(State *s,uint32_t key,float size,uint16
     DROP(s->variants[slot]);s->variants[slot]=format;s->variant_keys[slot]=key;
     return format;
 }
-void zgpu_text(State *s, float x, float y, float width, float height, uint32_t rgb, const WCHAR *text, uint32_t len, uint32_t key, float size, uint16_t weight, int italic, int monospace, const WCHAR *family) {
+void zgpu_text(State *s, float x, float y, float width, float height, uint32_t rgb, const WCHAR *text, uint32_t len, uint32_t key, float size, uint16_t weight, int italic, int monospace, const WCHAR *family, float spacing) {
     const D2D1_RECT_F r = rectangle(x,y,width,height);
     brush_color(s, rgb);
     IDWriteTextFormat *format=variant_format(s,key,size,weight,italic,monospace,family);
     /* Han characters in the locale, when it does not write them, take the
        user's language for them: DirectWrite's fallback for English draws
        Chinese in a Japanese font where it has the characters and in a
-       Traditional Chinese one where it lacks them. */
-    if(s->han[0]&&has_han(text,len)){
+       Traditional Chinese one where it lacks them. Letter spacing goes
+       after each character (IDWriteTextLayout1's trailing spacing). */
+    const int han=s->han[0]&&has_han(text,len);
+    if(han||(spacing!=0&&isfinite(spacing))){
         IDWriteTextLayout *layout=NULL;
         if(SUCCEEDED(IDWriteFactory_CreateTextLayout(s->text_factory,text,len,format,r.right-r.left,r.bottom-r.top,&layout))&&layout){
-            for(uint32_t i=0;i<len;){
+            for(uint32_t i=0;han&&i<len;){
                 uint32_t n=0;while(i+n<len){uint32_t k=1,cp=scalar_at(text,len,i+n,&k);if(!is_han(cp))break;n+=k;}
                 if(n){DWRITE_TEXT_RANGE range={i,n};IDWriteTextLayout_SetLocaleName(layout,s->han,range);i+=n;continue;}
                 uint32_t k=1;(void)scalar_at(text,len,i,&k);i+=k;
+            }
+            if(spacing!=0){
+                IDWriteTextLayout1 *spaced=NULL;
+                if(SUCCEEDED(IDWriteTextLayout_QueryInterface(layout,&IID_IDWriteTextLayout1,(void **)&spaced))&&spaced){
+                    DWRITE_TEXT_RANGE all={0,len};IDWriteTextLayout1_SetCharacterSpacing(spaced,0,spacing,0,all);IDWriteTextLayout1_Release(spaced);
+                }
             }
             D2D1_POINT_2F origin={r.left,r.top};
             ID2D1RenderTarget_DrawTextLayout(RT(s),origin,layout,(ID2D1Brush *)s->brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);

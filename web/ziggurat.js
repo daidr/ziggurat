@@ -988,9 +988,9 @@ body>.ziggurat-window{position:fixed}
           return ptr;
         },
         zw_present: (id, pixels, width, height, stride, transparent) => rt.present(id, pixels, width, height, stride, transparent),
-        zw_text_draw: (textPtr, textLen, fontPtr, fontLen, size, maxWidth, offset, rgb, out) =>
-          rt.drawText(rt.string(textPtr, textLen), rt.string(fontPtr, fontLen), size, maxWidth, offset, rgb, out),
-        zw_measure_text: (textPtr, len, size, weight, italic, mono) => rt.measureText(rt.string(textPtr, len), cssFont(size, weight, italic, mono)),
+        zw_text_draw: (textPtr, textLen, fontPtr, fontLen, size, maxWidth, offset, rgb, spacing, out) =>
+          rt.drawText(rt.string(textPtr, textLen), rt.string(fontPtr, fontLen), size, maxWidth, offset, rgb, spacing, out),
+        zw_measure_text: (textPtr, len, size, weight, italic, mono, spacing) => rt.measureText(rt.string(textPtr, len), cssFont(size, weight, italic, mono), spacing),
         zw_layout_font: (fontPtr, fontLen, out) => {
           const [ascent, descent] = rt.fontMetrics(rt.string(fontPtr, fontLen));
           const dv = rt.dv();
@@ -1000,8 +1000,8 @@ body>.ziggurat-window{position:fixed}
         zw_layout_segments: (textPtr, len, localePtr, localeLen, kind, out, capacity) =>
           rt.segments(rt.utf16(textPtr, len), rt.string(localePtr, localeLen), kind, out, capacity),
         zw_layout_advances: (textPtr, len, fontPtr, fontLen, out) => rt.advances(rt.utf16(textPtr, len), rt.string(fontPtr, fontLen), out),
-        zw_layout_begin: (width, height, scale, left, top, fontPtr, fontLen, rtl) =>
-          rt.maskBegin(width, height, scale, left, top, rt.string(fontPtr, fontLen), rtl),
+        zw_layout_begin: (width, height, scale, left, top, fontPtr, fontLen, rtl, spacing) =>
+          rt.maskBegin(width, height, scale, left, top, rt.string(fontPtr, fontLen), rtl, spacing),
         zw_layout_draw: (textPtr, len, x, baseline) => rt.maskCtx.fillText(rt.utf16(textPtr, len), x, baseline),
         zw_layout_end: (mask, stride) => rt.maskEnd(mask, stride),
         zw_audio_open: (engine, rate, aheadMs, audible) => rt.audioOpen(engine, rate, aheadMs, audible),
@@ -1686,15 +1686,15 @@ body>.ziggurat-window{position:fixed}
     // Draws a run of text on the text canvas, for the renderer, which
     // copies its pixels with zw_text_copy: the browser finds the fonts,
     // falls back for what one lacks and shapes, as for its pages.
-    drawText(text, font, size, maxWidth, offset, rgb, out) {
+    drawText(text, font, size, maxWidth, offset, rgb, spacing, out) {
       offset = Math.round(offset * 4) / 4;
-      const key = font + "\u0000" + text + "\u0000" + maxWidth.toFixed(2) + "\u0000" + offset + "\u0000" + rgb;
+      const key = font + "\u0000" + text + "\u0000" + maxWidth.toFixed(2) + "\u0000" + offset + "\u0000" + rgb + "\u0000" + spacing;
       let entry = this.textCache.get(key);
       if (entry) {
         this.textCache.delete(key);
         this.textCache.set(key, entry);
       } else {
-        entry = this.renderText(text, font, size, maxWidth, offset, rgb);
+        entry = this.renderText(text, font, size, maxWidth, offset, rgb, spacing);
         this.textCache.set(key, entry);
         if (this.textCache.size > 1024) this.textCache.delete(this.textCache.keys().next().value);
       }
@@ -1711,9 +1711,15 @@ body>.ziggurat-window{position:fixed}
       }
       return this.textCtx;
     }
-    renderText(text, font, size, maxWidth, offset, rgb) {
+    // Room after each character, in pixels, as CSS's letter-spacing; a
+    // canvas without letterSpacing draws text without it.
+    useSpacing(ctx, spacing) {
+      if ("letterSpacing" in ctx) ctx.letterSpacing = (spacing || 0) + "px";
+    }
+    renderText(text, font, size, maxWidth, offset, rgb, spacing) {
       const ctx = this.textContext();
       ctx.font = font;
+      this.useSpacing(ctx, spacing);
       let shown = text;
       let m = ctx.measureText(shown);
       if (m.width > maxWidth + 0.01) {
@@ -1745,6 +1751,7 @@ body>.ziggurat-window{position:fixed}
         canvas.height = Math.max(canvas.height, height);
       }
       ctx.font = font;
+      this.useSpacing(ctx, spacing);
       ctx.clearRect(0, 0, width, height);
       ctx.textBaseline = "alphabetic";
       ctx.textAlign = "left";
@@ -1764,17 +1771,25 @@ body>.ziggurat-window{position:fixed}
       return entry;
     }
 
-    measureText(text, font) {
-      const key = font + "\u0000" + text;
+    measureText(text, font, spacing) {
+      spacing = spacing || 0;
+      const key = font + "\u0000" + text + "\u0000" + spacing;
       let width = this.measureCache.get(key);
       if (width === undefined) {
         const ctx = this.textContext();
         ctx.font = font;
+        this.useSpacing(ctx, spacing);
         width = ctx.measureText(text).width;
+        // Without letterSpacing, the room the spacing takes all the same.
+        if (spacing && !("letterSpacing" in ctx)) width += spacing * this.graphemes(text);
         if (this.measureCache.size > 4096) this.measureCache.clear();
         this.measureCache.set(key, width);
       }
       return width;
+    }
+    graphemes(text) {
+      const seg = this.segmenter("", "grapheme");
+      return seg ? Array.from(seg.segment(text)).length : Array.from(text).length;
     }
     utf16(ptr, len) {
       return utf16Decoder.decode(new Uint16Array(this.memory.buffer, ptr, len));
@@ -1784,6 +1799,7 @@ body>.ziggurat-window{position:fixed}
       if (!m) {
         const ctx = this.textContext();
         ctx.font = font;
+        this.useSpacing(ctx, 0);
         const t = ctx.measureText("Hg");
         const size = parseFloat(/([\d.]+)px/.exec(font)?.[1] || "16");
         m = [
@@ -1856,6 +1872,7 @@ body>.ziggurat-window{position:fixed}
     advances(text, font, out) {
       const ctx = this.textContext();
       ctx.font = font;
+      this.useSpacing(ctx, 0);
       const pen = new Float32Array(this.memory.buffer, out, text.length + 1);
       const seg = this.segmenter("", "grapheme");
       const starts = seg ? Array.from(seg.segment(text), (s) => s.index) : Array.from({ length: text.length }, (_, i) => i);
@@ -1892,7 +1909,7 @@ body>.ziggurat-window{position:fixed}
     }
     // Prepared text: lines of a layout drawn white on a canvas, whose
     // alpha becomes the coverage mask.
-    maskBegin(width, height, scale, left, top, font, rtl) {
+    maskBegin(width, height, scale, left, top, font, rtl, spacing) {
       if (!this.maskCanvas) {
         this.maskCanvas = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(width, height) : document.createElement("canvas");
         this.maskCtx = this.maskCanvas.getContext("2d", { willReadFrequently: true });
@@ -1907,6 +1924,7 @@ body>.ziggurat-window{position:fixed}
       ctx.clearRect(0, 0, width, height);
       ctx.setTransform(scale, 0, 0, scale, -left, -top);
       ctx.font = font;
+      this.useSpacing(ctx, spacing);
       ctx.textBaseline = "alphabetic";
       ctx.textAlign = "left";
       ctx.direction = "ltr";

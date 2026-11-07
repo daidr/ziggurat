@@ -90,6 +90,7 @@ pub const Element = struct {
     radius: f32 = 0,
     color: ?u32 = null,
     font: ?Font = null,
+    letter_spacing: ?f32 = null,
     enabled: bool = true,
     opacity: f32 = 1,
     cursor: ?Cursor = null,
@@ -387,6 +388,7 @@ pub const Inspector = struct {
                 .radius = s.radius,
                 .color = s.color,
                 .font = s.font,
+                .letter_spacing = s.letter_spacing,
                 .enabled = s.enabled,
                 .opacity = s.opacity,
                 .cursor = s.cursor,
@@ -583,6 +585,7 @@ pub const Inspector = struct {
             .radius => e.radius,
             .border_width => e.border_width,
             .font_size => (e.font orelse Font{}).size,
+            .letter_spacing => e.letter_spacing orelse 0,
             .grow, .opacity => null,
             .background, .border, .color => {
                 const rgb = (switch (field) {
@@ -644,7 +647,7 @@ pub const Inspector = struct {
         if (isColor(field)) return;
         const typed = parseValue(field, self.editText());
         var n: f32 = if (typed) |value| (if (std.math.isNan(value.number)) 0 else value.number) else return;
-        if (field == .opacity) n = std.math.clamp(n + delta / 10, 0, 1) else n = @max(@as(f32, if (field == .font_size) 1 else 0), n + delta);
+        if (field == .opacity) n = std.math.clamp(n + delta / 10, 0, 1) else if (field == .letter_spacing) n += delta else n = @max(@as(f32, if (field == .font_size) 1 else 0), n + delta);
         n = @round(n * 1000) / 1000;
         var digits: [32]u8 = undefined;
         const text = exact(n, &digits);
@@ -2206,7 +2209,7 @@ pub const Decl = struct { name: []const u8, value: []const u8, swatch: ?u32 = nu
 const Section = struct { title: []const u8, start: usize, end: usize };
 
 /// The properties the Styles tab edits live.
-pub const EditField = enum { gap, padding, width, height, min_width, min_height, grow, radius, border_width, opacity, font_size, background, border, color };
+pub const EditField = enum { gap, padding, width, height, min_width, min_height, grow, radius, border_width, opacity, font_size, letter_spacing, background, border, color };
 const edit_field_count = std.enums.values(EditField).len;
 /// Styles changed at once, over all elements.
 pub const max_overrides = 64;
@@ -2238,6 +2241,7 @@ pub const Override = struct {
                 font.size = n;
                 style.font = font;
             },
+            .letter_spacing => style.letter_spacing = n,
             .background => style.background = self.rgb,
             .border => style.border = self.rgb,
             .color => style.color = self.rgb,
@@ -2259,6 +2263,7 @@ pub fn cssName(field: EditField) []const u8 {
         .border_width => "border-width",
         .opacity => "opacity",
         .font_size => "font-size",
+        .letter_spacing => "letter-spacing",
         .background => "background-color",
         .border => "border-color",
         .color => "color",
@@ -2303,7 +2308,8 @@ pub fn parseValue(field: EditField, text: []const u8) ?Override {
     var digits = value;
     if (std.ascii.endsWithIgnoreCase(digits, "px")) digits = std.mem.trimEnd(u8, digits[0 .. digits.len - 2], " ");
     const n = std.fmt.parseFloat(f32, digits) catch return null;
-    if (!std.math.isFinite(n) or n < 0) return null;
+    // Letter spacing alone may tighten.
+    if (!std.math.isFinite(n) or (n < 0 and field != .letter_spacing)) return null;
     if (field == .opacity and n > 1) return null;
     if (field == .font_size and n == 0) return null;
     out.number = n;

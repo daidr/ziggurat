@@ -526,7 +526,7 @@ fn hashCommand(hasher: *Hasher, command: Command, sources: Sources) bool {
         },
         .text => |value| {
             if (value.offset > sources.text.len or value.len > sources.text.len - value.offset) return false;
-            put(hasher, .{ value.bounds, value.color, @as(u32, @bitCast(value.font)) });
+            put(hasher, .{ value.bounds, value.color, @as(u32, @bitCast(value.font)), value.letterSpacing(sources.text) });
             hasher.update(sources.text[value.offset..][0..value.len]);
         },
         .prepared_text => |value| {

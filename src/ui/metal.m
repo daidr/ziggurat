@@ -806,13 +806,13 @@ static CTFontRef use_font(ZigMetalRenderer *s,const char *named,float size,uint1
     strncpy(s->font_family,family,sizeof(s->font_family)-1);s->font_family[sizeof(s->font_family)-1]=0;
     s->font_size=size;s->font_weight=weight;s->font_italic=italic;s->font_monospace=monospace;return font;
 }
-int zmtl_text(void *p,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t rgb,float size,uint16_t weight,int italic,int monospace,const char *family){
+int zmtl_text(void *p,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t rgb,float size,uint16_t weight,int italic,int monospace,const char *family,float spacing){
     ZigMetalRenderer *s=R(p);
-    if(!(width>=0)||length>INT32_MAX||!(size>=1&&size<=1024))return 1;
+    if(!(width>=0)||length>INT32_MAX||!(size>=1&&size<=1024)||!isfinite(spacing))return 1;
     @autoreleasepool{
         CTFontRef font=use_font(s,family,size,weight,italic,monospace);if(!font)return 2;
         CGFloat ascent=0,descent=0;int failed=0;
-        CTLineRef line=text_line(font,text,length,width,&ascent,&descent,&failed);
+        CTLineRef line=text_line(font,text,length,width,spacing,&ascent,&descent,&failed);
         if(!line)return failed?2:0;
         float saved[4];narrow_clip(s,x,y,width,height,saved);
         int result=0;

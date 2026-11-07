@@ -15,6 +15,8 @@ frame.strokeRect(bounds, 8, 2, .{ .r = 255, .g = 255, .b = 255, .a = 128 });
 
 `roundedRect(bounds, radius, color)` 填充整个外轮廓。`strokeRect(bounds, radius, width, color)` 的外轮廓与对应填充完全相同，描边全部位于 bounds 内。radius 描述外轮廓，自动夹到最短边的一半；width 必须大于 0，夹到最短边的一半。内轮廓向内缩 width，半径为 `max(0, radius - width)`；内轮廓为空时填充整个外轮廓。因此线宽超过半径仍保留外圆角。
 
+文本命令（`Text`）的字体是紧凑的 `FontKey`，`Font.letter_spacing` 不在其中：有字间距的标签把它作为 f32 存在文本存储里紧挨文本之前的 4 字节，并在颜色的最高字节记 `Text.spaced`，回放用 `Text.letterSpacing(textBytes)` 读回、`Text.rgb()` 取颜色，命令仍是 32 字节，没有间距的标签不多占存储。各后端把它交给自己的文字机制：Cairo 与 GL 的 Pango 属性、Core Graphics 与 Metal 的 Core Text tracking、D3D11 的 `IDWriteTextLayout1` 尾随间距、GDI 的 `SetTextCharacterExtra`（取整到像素）、浏览器 canvas 的 `letterSpacing`。
+
 负半径、非正描边宽度、NaN、无穷和无效矩形返回 `InvalidGeometry`，不占用命令槽；零面积形状允许记录并在回放时跳过。Frame 将错误记入帧失败状态，拒绝该帧回放。基础文本继续在 Buffer 中复制，形状数据按值保存；图片与准备文本通过独立资源表固定 Lease 到本次回放结束。拥有这些借用的 Buffer 不能复制为第二个 owner，必须按其 reset 契约释放。
 
 ## Clip、DPI 与后端成本

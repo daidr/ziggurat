@@ -36,6 +36,10 @@ _ = hit;
 
 构造调用期间，输入 slice 指向的存储必须始终有效；不能由 allocator 回调释放该存储。family/locale 在首次调用 allocator 前复制到共 382 bytes 的有界局部存储并验证。文本只分配一份拥有的 UTF-8 副本，复制之后才验证内容、计数、生成精确大小的 UTF-16 和 scalar 表；后续不再读取调用者文本。allocator 回调若经原 Editor API 修改仍有效的显示缓冲，Engine 得到内部一致的捕获内容，ShapedEditor 再用原 Editor 的版本/选择戳拒绝已过时的准备结果。它不为调用者提供跨线程可变内存同步，也不允许销毁活跃的 Editor/Engine。
 
+### 字间距
+
+`Options.letter_spacing` 在每个字素之后加若干 DIP（负数收紧），如 CSS 的 `letter-spacing`。各引擎用自己的机制：DirectWrite 的 `IDWriteTextLayout1::SetCharacterSpacing`（尾随间距）、Core Text 的 tracking（保留字体的 kerning）、Pango 的 letter spacing 属性、浏览器在 C 侧按字素把间距加进 canvas 量出的笔位并在画 coverage 时设置 `letterSpacing`。行宽、度量宽度、换行、光标与命中都计入它，行末最后一个字素之后的间距也算在行宽里。Pango 把间距分在字素两侧、行首行尾不留，行宽与度量由 Linux 实现补回末尾的一份；它的光标停在两个字素间距的正中，而其他引擎停在间距之后。
+
 ### 汉字的语言
 
 字体按语言给汉字不同的字形（中文与日文共用的汉字），系统的回退字体也按语言选择。不写汉字的语言里的汉字（英文句子中的中文名字）保留系统按用户设置选的字形，与浏览器相同。Windows 上 DirectWrite 只按布局的 locale 回退：没有 locale 的布局按 en-US，这时它把中文画成日文字体 Yu Gothic UI，缺字的地方又换成繁体字体 Microsoft JhengHei UI，一个标签里笔画粗细不一。所以当布局的 locale（空为 en-US）不写汉字时，汉字及其标点、全角字符改用用户首选语言（GetUserPreferredUILanguages）里第一个写汉字的语言，与 Chromium 取接受语言里的第一个相同；locale 本身是中文、日文或韩文时保持不变，用户首选语言里没有写汉字的语言时由系统决定。判断在共享层 `text_layout.han`（`writesHan`、`userLanguage`、`runs`），每个布局最多区分 256 段。D3D11 渲染器直接绘制的文字（格式不带 locale，按用户区域格式回退）同样处理：区域格式不写汉字而文字含汉字时，改用文本布局绘制并给汉字设置该语言。Core Text 自己会这样做；Pango 与浏览器不需要。

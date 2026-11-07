@@ -10,7 +10,9 @@ typedef struct ZtlError {uint32_t domain;int32_t code;} ZtlError;
    take han_locale: those of text in a language that does not write them,
    in the user's language for them. DirectWrite only. */
 typedef struct ZtlHanRun {uint32_t start,end;} ZtlHanRun;
-typedef struct ZtlOptions {float size,width;uint32_t weight,italic,wrap,rtl;const char *family,*locale,*han_locale;const ZtlHanRun *han_runs;uint32_t han_count;} ZtlOptions;
+/* spacing is the room after each grapheme, in DIP, which widths, lines,
+   carets and hit tests count; 0 for none. */
+typedef struct ZtlOptions {float size,width;uint32_t weight,italic,wrap,rtl;const char *family,*locale,*han_locale;const ZtlHanRun *han_runs;uint32_t han_count;float spacing;} ZtlOptions;
 typedef struct ZtlRect {float x,y,width,height;} ZtlRect;
 typedef struct ZtlLine {uint32_t start,end,next;float x,y,width,height,baseline;} ZtlLine;
 typedef struct ZtlMetrics {ZtlRect bounds;uint32_t lines,glyphs,missing;} ZtlMetrics;

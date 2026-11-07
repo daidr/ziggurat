@@ -80,7 +80,7 @@ extern fn zmtl_push_clip(*anyopaque, f32, f32, f32, f32) void;
 extern fn zmtl_pop_clip(*anyopaque) void;
 extern fn zmtl_push_opacity(*anyopaque, u32) void;
 extern fn zmtl_pop_opacity(*anyopaque) void;
-extern fn zmtl_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8) c_int;
+extern fn zmtl_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8, f32) c_int;
 extern fn zmtl_prepared(*anyopaque, *anyopaque, *const drawing.NativeCoverage, f32, f32, ?*const drawing.Rect, u32) c_int;
 extern fn zmtl_forget_prepared(*anyopaque) void;
 extern fn zmtl_reserve_images(*anyopaque, u32) c_int;
@@ -937,7 +937,7 @@ pub const Renderer = struct {
                 if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
                 const r = value.bounds;
                 const font = value.font;
-                if (zmtl_text(native, r.x, r.y, r.width, r.height, bytes.ptr, @intCast(bytes.len), value.color, font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), if (font.family == 0) null else fonts.systemName(font.family).ptr) != 0) return error.DrawTextFailed;
+                if (zmtl_text(native, r.x, r.y, r.width, r.height, bytes.ptr, @intCast(bytes.len), value.rgb(), font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), if (font.family == 0) null else fonts.systemName(font.family).ptr, value.letterSpacing(text)) != 0) return error.DrawTextFailed;
             },
             .prepared_text => |value| {
                 if (value.resource >= prepared.len) return error.MissingResources;

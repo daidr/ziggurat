@@ -99,6 +99,18 @@ pub const Span = struct {
     /// The span's language, a BCP 47 tag; "" is the text's
     /// (`Options.lang`). Korean keeps its words whole across lines.
     lang: []const u8 = "",
+    /// Room after each of the span's characters, in DIP, as CSS's
+    /// `letter-spacing`; 0 takes the text's (`Options.font`), unless
+    /// `no_letter_spacing` makes the zero the span's own, as CSS's
+    /// `letter-spacing: 0` on an inline box: a number or code that keeps
+    /// its normal spacing within tracked capitals.
+    letter_spacing: f32 = 0,
+    no_letter_spacing: bool = false,
+
+    /// The span's letter spacing, and whether it sets one.
+    pub fn letterSpacing(self: Span) ?f32 {
+        return if (self.no_letter_spacing or self.letter_spacing != 0) self.letter_spacing else null;
+    }
 
     /// How opaque the span paints, from 0 (nothing) to 1.
     pub fn alpha(self: Span) f32 {
@@ -142,7 +154,8 @@ fn blurClose(target: anytype, opened: bool) void {
 pub const Options = struct {
     /// Measures runs in their fonts; use the one the view host uses.
     measurer: view.Measurer = .{},
-    /// The font of the text around the spans.
+    /// The font of the text around the spans, with its letter spacing,
+    /// which spans take unless they set their own (`Span.letter_spacing`).
     font: Font = .{},
     /// The text color around the spans; null takes the theme's.
     color: ?u32 = null,
@@ -326,6 +339,7 @@ pub const RichText = struct {
         if (span.weight) |value| font.weight = value;
         font.italic = font.italic or span.italic;
         font.monospace = font.monospace or span.monospace;
+        if (span.letterSpacing()) |value| font.letter_spacing = value;
         return font;
     }
 

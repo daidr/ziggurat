@@ -23,6 +23,8 @@ typedef struct Renderer {
     cairo_t *context;
     PangoLayout *layout;
     PangoFontDescription *font;
+    /* The letter spacing the layout's attributes give, in Pango units. */
+    int spacing;
     uint32_t width,height;
     float scale;
     double origin[2];
@@ -87,7 +89,7 @@ int zlc_begin_mode(Renderer *s,uint32_t width,uint32_t height,float scale,int tr
        when the first frame contains only translucent shapes or gradients. */
     if(s->window_transparent)clear_transparent(s);else{cairo_set_source_rgb(s->context,1,1,1);cairo_paint(s->context);}
     cairo_scale(s->context,scale,scale);
-    s->layout=pango_cairo_create_layout(s->context);
+    s->layout=pango_cairo_create_layout(s->context);s->spacing=0;
     s->font=pango_font_description_new();pango_font_description_set_family(s->font,"Sans");
     pango_font_description_set_absolute_size(s->font,16*PANGO_SCALE);
     pango_layout_set_font_description(s->layout,s->font);
@@ -148,10 +150,23 @@ static void use_font(Renderer *s,const char *named,float size,uint16_t weight,in
     pango_font_description_set_weight(s->font,(PangoWeight)weight);pango_font_description_set_style(s->font,style);
     pango_layout_set_font_description(s->layout,s->font);
 }
-int zlc_text(Renderer *s,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t color,float size,uint16_t weight,int italic,int monospace,const char *family) {
-    if(width>G_MAXINT/PANGO_SCALE || length>G_MAXINT || !(size>=1&&size<=1024))return 1;
+/* Pango spaces letters between them, not after the last as measured
+   widths count it: a label measured with tightened letters needs that
+   much more room for Pango to not cut it. */
+static int zlc_label_spacing(PangoLayout *layout,int *current,float spacing){
+    int units=(int)lround((double)spacing*PANGO_SCALE);
+    if(units!=*current){
+        PangoAttrList *list=NULL;
+        if(units){list=pango_attr_list_new();if(!list)return 2;pango_attr_list_insert(list,pango_attr_letter_spacing_new(units));}
+        pango_layout_set_attributes(layout,list);if(list)pango_attr_list_unref(list);*current=units;
+    }
+    return 0;
+}
+int zlc_text(Renderer *s,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t color,float size,uint16_t weight,int italic,int monospace,const char *family,float spacing) {
+    if(width>G_MAXINT/PANGO_SCALE || length>G_MAXINT || !(size>=1&&size<=1024) || !(spacing>=-1024&&spacing<=1024))return 1;
     use_font(s,family,size,weight,italic,monospace);
-    pango_layout_set_text(s->layout,text,length);pango_layout_set_width(s->layout,(int)(width*PANGO_SCALE));
+    if(zlc_label_spacing(s->layout,&s->spacing,spacing))return 2;
+    pango_layout_set_text(s->layout,text,length);pango_layout_set_width(s->layout,(int)((width-fminf(spacing,0))*PANGO_SCALE));
     int layout_width,layout_height;pango_layout_get_size(s->layout,&layout_width,&layout_height);
     cairo_save(s->context);cairo_rectangle(s->context,x,y,width,height);cairo_clip(s->context);
     cairo_set_source_rgb(s->context,(double)((color>>16)&255)/255,(double)((color>>8)&255)/255,(double)(color&255)/255);

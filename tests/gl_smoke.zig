@@ -89,6 +89,57 @@ fn scene(buffer: *commands.Buffer, images: *Images) !void {
     try buffer.finish();
 }
 
+/// The rightmost column the label "SPACED" inks, in pixels, drawn by the
+/// software renderer and by GL with `spacing` DIP after each letter.
+fn spacedInk(spacing: f32) ![2]u32 {
+    const w: u32 = 240;
+    const h: u32 = 40;
+    var buffer: commands.Buffer = .{};
+    defer buffer.reset();
+    try buffer.fill(.{ .x = 0, .y = 0, .width = w, .height = h }, 0xffffff);
+    try buffer.textFont(.{ .x = 4, .y = 4, .width = 230, .height = 30 }, "SPACED", 0x000000, (commands.Font{}).spaced(spacing));
+    try buffer.finish();
+    const size: z.Size = .{ .width = w, .height = h, .scale = 1 };
+    var software: ui.SoftwareRenderer = .{};
+    defer software.deinit();
+    var dummy: u8 = 0;
+    try software.begin(.{ .native_context = &dummy, .size = size });
+    try software.replayBuffer(&buffer);
+    var gpu: gl.Renderer = .{};
+    defer gpu.deinit();
+    try gpu.init(.{ .own_context = true, .allow_software = true });
+    try gpu.beginOffscreen(size, false);
+    try gpu.replayBuffer(&buffer);
+    var pixels: [240 * 40 * 4]u8 = undefined;
+    try gpu.endOffscreen(&pixels, w * 4);
+    var right: [2]u32 = .{ 0, 0 };
+    for (0..h) |y| for (0..w) |x| {
+        const at = (y * w + x) * 4;
+        const got = (@as(u32, pixels[at + 2]) << 16) | (@as(u32, pixels[at + 1]) << 8) | pixels[at];
+        const want = zlc_test_raw_pixel(software.native.?, @intCast(x), @intCast(y)) & 0xffffff;
+        if (difference(want, 0xffffff) > 96) right[0] = @max(right[0], @as(u32, @intCast(x)));
+        if (difference(got, 0xffffff) > 96) right[1] = @max(right[1], @as(u32, @intCast(x)));
+    };
+    software.abort();
+    return right;
+}
+
+/// Letter spacing moves each letter on by it in both renderers: the last
+/// of six letters by five spacings.
+fn spacedLetters() !bool {
+    const plain = try spacedInk(0);
+    const spaced = try spacedInk(6);
+    const tight = try spacedInk(-1);
+    std.debug.print("gl letter spacing: ink ends software {d}/{d}/{d}, gl {d}/{d}/{d} (spacing 0, 6, -1)\n", .{ plain[0], spaced[0], tight[0], plain[1], spaced[1], tight[1] });
+    var ok = true;
+    for (0..2) |k| {
+        const wider = @as(i64, spaced[k]) - plain[k];
+        const narrower = @as(i64, plain[k]) - tight[k];
+        if (wider < 27 or wider > 33 or narrower < 3 or narrower > 7) ok = false;
+    }
+    return ok;
+}
+
 /// The frame's pixels from both renderers at `scale`, compared.
 fn compare(scale: f32) !bool {
     var images: Images = undefined;
@@ -891,6 +942,7 @@ pub fn main() !void {
     for ([_]f32{ 1, 2, 1.5 }) |scale| if (!try compare(scale)) {
         matched = false;
     };
+    if (!try spacedLetters()) matched = false;
     const forced = if (getenv("ZIGGURAT_GL")) |value| std.mem.eql(u8, std.mem.span(value), "on") else false;
     if (probed == .gpu or forced) {
         try windowFrames(gpa.allocator());

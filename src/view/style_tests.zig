@@ -506,3 +506,57 @@ test "an interactive glass lights as the pointer hovers it and grows as it is pr
     try testing.expectEqual(@as(f32, 0), app.last.hover);
     try testing.expect(!app.state.moving());
 }
+
+const Tracked = struct {
+    spacing: ?f32 = 2,
+    fn build(self: *Tracked, v: *View) anyerror!void {
+        try v.column(.{ .letter_spacing = self.spacing });
+        try v.text("BUILD", .{});
+        try v.text("4.2.1", .{ .letter_spacing = 0 });
+        try v.text("WIDE", .{ .letter_spacing = 5, .font = .{ .size = 12 } });
+        try v.end();
+        try v.text("BUILD", .{});
+    }
+};
+
+test "letter spacing goes after each character of the texts inside, and 0 takes it away" {
+    var storage: Storage = .{};
+    var app: Tracked = .{};
+    var h = Harness.init(&app, Tracked.build, storage.buffers(), .{});
+    try h.render();
+    const nodes = h.view.nodes();
+    // The text outside the container has none; the five letters inside
+    // take two DIP each, the last one's too.
+    const plain = nodes[5].bounds.width;
+    try testing.expectEqual(plain + 10, nodes[2].bounds.width);
+    try testing.expectEqual(@as(f32, 2), nodes[2].style.font.?.letter_spacing);
+    // Taken away, it leaves the label font as it was.
+    try testing.expect(nodes[3].style.font == null);
+    try testing.expectEqual(@as(f32, 5), nodes[4].style.font.?.letter_spacing);
+    try testing.expectEqual(@as(f32, 12), nodes[4].style.font.?.size);
+    try testing.expect(nodes[5].style.font == null);
+
+    // A text draws with it: the command carries it beside its bytes.
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const commands = try paintAgain(&h, &context);
+    const stored = context.command_buffer.textBytes();
+    var spacings: [4]f32 = undefined;
+    var count: usize = 0;
+    for (commands) |command| if (command == .text) {
+        spacings[count] = command.text.letterSpacing(stored);
+        count += 1;
+    };
+    try testing.expectEqual(@as(usize, 4), count);
+    try testing.expectEqualSlices(f32, &.{ 2, 0, 5, 0 }, spacings[0..count]);
+
+    app.spacing = null;
+    try h.render();
+    try testing.expectEqual(plain, h.view.nodes()[2].measured.preferred.width);
+    try testing.expectError(error.InvalidValue, struct {
+        fn bad(v: *View) !void {
+            try v.text("x", .{ .letter_spacing = std.math.inf(f32) });
+        }
+    }.bad(&h.view));
+}

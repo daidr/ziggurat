@@ -29,7 +29,7 @@ IMPORT(zw_present) void zw_present(uint32_t id,const uint32_t *pixels,uint32_t w
    and widths in device pixels; returns 0 when it drew, writing the pixels'
    width, height, and where their origin is from the pen at the baseline
    (left, top), and the font's ascent and descent. */
-IMPORT(zw_text_draw) int zw_text_draw(const char *text,uint32_t length,const char *font,uint32_t font_length,double size,double max_width,double offset,uint32_t rgb,double *out);
+IMPORT(zw_text_draw) int zw_text_draw(const char *text,uint32_t length,const char *font,uint32_t font_length,double size,double max_width,double offset,uint32_t rgb,double spacing,double *out);
 /* Copies the pixels the last zw_text_draw drew, premultiplied BGRA. */
 IMPORT(zw_text_copy) void zw_text_copy(uint32_t *pixels);
 
@@ -525,14 +525,14 @@ static size_t css_font(char *out,size_t capacity,const char *named,float size,ui
 /* A text command: one line in the rectangle, centered on it vertically by
    the font's ascent and descent, cut with an ellipsis to its width. The
    page draws it at device pixels, with the pen's fraction of a pixel. */
-int zlc_text(Renderer *s,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t color,float size,uint16_t weight,int italic,int monospace,const char *family){
-    if(!(width>=0)||!(size>=1&&size<=1024))return 1;
+int zlc_text(Renderer *s,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t color,float size,uint16_t weight,int italic,int monospace,const char *family,float spacing){
+    if(!(width>=0)||!(size>=1&&size<=1024)||!(spacing>=-1024&&spacing<=1024))return 1;
     if(!length)return 0;
     char font[512];const size_t font_length=css_font(font,sizeof(font),family,size*s->scale,weight,italic,monospace);if(!font_length)return 2;
     Target *t=s->target;
     const double pen_x=dx(t,x),fraction=pen_x-floor(pen_x);
     double info[6]={0};
-    if(zw_text_draw(text,length,font,(uint32_t)font_length,(double)size*s->scale,(double)width*s->scale,fraction,color&0xffffff,info))return 2;
+    if(zw_text_draw(text,length,font,(uint32_t)font_length,(double)size*s->scale,(double)width*s->scale,fraction,color&0xffffff,(double)spacing*s->scale,info))return 2;
     const uint32_t w=(uint32_t)info[0],h=(uint32_t)info[1];if(!w||!h)return 0;
     const size_t need=(size_t)w*h;
     if(need>s->text_capacity){uint32_t *grown=realloc(s->text_pixels,need*4);if(!grown)return 2;s->text_pixels=grown;s->text_capacity=need;}

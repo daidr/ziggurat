@@ -385,11 +385,11 @@ static CTFontRef use_font(Renderer *s,const char *named,float size,uint16_t weig
     strncpy(s->font_family,family,sizeof(s->font_family)-1);s->font_family[sizeof(s->font_family)-1]=0;
     s->font_size=size;s->font_weight=weight;s->font_italic=italic;s->font_monospace=monospace;return font;
 }
-int zlc_text(Renderer *s,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t color,float size,uint16_t weight,int italic,int monospace,const char *family){
-    if(!(width>=0)||length>INT32_MAX||!(size>=1&&size<=1024))return 1;
+int zlc_text(Renderer *s,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t color,float size,uint16_t weight,int italic,int monospace,const char *family,float spacing){
+    if(!(width>=0)||length>INT32_MAX||!(size>=1&&size<=1024)||!isfinite(spacing))return 1;
     CTFontRef font=use_font(s,family,size,weight,italic,monospace);if(!font)return 2;
     CGFloat ascent=0,descent=0;int failed=0;
-    CTLineRef line=text_line(font,text,length,width,&ascent,&descent,&failed);
+    CTLineRef line=text_line(font,text,length,width,spacing,&ascent,&descent,&failed);
     if(!line)return failed?2:0;
     CGContextRef c=s->target->context;
     CGContextSaveGState(c);CGContextClipToRect(c,CGRectMake(x,y,width,height));

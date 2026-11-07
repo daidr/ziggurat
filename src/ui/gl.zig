@@ -111,7 +111,7 @@ extern fn zglr_end_effect(*anyopaque, ?*const EffectPass, u32) c_int;
 extern fn zglr_backdrop_shader(*anyopaque, *const EffectPass, *const [4]u32, *const [4]u32) c_int;
 extern fn zglr_backdrop(*anyopaque, *const Glass, u32, [*]const GlassLevel, [*]const f32, u32) c_int;
 extern fn zglr_indicator(*anyopaque, [*]const f32, u32, f32, f32, f32, *const [4]i32, u32, f32) c_int;
-extern fn zglr_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8) c_int;
+extern fn zglr_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8, f32) c_int;
 extern fn zglr_text_stats(*anyopaque, *u32, *u64, *u64) void;
 extern fn zglr_prepared(*anyopaque, *anyopaque, *const drawing.NativeCoverage, f32, f32, ?*const drawing.Rect, u32) c_int;
 extern fn zglr_forget_prepared(*anyopaque) void;
@@ -988,7 +988,7 @@ pub const Renderer = struct {
                 if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
                 const r = value.bounds;
                 const font = value.font;
-                if (zglr_text(native, r.x, r.y, r.width, r.height, bytes.ptr, @intCast(bytes.len), value.color, font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), if (font.family == 0) null else fonts.systemName(font.family).ptr) != 0) return error.DrawTextFailed;
+                if (zglr_text(native, r.x, r.y, r.width, r.height, bytes.ptr, @intCast(bytes.len), value.rgb(), font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), if (font.family == 0) null else fonts.systemName(font.family).ptr, value.letterSpacing(text)) != 0) return error.DrawTextFailed;
             },
             .prepared_text => |value| {
                 if (value.resource >= prepared.len) return error.MissingResources;

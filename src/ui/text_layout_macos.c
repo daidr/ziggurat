@@ -88,6 +88,9 @@ int ztl_layout_init(void *storage,void *engine,const char *text,uint32_t length,
     if(!paragraph||!attributes){if(paragraph)CFRelease(paragraph);if(attributes)CFRelease(attributes);release_layout(s);return ZTL_OOM;}
     CFDictionarySetValue(attributes,kCTFontAttributeName,s->font);CFDictionarySetValue(attributes,kCTParagraphStyleAttributeName,paragraph);CFRelease(paragraph);
     if(options->locale&&options->locale[0]){CFStringRef language=CFStringCreateWithCString(NULL,options->locale,kCFStringEncodingUTF8);if(language){CFDictionarySetValue(attributes,kCTLanguageAttributeName,language);CFRelease(language);}}
+    /* Letter spacing as tracking, in points as DIPs, which keeps the font's
+       kerning and counts after each character. */
+    if(options->spacing!=0){double value=options->spacing;CFNumberRef tracking=CFNumberCreate(NULL,kCFNumberDoubleType,&value);if(tracking){CFDictionarySetValue(attributes,kCTTrackingAttributeName,tracking);CFRelease(tracking);}}
     CFAttributedStringRef attributed=CFAttributedStringCreate(NULL,s->string,attributes);CFRelease(attributes);if(!attributed){release_layout(s);return ZTL_OOM;}
     CTTypesetterRef typesetter=length16?CTTypesetterCreateWithAttributedString(attributed):NULL;CFRelease(attributed);
     if(length16&&!typesetter){release_layout(s);return ZTL_OOM;}

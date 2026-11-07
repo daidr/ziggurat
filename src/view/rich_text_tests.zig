@@ -477,3 +477,35 @@ test "a span casts its shadow under every span's text" {
     try testing.expectEqual(recorder.labels[3].bounds.y + 3, recorder.labels[1].bounds.y);
     for (recorder.labels[2..5]) |label| try testing.expectEqual(@as(u32, 0xffffff), label.color);
 }
+
+/// Ten DIP per byte and the letter spacing after each.
+fn measureSpaced(_: ?*anyopaque, text: []const u8, font: view.Font) view.Size {
+    const count: f32 = @floatFromInt(text.len);
+    return .{ .width = count * (10 + font.letter_spacing), .height = 24 };
+}
+const spaced_measurer: view.Measurer = .{ .measure = fixedMeasure, .measure_font = measureSpaced };
+
+test "spans take the text's letter spacing, or their own, and no letter spacing makes a zero theirs" {
+    var font: view.Font = .{};
+    font.letter_spacing = 2;
+    var text = RichText.init(testing.allocator, .{ .measurer = spaced_measurer, .font = font });
+    defer text.deinit();
+    try text.setSpans(&.{
+        .{ .text = "BUILD " },
+        .{ .text = "4.2.1", .no_letter_spacing = true },
+        .{ .text = " OK", .letter_spacing = 4 },
+    });
+    try testing.expectEqual(@as(f32, 2), text.fontOf(text.spans[0]).letter_spacing);
+    try testing.expectEqual(@as(f32, 0), text.fontOf(text.spans[1]).letter_spacing);
+    try testing.expectEqual(@as(f32, 4), text.fontOf(text.spans[2]).letter_spacing);
+    // Each span's words are measured with its spacing: 6 x 12, 5 x 10 and
+    // 3 x 14 DIP.
+    try testing.expectEqual(@as(f32, 72 + 50 + 42), text.size.width);
+    var recorder: Recorder = .{};
+    text.paintTo(&recorder, .{});
+    try testing.expect(recorder.label_count >= 3);
+    for (recorder.labels[0..recorder.label_count]) |label| {
+        const expected: f32 = if (std.mem.eql(u8, label.text, "4.2.1")) 0 else if (std.mem.indexOf(u8, label.text, "OK") != null) 4 else 2;
+        try testing.expectEqual(expected, label.font.letter_spacing);
+    }
+}

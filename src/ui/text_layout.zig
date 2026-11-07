@@ -31,12 +31,17 @@ pub const Options = struct {
     width: f32 = 0,
     wrap: Wrap = .none,
     direction: Direction = .ltr,
+    /// Room after every grapheme, in DIP, as CSS's `letter-spacing`;
+    /// negative tightens. Widths, lines, carets and hit tests count it,
+    /// the room after a line's last grapheme included.
+    letter_spacing: f32 = 0,
     /// Prepare platform lexical words plus maximal continuous nonword gaps.
     /// Default layouts perform no word SDK lookup/call or index allocation.
     word_ranges: bool = false,
     fn validate(self: Options) !void {
         if (!std.math.isFinite(self.size) or self.size < 1 or self.size > 512 or self.weight < 100 or self.weight > 900 or !std.math.isFinite(self.width) or self.width < 0 or self.width > 1_000_000 or (self.wrap != .none and self.width == 0)) return error.InvalidOptions;
         if (self.family.len > 255 or self.locale.len > 127) return error.InvalidOptions;
+        if (!std.math.isFinite(self.letter_spacing) or @abs(self.letter_spacing) > 1024) return error.InvalidOptions;
         try validateText(self.family);
         try validateText(self.locale);
     }
@@ -352,6 +357,7 @@ const NativeOptions = extern struct {
     han_locale: [*:0]const u8 = "",
     han_runs: ?[*]const han.Run = null,
     han_count: u32 = 0,
+    letter_spacing: f32 = 0,
 };
 /// The most runs of Han characters a layout tells the engine apart.
 const max_han_runs = 256;
@@ -909,7 +915,7 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
     state.operation_busy = false;
     state.closing = false;
     state.allocator = allocator;
-    var native_options: NativeOptions = .{ .size = captured_options.size, .width = captured_options.width, .weight = captured_options.weight, .italic = @intFromBool(captured_options.italic), .wrap = @backingInt(captured_options.wrap), .rtl = @intFromBool(captured_options.direction == .rtl), .family = family.ptr, .locale = locale.ptr };
+    var native_options: NativeOptions = .{ .size = captured_options.size, .width = captured_options.width, .weight = captured_options.weight, .italic = @intFromBool(captured_options.italic), .wrap = @backingInt(captured_options.wrap), .rtl = @intFromBool(captured_options.direction == .rtl), .family = family.ptr, .locale = locale.ptr, .letter_spacing = captured_options.letter_spacing };
     // Han characters left in the engine's locale take the first of the
     // user's languages that writes them, when the locale does not.
     var han_runs: [max_han_runs]han.Run = undefined;
