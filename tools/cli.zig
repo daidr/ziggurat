@@ -19,7 +19,7 @@ const pkgbuild = @import("pkgbuild.zig");
 
 const usage =
     \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
-    \\ziggurat dev [--web [--port PORT]] [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
+    \\ziggurat dev [--web [--port PORT]] [--sign IDENTITY] [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
     \\ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
     \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--install-dir-name NAME] [--hook-init CMD] [--hook-install CMD] [--hook-uninstall CMD] [--command LIST] [--output FILE]
     \\ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>" [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--command LIST] [--output FILE]
@@ -41,7 +41,14 @@ const usage =
     \\when src/, build.zig, build.zig.zon or a --watch directory changes; --frontend starts a frontend
     \\watcher next to it and stops it on exit. --web builds for browsers instead
     \\(-Dtarget=wasm32-wasi), serves zig-out/web at http://localhost:5174 (or --port),
-    \\opens it, and reloads the page after each rebuild.
+    \\opens it, and reloads the page after each rebuild. On macOS dev runs the
+    \\development app, "NAME Dev" with the identity IDENTITY.dev, from a bundle in
+    \\.ziggurat/dev/macos-ARCH, signed with an Apple Development identity of the
+    \\keychains as Xcode signs Debug builds (that of macos.signingIdentity's team
+    \\when there are several), so that macOS keeps the permissions and Keychain
+    \\access it allowed it across builds; without one it signs ad hoc, whose
+    \\signature changes with every build. --sign picks another identity; --sign -
+    \\signs ad hoc.
     \\build runs `zig build` with ReleaseSafe; --package writes an update package
     \\to dist/ from zig-out/bin and ziggurat.json, with the icon of ziggurat.json,
     \\and signs the Windows executable first when windows in ziggurat.json says how.
@@ -721,6 +728,15 @@ pub fn macosApp(allocator: std.mem.Allocator, dir: std.Io.Dir, project: Project)
 /// Writes the signed bundle of `executable` into `output` and returns its
 /// path.
 fn writeApp(allocator: std.mem.Allocator, project: Project, identity: []const u8, executable: []const u8, output: []const u8) ![]const u8 {
+    const path = try writeBundleSigned(allocator, project, identity, executable, output, true);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{path}));
+    return path;
+}
+
+/// Writes the bundle of `executable` into `output`, signed as a
+/// `production` build or a development one (`macos.codesignArgs`), and
+/// returns its path.
+fn writeBundleSigned(allocator: std.mem.Allocator, project: Project, identity: []const u8, executable: []const u8, output: []const u8, production: bool) ![]const u8 {
     const cwd = std.Io.Dir.cwd();
     const config = project.macos orelse macos.MacOS{};
     const png = if (project.icon) |path| try readIcon(allocator, path) else null;
@@ -732,8 +748,7 @@ fn writeApp(allocator: std.mem.Allocator, project: Project, identity: []const u8
     const bundle = try macos.writeBundle(allocator, parent, try macosApp(allocator, cwd, project), .{ .executable = executable, .icns = icons.icns, .catalog = icons.catalog, .provisioning_profile = profile });
     const path = try std.fs.path.join(allocator, &.{ output, bundle });
     const entitlements = if (config.entitlements) |file| try zio.realPathAlloc(cwd, file, allocator) else null;
-    try macos.codesign(allocator, path, identity, entitlements, profile != null);
-    try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{path}));
+    try macos.codesign(allocator, path, identity, entitlements, profile != null, production);
     return path;
 }
 
@@ -1132,10 +1147,14 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var extra: []const []const u8 = &.{};
     var web = false;
     var port: u16 = dev_web_port;
+    var sign: ?[]const u8 = null;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--watch") and index + 1 < args.len) {
+        if (std.mem.eql(u8, arg, "--sign") and index + 1 < args.len) {
+            sign = args[index + 1];
+            index += 1;
+        } else if (std.mem.eql(u8, arg, "--watch") and index + 1 < args.len) {
             try roots.append(allocator, args[index + 1]);
             index += 1;
         } else if (std.mem.eql(u8, arg, "--frontend") and index + 1 < args.len) {
@@ -1161,7 +1180,8 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (frontend_child) |*child| stop(child);
     // Build, then run the installed executable as our own child so a change
     // stops the application itself rather than an intermediate build runner.
-    _ = try readProject(allocator, cwd);
+    const first_project = try readProject(allocator, cwd);
+    const identity = if (builtin.os.tag == .macos) devSign(allocator, first_project, sign) else "-";
     var build_args: std.ArrayList([]const u8) = .empty;
     try build_args.append(allocator, "build");
     try build_args.appendSlice(allocator, extra);
@@ -1175,8 +1195,19 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             break :blk null;
         };
         if (executable != null and try runZig(allocator, build_args.items) == 0) {
-            app = try zio.spawn(.{ .argv = &.{executable.?} });
-            std.debug.print("ziggurat: running {s} (watching {d} paths)\n", .{ executable.?, roots.items.len });
+            // On macOS the development app runs from a signed bundle of its
+            // own, which permissions and the Keychain know it by.
+            const program = if (builtin.os.tag == .macos) devBundle(allocator, cwd, identity, executable.?) catch |err| blk: {
+                if (err == error.ProvisioningProfileNeedsIdentity)
+                    std.debug.print("ziggurat: macos.provisioningProfile needs a signing identity, not ad-hoc signing: pass --sign, or leave the profile out for dev\n", .{})
+                else
+                    std.debug.print("ziggurat: the development app: {s}\n", .{@errorName(err)});
+                break :blk null;
+            } else executable.?;
+            if (program) |path| {
+                app = try zio.spawn(.{ .argv = &.{path} });
+                std.debug.print("ziggurat: running {s} (watching {d} paths)\n", .{ path, roots.items.len });
+            } else std.debug.print("ziggurat: waiting for changes\n", .{});
         } else std.debug.print("ziggurat: build failed; waiting for changes\n", .{});
         while (true) {
             zio.sleep(300 * std.time.ns_per_ms);
@@ -1193,6 +1224,46 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         std.debug.print("ziggurat: change detected, rebuilding\n", .{});
         if (app) |*child| stop(child);
     }
+}
+
+/// The project of the development app: "NAME Dev" with the identity
+/// IDENTITY.dev, so that its data, preferences and single instance lock
+/// stay apart from the app's.
+pub fn devProject(allocator: std.mem.Allocator, project: Project) !Project {
+    var dev_project = project;
+    dev_project.name = try std.fmt.allocPrint(allocator, "{s} Dev", .{project.name});
+    dev_project.identity = try std.fmt.allocPrint(allocator, "{s}.dev", .{project.identity});
+    return dev_project;
+}
+
+/// Writes the signed bundle of the development app of the build in
+/// `executable` into .ziggurat/dev/macos-ARCH, as ziggurat.json says now,
+/// and returns the path of its executable.
+fn devBundle(allocator: std.mem.Allocator, cwd: std.Io.Dir, identity: []const u8, executable: []const u8) ![]const u8 {
+    const project = try devProject(allocator, try readProject(allocator, cwd));
+    const bytes = try cwd.readFileAlloc(zio.io(), executable, allocator, .limited(512 * 1024 * 1024));
+    const output = ".ziggurat/dev/macos-" ++ @tagName(builtin.cpu.arch);
+    const app = try writeBundleSigned(allocator, project, identity, bytes, output, false);
+    return std.fs.path.join(allocator, &.{ app, "Contents", "MacOS", try macos.fileName(allocator, project.name) });
+}
+
+/// The identity that signs the development app: `sign`, when given, else
+/// a development identity of the user's keychains
+/// (`macos.developmentIdentity`), as Xcode signs Debug builds, and ad hoc
+/// without one. A provisioning profile needs the identity it names, which
+/// --sign gives; without it, ad hoc signing leads to the error that says
+/// so.
+fn devSign(allocator: std.mem.Allocator, project: Project, sign: ?[]const u8) []const u8 {
+    if (sign) |identity| return identity;
+    const config = project.macos orelse macos.MacOS{};
+    if (config.provisioningProfile != null) return "-";
+    const out = capture(allocator, &.{ "security", "find-identity", "-v", "-p", "codesigning" }) orelse "";
+    const found = macos.developmentIdentity(out, macos.signingTeam(config.signingIdentity)) orelse {
+        std.debug.print("ziggurat: signing the development app ad hoc: macOS asks again for its permissions and Keychain items after each build. An Apple Development certificate keeps them; Xcode makes one for an Apple ID, free, in Settings > Accounts > Manage Certificates\n", .{});
+        return "-";
+    };
+    std.debug.print("ziggurat: signing the development app as {s}\n", .{found.name});
+    return found.hash;
 }
 
 /// The installed executable that ziggurat.json names right now.
