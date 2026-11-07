@@ -39,6 +39,11 @@ typedef struct NativeWindow {
     gboolean content_busy;
     /* The pointer passes through the window to what is beneath it. */
     gboolean ignore_pointer;
+    /* Window.setInputRegion: input_count rectangles of four doubles (DIP
+       from the client area's corner), while input_region; owned. */
+    gboolean input_region;
+    double *input_rects;
+    size_t input_count;
     void *owner;
     Emit emit;
     gboolean destroyed, preedit;
@@ -216,6 +221,7 @@ static void release(NativeWindow *s) {
     if (g_atomic_int_dec_and_test(&s->refs)) {
         for (int i=0;i<8;i++) if (s->resize_cursors[i]) g_object_unref(s->resize_cursors[i]);
         if (s->client_cursor) g_object_unref(s->client_cursor);
+        g_free(s->input_rects);
         g_object_unref(s->area); g_object_unref(s->window); g_object_unref(s->group); g_free(s); g_atomic_int_add(&resources,-1);
     }
 }
@@ -1413,39 +1419,91 @@ int zlg_window_traits(NativeWindow *s, int resizable, int movable, int minimizab
 }
 void zlg_window_opacity(NativeWindow *s, double opacity) { retain(s);gtk_widget_set_opacity(s->window,opacity);release(s); }
 /* An empty input shape lets the pointer reach the windows below, under
-   X11 and Wayland, layer surfaces included. GTK keeps the widget's shape
-   for when it realizes; it is set on the GdkWindow too, again as the
-   window maps and as its size changes, since client-side decorations set
-   an input shape of their own then. Wayland takes the shape with the
-   surface's next commit, so a frame is drawn for it. */
-static void apply_ignore_pointer(NativeWindow *s) {
-    if (s->destroyed) return;
-    cairo_region_t *empty=s->ignore_pointer?cairo_region_create():NULL;
-    gtk_widget_input_shape_combine_region(s->window,empty);
-    GdkWindow *native=gtk_widget_get_window(s->window);
-    if (native) gdk_window_input_shape_combine_region(native,empty,0,0);
-    if (empty) cairo_region_destroy(empty);
-    gtk_widget_queue_draw(s->area);
+   X11 and Wayland, layer surfaces included, and an input region
+   (Window.setInputRegion) all but its rectangles: the X server and the
+   compositor hand a press outside the shape to what is beneath, another
+   app's window too, as if the window were not there. GTK keeps the
+   widget's shape for when it realizes; it is set on the GdkWindow too,
+   again as the window realizes and maps and after GTK's own size-allocate,
+   since client-side decorations set an input shape of their own then (to
+   let the pointer through their shadow), and the content may have moved in
+   the window, under a menu bar that shows. Wayland takes the shape with
+   the surface's next commit, so a frame is drawn for it: the window's, as
+   a window showing a page draws no area of its own. ignore_pointer wins
+   over the region. */
+static cairo_region_t *input_region_shape(NativeWindow *s, int *dx, int *dy) {
+    cairo_region_t *region=cairo_region_create();
+    for (size_t i=0;i<s->input_count;i++) {
+        const double *r=s->input_rects+i*4;
+        int x=(int)floor(r[0]), y=(int)floor(r[1]);
+        cairo_rectangle_int_t rect={x,y,(int)ceil(r[0]+r[2])-x,(int)ceil(r[1]+r[3])-y};
+        if (rect.width>0 && rect.height>0) cairo_region_union_rectangle(region,&rect);
+    }
+    /* Where the content is in the toplevel's GdkWindow, which holds the
+       menu bar, and the shadow GTK draws around a window it decorates. */
+    int x=0, y=0;
+    if (!gtk_widget_translate_coordinates(s->area,s->window,0,0,&x,&y)) x=y=0;
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(s->window,&alloc);
+    *dx=x+alloc.x; *dy=y+alloc.y;
+    return region;
 }
-static void ignore_pointer_again(GtkWidget *widget, gpointer data) {
+static gboolean shapes_input(NativeWindow *s) { return s->ignore_pointer || s->input_region; }
+static void apply_input_shape(NativeWindow *s, gboolean draw) {
+    if (s->destroyed) return;
+    GdkWindow *native=gtk_widget_get_window(s->window);
+    if (s->ignore_pointer) {
+        cairo_region_t *empty=cairo_region_create();
+        gtk_widget_input_shape_combine_region(s->window,empty);
+        if (native) gdk_window_input_shape_combine_region(native,empty,0,0);
+        cairo_region_destroy(empty);
+    } else if (s->input_region) {
+        gtk_widget_input_shape_combine_region(s->window,NULL);
+        if (native) {
+            int dx=0, dy=0;
+            cairo_region_t *region=input_region_shape(s,&dx,&dy);
+            gdk_window_input_shape_combine_region(native,region,dx,dy);
+            cairo_region_destroy(region);
+        }
+    } else {
+        gtk_widget_input_shape_combine_region(s->window,NULL);
+        if (native) gdk_window_input_shape_combine_region(native,NULL,0,0);
+    }
+    if (draw) gtk_widget_queue_draw(s->window);
+}
+static void input_shape_again(GtkWidget *widget, gpointer data) {
     (void)widget;
     NativeWindow *s=data;
-    if (s->ignore_pointer) apply_ignore_pointer(s);
+    if (shapes_input(s)) apply_input_shape(s,TRUE);
 }
-static void ignore_pointer_allocated(GtkWidget *widget, GdkRectangle *allocation, gpointer data) {
-    (void)allocation;
-    ignore_pointer_again(widget,data);
+static void input_shape_allocated(GtkWidget *widget, GdkRectangle *allocation, gpointer data) {
+    (void)widget; (void)allocation;
+    NativeWindow *s=data;
+    if (shapes_input(s)) apply_input_shape(s,FALSE);
+}
+static void watch_input_shape(NativeWindow *s) {
+    if (s->destroyed || g_object_get_data(G_OBJECT(s->window),"ziggurat-input-shape")) return;
+    g_object_set_data(G_OBJECT(s->window),"ziggurat-input-shape",GINT_TO_POINTER(1));
+    g_signal_connect_after(s->window,"realize",G_CALLBACK(input_shape_again),s);
+    g_signal_connect_after(s->window,"map",G_CALLBACK(input_shape_again),s);
+    g_signal_connect_after(s->window,"size-allocate",G_CALLBACK(input_shape_allocated),s);
 }
 void zlg_window_ignore_pointer(NativeWindow *s, int enabled) {
     retain(s);
-    if (!s->destroyed && enabled && !g_object_get_data(G_OBJECT(s->window),"ziggurat-ignore-pointer")) {
-        g_object_set_data(G_OBJECT(s->window),"ziggurat-ignore-pointer",GINT_TO_POINTER(1));
-        g_signal_connect_after(s->window,"realize",G_CALLBACK(ignore_pointer_again),s);
-        g_signal_connect_after(s->window,"map",G_CALLBACK(ignore_pointer_again),s);
-        g_signal_connect_after(s->window,"size-allocate",G_CALLBACK(ignore_pointer_allocated),s);
-    }
     s->ignore_pointer=enabled!=0;
-    apply_ignore_pointer(s);
+    if (shapes_input(s)) watch_input_shape(s);
+    apply_input_shape(s,TRUE);
+    release(s);
+}
+/* rects holds x, y, width, height in DIP from the client area's top-left
+   corner; has 0 gives the window all of it back. */
+void zlg_window_input_region(NativeWindow *s, const double *rects, size_t count, int has) {
+    retain(s);
+    g_free(s->input_rects); s->input_rects=NULL; s->input_count=0;
+    s->input_region=has!=0;
+    if (has && count) { s->input_rects=g_new(double,count*4); memcpy(s->input_rects,rects,count*4*sizeof(double)); s->input_count=count; }
+    if (shapes_input(s)) watch_input_shape(s);
+    apply_input_shape(s,TRUE);
     release(s);
 }
 void zlg_window_urgent(NativeWindow *s, int enabled) { retain(s);gtk_window_set_urgency_hint(GTK_WINDOW(s->window),enabled);release(s); }

@@ -22,6 +22,9 @@ pub const WindowData = struct {
     traits: core.WindowTraits = .{},
     opacity: f32 = 1,
     ignore_pointer: bool = false,
+    /// What setInputRegion last gave the backend: null all of the window.
+    input_region: ?[]const core.Rect = null,
+    input_region_updates: usize = 0,
     content_protected: bool = false,
     flashing: bool = false,
     skip_taskbar: bool = false,
@@ -207,6 +210,11 @@ pub fn setOpacity(record: *core.WindowRecord, value: f32) !void {
 pub fn setIgnorePointer(record: *core.WindowRecord, enabled: bool) !void {
     try update(record);
     record.native.ignore_pointer = enabled;
+}
+pub fn setInputRegion(record: *core.WindowRecord, region: ?[]const core.Rect) !void {
+    try update(record);
+    record.native.input_region = region;
+    record.native.input_region_updates += 1;
 }
 pub fn setContentProtection(record: *core.WindowRecord, enabled: bool) !void {
     try update(record);

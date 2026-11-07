@@ -56,6 +56,7 @@ extern fn zlm_window_menu_activate(*anyopaque, [*]const [*:0]const u8, c_int) c_
 extern fn zlm_window_traits(*anyopaque, c_int, c_int, c_int, c_int, c_int) c_int;
 extern fn zlm_window_opacity(*anyopaque, f32) void;
 extern fn zlm_window_ignore_pointer(*anyopaque, c_int) void;
+extern fn zlm_window_input_region(*anyopaque, [*]const f64, usize, c_int) void;
 extern fn zlm_window_content_protection(*anyopaque, c_int) void;
 extern fn zlm_window_attention(*anyopaque, c_int) void;
 extern fn zlm_window_chrome(*anyopaque, c_int, f64) void;
@@ -174,6 +175,17 @@ pub fn setOpacity(record: *core.WindowRecord, value: f32) !void {
 }
 pub fn setIgnorePointer(record: *core.WindowRecord, enabled: bool) !void {
     zlm_window_ignore_pointer(record.native.native.?, @intFromBool(enabled));
+}
+/// AppKit has no input region: ignoresMouseEvents follows the pointer in
+/// and out of it; see zlm_window_input_region.
+pub fn setInputRegion(record: *core.WindowRecord, region: ?[]const core.Rect) !void {
+    var stack: [16 * 4]f64 = undefined;
+    const rects = region orelse &.{};
+    const heap = rects.len * 4 > stack.len;
+    const values = if (heap) try record.window.app.allocator.alloc(f64, rects.len * 4) else stack[0 .. rects.len * 4];
+    defer if (heap) record.window.app.allocator.free(values);
+    for (rects, 0..) |rect, i| values[i * 4 ..][0..4].* = .{ rect.x, rect.y, rect.width, rect.height };
+    zlm_window_input_region(record.native.native.?, values.ptr, rects.len, @intFromBool(region != null));
 }
 pub fn setContentProtection(record: *core.WindowRecord, enabled: bool) !void {
     zlm_window_content_protection(record.native.native.?, @intFromBool(enabled));

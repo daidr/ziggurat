@@ -700,6 +700,31 @@ try v.row(.{ .radius = 12, .material = .{ .custom = .{ .context = &stripes, .pai
 
 不经过视图时，`frame.material(bounds, radius, value)` 画同样的材质。
 
+### 交互玻璃与玻璃组
+
+交互玻璃像 AppKit 的 interactive glass 一样：指针悬停时边光变亮、表面略微提亮、着色加深（120 ms 内），按下时玻璃左右各长 1.1 DIP、上下各长 0.45 DIP（150 ms 内）。`ui.backdrop_effects.Glass` 的 `hover`、`press`（0–1）就是这两个量；`view.GlassInteraction` 由应用放在稳定地址，跟随玻璃上的指针区域计算它们，动画进行中自动请求下一帧，减少动态效果时直接到位：
+
+```zig
+var state: view.GlassInteraction = .{};
+const area = try v.pointerArea(.{}, .{ .radius = 20, .padding = Insets.all(10), .material = .{ .glass = try state.glass(v, .{}) } });
+try v.text("Glass", .{});
+try v.end();
+try state.follow(v, area);
+```
+
+`glass` 取本轮的悬停与按下量，`follow` 把它们对准指针区域本轮的状态，下一轮显示。
+
+`Style.glass_group` 让容器里标了 `glass_pane` 的节点（最多 8 个）共用一片玻璃，像 AppKit 的 glass effect container：靠得近的面板边角融合成一个表面，分开时各自成形，整片只有一圈弧面与边光。面板保留自己的背景、边框和命中区域：
+
+```zig
+try v.row(.{ .gap = 6, .glass_group = .{ .radius = 20, .merge = 24 } });
+_ = try v.button("Cut", .{ .glass_pane = true });
+_ = try v.button("Copy", .{ .glass_pane = true });
+try v.end();
+```
+
+`merge`（默认 24 DIP）是平滑最小值的宽度，大约能把相距 12 DIP 以内的面板连起来，0 让它们保持分开；`style`、`tint`、`clarity` 同玻璃，材质取最小面板那么大的玻璃。它是 `ui.effects.Library.glassGroup` 的背景着色器（符号距离场的平滑并集，5×5 采样模糊、弧面折射、亮度映射、着色与上下边光），需要 `host.prepareShaderEffects`；在此之前以及减少透明度时，每个面板各自画成普通玻璃材质（减少透明度时是不透明表面）。
+
 ## 不透明度、位姿与进出场
 
 `Style.opacity`（0–1）把节点及其后代作为一层淡出，如 CSS 的组不透明度：重叠的子节点、子节点与容器自己的背景不会互相透出。为了少一次合成，作用域先平着录制、把透明度乘到每个绘制物上，关闭时检查其中的绘制物在裁剪内是否互相重叠，重叠时才改成一个按该透明度合成的组（`Frame.pushOpacity` 同样如此），互不重叠时两者画出来完全一样。含背景模糊的作用域保持平铺，组的嵌套深度超出渲染器的层数时也保持平铺；`Style.pose`（`ui.effects.Pose`）平移、缩放、旋转或按透视绕 X/Y 轴转动它们；`Style.effect` 用自定义着色器改写它们的绘制；`Style.refraction` 在容器下方画玻璃折射。命中、焦点和语义保持排布后的盒子。`View.presentColumn(&presence, show, transition, style)` 让一个列容器在 `show` 切换时按 `ziggurat_animation` 的运动进入和退出，退出结束后返回 false：

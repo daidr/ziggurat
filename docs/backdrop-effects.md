@@ -39,7 +39,15 @@ frame.backdropEffect(edge, 0, .{ .scroll_edge = .{ .hard = true } });
 
 ### 系统偏好
 
-`Context.setBackdropPreferences(.{ .reduce_transparency, .high_contrast })` 由宿主根据 `ziggurat_system.desktop.preferences` 等来源显式设置，变化时请求重绘。任一为真时所有效果都录制为普通不透明填充（GPU 也能画）：玻璃取主题背景与白色（深色为控件色）的混合，并叠加 tint；模糊取主题背景，带 mask 时按 mask 的 alpha 画背景色渐变；滚动边缘取背景色，hard 样式保留发丝线。高对比度下玻璃再描 1 DIP 主题边框色。
+`Context.setBackdropPreferences(.{ .reduce_transparency, .high_contrast })` 由宿主根据 `ziggurat_system.desktop.preferences` 等来源显式设置，变化时请求重绘。减少透明度时所有效果都录制为普通不透明填充（GPU 也能画）：玻璃取主题背景与白色（深色为控件色）的混合，并叠加 tint；模糊取主题背景，带 mask 时按 mask 的 alpha 画背景色渐变；滚动边缘取背景色，hard 样式保留发丝线；此时若同时要求高对比度，玻璃再描 1 DIP 主题边框色。只要求高对比度时效果照常绘制，玻璃的边光强度加 0.15、宽度至少 1.5 像素（macOS 的“增强对比度”）。
+
+### 交互玻璃
+
+`Glass.hover`（0–1）是指针悬停交互玻璃的程度：边光强度最多加 0.18，亮度映射的 low/high 最多各加 0.02，tint 的 alpha 最多再乘 1.1。`Glass.press`（0–1）是按下的程度：形状左右各外扩 `1.1·press` DIP、上下各外扩 `0.45·press` DIP，圆角加上同样的上下外扩量。两者由调用者给出，视图层的 `view.GlassInteraction` 按 150/120 ms 的补间跟随指针区域。CPU、OpenGL 与 Metal 的玻璃回放都读这些参数（边光宽度经计划的 `line2.w` 传给 GPU 着色器）。
+
+### 玻璃组
+
+`ui.effects.Library.glassGroup(&values, .{ .panes, .radius, .merge, .style, .tint, .clarity, .dark, .high_contrast })` 返回一个背景着色器，把最多 8 个圆角矩形面板画成一片玻璃：各面板的符号距离场以宽 `merge` DIP 的平滑最小值合并，靠近的面板之间搭起桥接，整片只有一圈弧面与边光；并集之外保持背景不变。材质取最短边等于最小面板的玻璃（`PaneMaterial`）：模糊（最多 20 DIP，5×5 采样）、弧面折射、亮度映射、tint（alpha×0.88）与上下边光，高对比度同样加亮加宽边光。它作为普通背景着色器在软件回放、OpenGL、Metal 与 D3D11 上执行。
 
 ## 加载动画
 

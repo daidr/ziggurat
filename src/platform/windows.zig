@@ -5,6 +5,7 @@ const text_input = @import("windows_text.zig");
 const pointer_press = @import("pointer_press.zig");
 const work_area = @import("work_area.zig");
 const c = @import("ziggurat_c_win32");
+const input_region = @import("input_region.zig");
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Window.0");
 const dispatch_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Dispatch.0");
 const wake_message = c.WM_APP + 1;
@@ -33,7 +34,7 @@ const PointerDispatch = struct {
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
 pub const AppData = struct { popup_shadow_class: c.ATOM = 0, taskbar_created: c.UINT = 0, taskbar: ?*TaskbarList = null, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
-pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 } };
+pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 } };
 var active_app: std.atomic.Value(bool) = .init(false);
 
 pub fn init(app: *core.App) !void {
@@ -659,10 +660,12 @@ pub fn setTraits(window: *core.WindowRecord, traits: core.WindowTraits) !void {
     if (c.GetSystemMenu(hwnd, c.FALSE)) |menu| _ = c.EnableMenuItem(menu, c.SC_CLOSE, @as(c.UINT, c.MF_BYCOMMAND) | @as(c.UINT, if (traits.closable) c.MF_ENABLED else c.MF_GRAYED));
     if (!sameWindow(window, hwnd)) return error.Closed;
 }
-/// Layered while translucent or transparent to the pointer.
+/// Layered while translucent, transparent to the pointer, or with an input
+/// region, which `transparent` (WS_EX_TRANSPARENT) follows the cursor in
+/// and out of.
 fn applyLayered(window: *core.WindowRecord, opacity: f32, ignore_pointer: bool) !void {
     const hwnd = window.native.hwnd;
-    const layered = opacity < 1 or ignore_pointer;
+    const layered = opacity < 1 or ignore_pointer or window.input_region != null;
     const current = c.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE);
     var next = current & ~@as(isize, c.WS_EX_TRANSPARENT);
     if (ignore_pointer) next |= c.WS_EX_TRANSPARENT;
@@ -675,12 +678,79 @@ fn applyLayered(window: *core.WindowRecord, opacity: f32, ignore_pointer: bool) 
     if (window.native.saved) |*saved| saved.ex_style = (saved.ex_style & ~@as(isize, c.WS_EX_LAYERED | c.WS_EX_TRANSPARENT)) | (next & (c.WS_EX_LAYERED | c.WS_EX_TRANSPARENT));
 }
 pub fn setOpacity(window: *core.WindowRecord, value: f32) !void {
-    try applyLayered(window, value, window.native.ignore_pointer);
+    try applyLayered(window, value, window.native.ignore_pointer or window.native.through);
     window.native.opacity = value;
 }
 pub fn setIgnorePointer(window: *core.WindowRecord, enabled: bool) !void {
     try applyLayered(window, window.native.opacity, enabled);
     window.native.ignore_pointer = enabled;
+    window.native.through = enabled;
+    followCursor(window); // false gives the region back the pointer
+}
+// An input region (Window.setInputRegion) lets the pointer through a window
+// but where its rectangles are, as a desktop pet's window lets clicks
+// through to the apps under it but on its character. Windows hands a press
+// to the window it finds under it, and lets one through to another app's
+// window only where the window is layered and transparent to the mouse
+// (WS_EX_LAYERED with WS_EX_TRANSPARENT), all of it or none. WM_NCHITTEST
+// answering HTTRANSPARENT goes on to windows of the same thread alone. A
+// layered window lets the mouse through its fully transparent pixels only
+// when it draws with UpdateLayeredWindow, which neither WebView2 nor the
+// DirectComposition renderer does. And SetWindowRgn shapes what the window
+// shows too: it would cut off a shadow or a glow drawn outside the region.
+//
+// So the window lets the pointer through while the cursor is outside the
+// region and takes it while the cursor is in it, switching
+// WS_EX_TRANSPARENT before the press comes. A window letting the mouse
+// through gets no WM_MOUSEMOVE, so the cursor is asked where it is on a
+// timer of the window's while it shows, at USER_TIMER_MINIMUM, which fires
+// at each tick of the system clock (15.6 ms): a timer rounds its time up to
+// whole ticks, so 16 ms fired every other tick, and a fast press 17 to 35
+// ms after the cursor entered the region could find the window switching as
+// Windows routed it, reaching no window at all. It needs neither a
+// low-level mouse hook, which slows every move of the system's mouse while
+// the main thread is busy, nor raw input, registered once per process. A
+// button held keeps the window as it is, so a drag that started on the
+// character ends there; the release settles it. The window stays layered
+// while it has a region: switching layered on and off would redraw it as
+// the cursor comes and goes.
+const input_region_timer: usize = 0x5a49; // "ZI"
+pub fn setInputRegion(window: *core.WindowRecord, region: ?[]const core.Rect) !void {
+    if (region == null and !window.native.ignore_pointer and window.native.through) window.native.through = false;
+    try applyLayered(window, window.native.opacity, window.native.ignore_pointer or window.native.through);
+    pollCursor(window, c.IsWindowVisible(window.native.hwnd) != 0);
+    followCursor(window);
+}
+/// Asks where the cursor is while a window with an input region shows.
+fn pollCursor(window: *core.WindowRecord, shown: bool) void {
+    const hwnd = window.native.hwnd orelse return;
+    if (window.input_region != null and shown) {
+        _ = c.SetTimer(hwnd, input_region_timer, c.USER_TIMER_MINIMUM, null);
+    } else _ = c.KillTimer(hwnd, input_region_timer);
+}
+/// Lets the pointer through a window with an input region, or has it take
+/// the pointer, as the cursor is outside the region or in it.
+fn followCursor(window: *core.WindowRecord) void {
+    const region = window.input_region orelse return;
+    const hwnd = window.native.hwnd orelse return;
+    if (window.native.ignore_pointer or c.IsIconic(hwnd) != 0) return;
+    var cursor: c.POINT = undefined;
+    if (c.GetCursorPos(&cursor) == 0 or c.ScreenToClient(hwnd, &cursor) == 0) return;
+    const dpi = c.GetDpiForWindow(hwnd);
+    if (dpi == 0) return;
+    const scale = @as(f32, @floatFromInt(dpi)) / 96;
+    const through = input_region.letsPointerThrough(region, @as(f32, @floatFromInt(cursor.x)) / scale, @as(f32, @floatFromInt(cursor.y)) / scale, buttonsHeld(), window.native.through);
+    if (through == window.native.through) return;
+    applyLayered(window, window.native.opacity, through) catch return;
+    window.native.through = through;
+}
+/// Whether a mouse button is down, whichever window has it: the left,
+/// right, middle and the two side buttons.
+fn buttonsHeld() bool {
+    for ([_]c_int{ c.VK_LBUTTON, c.VK_RBUTTON, c.VK_MBUTTON, c.VK_XBUTTON1, c.VK_XBUTTON2 }) |key| {
+        if (@as(u16, @bitCast(c.GetAsyncKeyState(key))) & 0x8000 != 0) return true;
+    }
+    return false;
 }
 pub fn setContentProtection(window: *core.WindowRecord, enabled: bool) !void {
     const exclude_from_capture = 0x11;
@@ -1256,6 +1326,11 @@ fn delegate(native: *?NativeDelegate, message: c.UINT, wp: c.WPARAM, lp: c.LPARA
     return 0;
 }
 fn windowMessage(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM, delegation: *?NativeDelegate) c.LRESULT {
+    if (message == c.WM_TIMER and wp == input_region_timer) {
+        followCursor(window);
+        return 0;
+    }
+    if (message == c.WM_SHOWWINDOW and window.input_region != null) pollCursor(window, wp != 0);
     if (buttonPhase(message)) |phase| {
         // Mandatory even when raw timing is disabled or decoration consumes it.
         const operation = advancePointerOperation(window);

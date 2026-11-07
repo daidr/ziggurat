@@ -1740,6 +1740,72 @@ pub const Window = struct {
         };
         scope.record.ignore_pointer = enabled;
     }
+    /// Limits the part of the window that takes the pointer to `rects`, in
+    /// DIP from the top-left corner of its client area: presses, moves and
+    /// the wheel elsewhere go through to what is behind the window, another
+    /// app's window or the desktop, as with `setIgnorePointer`. A desktop
+    /// pet needs it, a frameless, transparent window always on top whose
+    /// character and speech bubble take clicks while the rest of the screen
+    /// works as if the window were not there. Content's pass-through only
+    /// lets the pointer through an element to the window's own content.
+    ///
+    /// null gives the window all of it back, as it starts; an empty slice
+    /// none of it. Rectangles without area are dropped; the window keeps a
+    /// copy. Set the region again as what takes clicks moves or changes
+    /// size. `setIgnorePointer(true)` wins over it while set.
+    ///
+    /// GTK makes the region the window's input shape (X11 SHAPE, Wayland's
+    /// input region), shaped again after GTK's own shape on size-allocate.
+    /// macOS and Windows shape no window's input: the window takes the
+    /// pointer or lets all of it through, switched as the pointer comes
+    /// into the region or leaves it, which AppKit tells from monitors of the
+    /// pointer's moves and Windows is asked at each tick of the system clock
+    /// while the window shows. A button held keeps it as it is, so a drag
+    /// that started on the character ends there; the release settles it.
+    /// Browsers ignore it.
+    pub fn setInputRegion(self: Window, rects: ?[]const Rect) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        const record = scope.record;
+        const allocator = self.app.allocator;
+        var next: ?[]Rect = null;
+        if (rects) |list| {
+            var kept: usize = 0;
+            for (list) |rect| kept += @intFromBool(inputRect(rect));
+            const copy = try allocator.alloc(Rect, kept);
+            var index: usize = 0;
+            for (list) |rect| if (inputRect(rect)) {
+                copy[index] = rect;
+                index += 1;
+            };
+            next = copy;
+        }
+        const previous = record.input_region;
+        if (previous == null and next == null) return;
+        if (previous != null and next != null and std.mem.eql(u8, std.mem.sliceAsBytes(previous.?), std.mem.sliceAsBytes(next.?))) {
+            allocator.free(next.?);
+            return;
+        }
+        record.input_region = next;
+        if (previous) |old| allocator.free(old);
+        if (comptime @hasDecl(backend, "setInputRegion")) {
+            self.app.native_failure = null;
+            backend.setInputRegion(record, record.input_region) catch |err| {
+                self.reportUpdateFailure(record, err);
+                return err;
+            };
+        }
+    }
+    /// The rectangles `setInputRegion` set last, null for all of the window.
+    /// Borrowed until the next `setInputRegion` or the window closes.
+    pub fn inputRegion(self: Window) !?[]const Rect {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        return record.input_region;
+    }
+    fn inputRect(rect: Rect) bool {
+        return std.math.isFinite(rect.x) and std.math.isFinite(rect.y) and std.math.isFinite(rect.width) and std.math.isFinite(rect.height) and rect.width > 0 and rect.height > 0;
+    }
     /// Keeps the window's pixels out of screenshots and screen recordings
     /// where the system honors the request.
     pub fn setContentProtection(self: Window, enabled: bool) !void {
@@ -2234,6 +2300,9 @@ pub const WindowRecord = struct {
     focused: bool = false,
     opacity: f32 = 1,
     ignore_pointer: bool = false,
+    /// `Window.setInputRegion`'s rectangles, owned by the record; null for
+    /// all of the window.
+    input_region: ?[]Rect = null,
     skip_taskbar: bool = false,
     fn traits(self: *const WindowRecord) WindowTraits {
         return .{ .resizable = self.options.resizable, .movable = self.options.movable, .minimizable = self.options.minimizable, .maximizable = self.options.maximizable, .closable = self.options.closable };
@@ -2409,6 +2478,8 @@ pub const WindowRecord = struct {
             const previous = app.suspendPointer();
             if (state) |value| app.allocator.destroy(value);
             app.allocator.free(self.title);
+            if (self.input_region) |region| app.allocator.free(region);
+            self.input_region = null;
             app.allocated_records -= 1;
             app.allocator.destroy(self);
             app.restorePointer(previous);
@@ -2896,6 +2967,7 @@ test {
     _ = @import("diagnostics_test.zig");
     _ = @import("platform/decoration_test.zig");
     _ = @import("platform/work_area.zig");
+    _ = @import("platform/input_region.zig");
     _ = @import("pointer_press_test.zig");
     _ = @import("window_policy_test.zig");
     _ = @import("zoom_test.zig");

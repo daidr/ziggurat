@@ -42,6 +42,14 @@ pub const Glass = struct {
     /// which eases in up to 200 DIP. On clear glass, which barely tones
     /// already, it only lights the rim and curves the bezel.
     clarity: f32 = 0,
+    /// How far an interactive glass is pressed, from 0 to 1: the pane grows
+    /// by 1.1 DIP left and right and 0.45 DIP above and below, as AppKit's
+    /// interactive glass does while pressed. See `view.GlassInteraction`.
+    press: f32 = 0,
+    /// How far the pointer hovers an interactive glass, from 0 to 1: its
+    /// rim lights by up to 0.18, its surface lifts by up to 0.02 and its
+    /// tint deepens by up to a tenth.
+    hover: f32 = 0,
 };
 /// Varies a blur along a line by alpha: 255 applies the full radius, 0 none.
 pub const Mask = struct {
@@ -73,11 +81,15 @@ pub const ScrollEdge = struct {
 pub const Effect = union(enum) { blur: Blur, glass: Glass, scroll_edge: ScrollEdge };
 /// The system's accessibility appearance, chosen by the host. Either flag
 /// replaces every backdrop effect with an opaque fill.
+/// The desktop's accessibility settings that materials follow. Reduce
+/// Transparency draws them as opaque surfaces; higher contrast lights the
+/// glass's rim (by 0.15, at least 1.5 pixels wide) and, on an opaque
+/// surface, borders it.
 pub const Preferences = struct {
     reduce_transparency: bool = false,
     high_contrast: bool = false,
     pub fn opaqueFill(self: Preferences) bool {
-        return self.reduce_transparency or self.high_contrast;
+        return self.reduce_transparency;
     }
 };
 
@@ -97,6 +109,10 @@ pub const Entry = struct {
     noise: f32 = 0,
     /// `Glass.clarity`; used by `glass` only.
     clarity: f32 = 0,
+    /// `Glass.hover`; used by `glass` only.
+    hover: f32 = 0,
+    /// Higher contrast lights the glass's rim; used by `glass` only.
+    high_contrast: bool = false,
     /// Opaque RGB for the hard scroll edge's tone.
     background: u32 = 0,
     /// Straight-alpha fill drawn when the region exceeds the workspace.
@@ -507,6 +523,8 @@ pub const Shading = struct {
     tint: [4]f64 = .{ 0, 0, 0, 0 },
     noise: f64 = 0,
     rim: f64 = rim_opacity,
+    /// Width of the rim's light in pixels.
+    rim_width: f64 = 1,
     background: [3]f64 = .{ 0, 0, 0 },
     progressive: ?Line = null,
 
@@ -528,7 +546,19 @@ pub const Shading = struct {
                 result.sigma = pane.blur * s;
                 result.tone = pane.tone;
                 result.rim = pane.rim;
-                if (entry.tint.a != 0) result.tint = .{ @as(f64, @floatFromInt(entry.tint.r)) / 255, @as(f64, @floatFromInt(entry.tint.g)) / 255, @as(f64, @floatFromInt(entry.tint.b)) / 255, @as(f64, @floatFromInt(entry.tint.a)) / 255 * 0.88 };
+                if (entry.high_contrast) {
+                    result.rim = @min(result.rim + 0.15, 1);
+                    result.rim_width = 1.5;
+                }
+                const hover: f64 = if (std.math.isFinite(entry.hover)) std.math.clamp(entry.hover, 0, 1) else 0;
+                if (hover > 0) {
+                    // As the pointer enters an interactive glass, its rim
+                    // lights and its surface lifts a little.
+                    result.rim = @min(result.rim + 0.18 * hover, 1);
+                    result.tone.low = @min(result.tone.low + 0.02 * hover, 1);
+                    result.tone.high = @min(result.tone.high + 0.02 * hover, 1);
+                }
+                if (entry.tint.a != 0) result.tint = .{ @as(f64, @floatFromInt(entry.tint.r)) / 255, @as(f64, @floatFromInt(entry.tint.g)) / 255, @as(f64, @floatFromInt(entry.tint.b)) / 255, @min(@as(f64, @floatFromInt(entry.tint.a)) / 255 * 0.88 * (1 + 0.1 * hover), 1) };
                 result.noise = std.math.clamp(@as(f64, entry.noise), 0, 1);
             },
             .edge => {
@@ -555,7 +585,7 @@ pub const Shading = struct {
             },
             .glass => {
                 const depth = @max(depth_value, 0);
-                const rim_width: f64 = 1;
+                const rim_width = self.rim_width;
                 var nx: f64 = 0;
                 var ny: f64 = 0;
                 if (depth < self.bezel or depth < 3 * rim_width) {

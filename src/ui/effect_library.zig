@@ -6,6 +6,7 @@ const zio = @import("ziggurat_io");
 const shader = @import("ziggurat_shader");
 const shader_effects = @import("shader_effects.zig");
 const geometry = @import("geometry.zig");
+const backdrop = @import("backdrop.zig");
 pub const Effect = shader_effects.Effect;
 pub const Color = geometry.Color;
 
@@ -69,6 +70,117 @@ pub const glass_source =
     \\    return vec4(mix(content.rgb, vec3(content.a), rim), content.a);
     \\}
 ;
+/// Panes of glass that merge while they nearly touch, as AppKit's glass
+/// effect container draws them: the union of up to eight rounded
+/// rectangles, blended by a smooth minimum `merge` DIP wide, with one bezel
+/// and one rim around the whole surface. What shows through is blurred by
+/// `blur` DIP, bent through the bezel, toned (low, high, curve, saturation)
+/// and tinted as a glass pane is; outside the union the backdrop is left
+/// as it is.
+pub const glass_group_source =
+    \\uniform float count;
+    \\uniform vec4 panes[8];
+    \\uniform float radius;
+    \\uniform float merge;
+    \\uniform float bezel;
+    \\uniform float refraction;
+    \\uniform float rim;
+    \\uniform float rim_width;
+    \\uniform float blur;
+    \\uniform vec4 tone;
+    \\uniform vec4 tint;
+    \\float pane(vec2 p, int i) {
+    \\    vec4 r = panes[i];
+    \\    vec2 h = r.zw * 0.5;
+    \\    float k = min(radius, min(h.x, h.y));
+    \\    vec2 q = abs(p - r.xy - h) - (h - vec2(k));
+    \\    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - k;
+    \\}
+    \\float smin(float a, float b, float k) {
+    \\    if (k <= 0.0) return min(a, b);
+    \\    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    \\    return mix(b, a, h) - k * h * (1.0 - h);
+    \\}
+    \\float field(vec2 p) {
+    \\    float d = pane(p, 0);
+    \\    for (int i = 1; i < 8; i++) {
+    \\        if (float(i) < count) d = smin(d, pane(p, i), merge);
+    \\    }
+    \\    return d;
+    \\}
+    \\float lens(float t, float width) {
+    \\    if (width <= 0.0 || t >= width) return 0.0;
+    \\    float u = 1.0 - max(t, 0.0) / width;
+    \\    float v = 1.0 - u * u * u * u;
+    \\    float a = sqrt(v * sqrt(v));
+    \\    float b = u * u * u;
+    \\    float n = sqrt(a * a + b * b);
+    \\    float sn = b / n;
+    \\    float cs = a / n;
+    \\    float st = sn / 1.5;
+    \\    float ct = sqrt(1.0 - st * st);
+    \\    return (sn * ct - cs * st) / (cs * ct + sn * st) / 1.118034;
+    \\}
+    \\vec4 frosted(vec2 p) {
+    \\    if (blur < 0.05) return sample(p);
+    \\    vec4 sum = vec4(0.0);
+    \\    float total = 0.0;
+    \\    for (int i = -2; i <= 2; i++) {
+    \\        for (int j = -2; j <= 2; j++) {
+    \\            vec2 k = vec2(float(i), float(j)) * 0.8;
+    \\            float w = exp(-0.5 * dot(k, k));
+    \\            sum += sample(p + k * blur) * w;
+    \\            total += w;
+    \\        }
+    \\    }
+    \\    return sum / total;
+    \\}
+    \\vec4 layer(vec2 position) {
+    \\    vec4 under = sample(position);
+    \\    float d = field(position);
+    \\    float cover = clamp(0.5 - d * scale, 0.0, 1.0);
+    \\    if (cover <= 0.0) return under;
+    \\    float depth = max(-d, 0.0);
+    \\    float rw = rim_width / scale;
+    \\    vec2 n = vec2(0.0, 1.0);
+    \\    if (depth < bezel || depth < 3.0 * rw) {
+    \\        float e = 0.5 / scale;
+    \\        vec2 g = vec2(field(position + vec2(e, 0.0)) - field(position - vec2(e, 0.0)), field(position + vec2(0.0, e)) - field(position - vec2(0.0, e)));
+    \\        float len = length(g);
+    \\        n = len > 0.00001 ? g / len : vec2(0.0, 1.0);
+    \\    }
+    \\    vec2 at = position;
+    \\    if (depth < bezel) at -= n * refraction * lens(depth, bezel);
+    \\    vec4 seen = frosted(at);
+    \\    vec3 c = seen.a > 0.0 ? seen.rgb / seen.a : vec3(0.0);
+    \\    float l = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    \\    float t = tone.x + (tone.y - tone.x) * (1.0 - pow(max(1.0 - l, 0.0), tone.z));
+    \\    c = clamp(vec3(t) + (c - vec3(l)) * ((tone.y - tone.x) * tone.w), vec3(0.0), vec3(1.0));
+    \\    if (tint.a > 0.0) c = mix(c, tint.rgb, tint.a);
+    \\    if (depth < 3.0 * rw) {
+    \\        float q = depth / rw;
+    \\        c = mix(c, vec3(abs(n.y)), rim * exp(-q * q));
+    \\    }
+    \\    return mix(under, vec4(c, 1.0), cover);
+    \\}
+;
+/// Most panes a glass group merges; more are left out.
+pub const max_group_panes = 8;
+/// A glass group's panes and material; see `Library.glassGroup`.
+pub const GlassGroup = struct {
+    /// Pane rectangles in DIP from the top left of the group's box.
+    panes: []const geometry.Rect,
+    /// Corner radius of each pane.
+    radius: f32 = 0,
+    /// How smoothly panes blend into one surface, in DIP: 24 bridges panes
+    /// up to about 12 DIP apart; 0 keeps them apart.
+    merge: f32 = 24,
+    style: backdrop.Style = .regular,
+    tint: ?Color = null,
+    clarity: f32 = 0,
+    dark: bool = false,
+    high_contrast: bool = false,
+};
 
 /// Where and how an element sits relative to its laid-out box. Angles are
 /// in degrees; rotations apply about `origin` (fractions of the box) in the
@@ -273,6 +385,7 @@ pub const Library = struct {
     passthrough_program: *shader.Program,
     passthrough_values: shader.Values,
     blur_program: *shader.Program,
+    group_program: *shader.Program,
     /// Largest margin a pose may claim around its box, in DIP; content
     /// moved farther is clipped.
     max_pose_margin: f32 = 128,
@@ -287,8 +400,10 @@ pub const Library = struct {
         errdefer passthrough_program.destroy();
         const blur_program = shader.compile(allocator, blur_source, .{}, &diagnostic) catch |err| return builtinFailure(err);
         errdefer blur_program.destroy();
+        const group_program = shader.compile(allocator, glass_group_source, .{ .max_steps = 16384 }, &diagnostic) catch |err| return builtinFailure(err);
+        errdefer group_program.destroy();
         const self = try allocator.create(Library);
-        self.* = .{ .allocator = allocator, .pose_program = pose_program, .glass_program = glass_program, .passthrough_program = passthrough_program, .passthrough_values = shader.Values.init(passthrough_program), .blur_program = blur_program };
+        self.* = .{ .allocator = allocator, .pose_program = pose_program, .glass_program = glass_program, .passthrough_program = passthrough_program, .passthrough_values = shader.Values.init(passthrough_program), .blur_program = blur_program, .group_program = group_program };
         return self;
     }
     fn builtinFailure(err: error{ InvalidShader, OutOfMemory }) error{OutOfMemory} {
@@ -303,17 +418,65 @@ pub const Library = struct {
         self.glass_program.destroy();
         self.passthrough_program.destroy();
         self.blur_program.destroy();
+        self.group_program.destroy();
         self.allocator.destroy(self);
     }
     /// The built-in programs and how they draw, for
     /// `Context.prepareGpuShaders`.
-    pub fn gpuShaders(self: *const Library) [4]shader_effects.GpuShader {
+    pub fn gpuShaders(self: *const Library) [5]shader_effects.GpuShader {
         return .{
             .{ .program = self.passthrough_program, .target = .element },
             .{ .program = self.pose_program, .target = .element },
             .{ .program = self.glass_program, .target = .backdrop },
             .{ .program = self.blur_program, .target = .element },
+            .{ .program = self.group_program, .target = .backdrop },
         };
+    }
+    /// A backdrop shader that draws `group`'s panes as one surface of glass
+    /// over the group's box, merging where they nearly touch, with the
+    /// material a glass pane as small as the smallest of them has (see
+    /// `backdrop.PaneMaterial`), its rim lit by higher contrast. Null when
+    /// no pane has an area. `values` receives the uniforms and must outlive
+    /// the recording call.
+    pub fn glassGroup(self: *const Library, values: *shader.Values, group: GlassGroup) !?Effect {
+        const program = self.group_program;
+        values.* = shader.Values.init(program);
+        var panes: [max_group_panes][4]f32 = @splat(.{ 0, 0, 0, 0 });
+        var count: usize = 0;
+        var smallest: f32 = std.math.floatMax(f32);
+        for (group.panes) |pane| {
+            if (count == max_group_panes) break;
+            if (!(pane.width > 0 and pane.height > 0) or !std.math.isFinite(pane.x) or !std.math.isFinite(pane.y) or !std.math.isFinite(pane.width) or !std.math.isFinite(pane.height)) continue;
+            panes[count] = .{ pane.x, pane.y, pane.width, pane.height };
+            smallest = @min(smallest, pane.width, pane.height);
+            count += 1;
+        }
+        if (count == 0) return null;
+        const material = backdrop.PaneMaterial.of(smallest, group.clarity, group.style, group.dark);
+        var rim: f32 = @floatCast(material.rim);
+        var rim_width: f32 = 1;
+        if (group.high_contrast) {
+            rim = @min(rim + 0.15, 1);
+            rim_width = 1.5;
+        }
+        const finite = struct {
+            fn of(value: f32, default: f32) f32 {
+                return if (std.math.isFinite(value)) value else default;
+            }
+        }.of;
+        try values.set(program.uniform("count").?, @as(f32, @floatFromInt(count)));
+        try values.set(program.uniform("panes").?, &panes);
+        try values.set(program.uniform("radius").?, @max(finite(group.radius, 0), 0));
+        try values.set(program.uniform("merge").?, std.math.clamp(finite(group.merge, 24), 0, 200));
+        try values.set(program.uniform("bezel").?, @as(f32, @floatCast(material.bezel)));
+        try values.set(program.uniform("refraction").?, @as(f32, @floatCast(1.6 * material.bezel)));
+        try values.set(program.uniform("rim").?, rim);
+        try values.set(program.uniform("rim_width").?, rim_width);
+        try values.set(program.uniform("blur").?, @as(f32, @floatCast(@min(material.blur, 20))));
+        try values.set(program.uniform("tone").?, [4]f32{ @floatCast(material.tone.low), @floatCast(material.tone.high), @floatCast(material.tone.curve), @floatCast(material.tone.saturation) });
+        const tint = group.tint orelse Color{ .r = 0, .g = 0, .b = 0, .a = 0 };
+        try values.set(program.uniform("tint").?, [4]f32{ @as(f32, @floatFromInt(tint.r)) / 255, @as(f32, @floatFromInt(tint.g)) / 255, @as(f32, @floatFromInt(tint.b)) / 255, @as(f32, @floatFromInt(tint.a)) / 255 * 0.88 });
+        return .{ .program = program, .values = values, .margin = @floatCast(@ceil(1.6 * material.bezel + 2 * @min(material.blur, 20) + 2)) };
     }
     /// Largest blur `blur` draws, in DIP; more blurs as much.
     pub const max_blur: f32 = 64;
@@ -388,7 +551,7 @@ test "a blur spreads its content three deviations past its box" {
     try std.testing.expectEqual(library.blur_program, effect.program);
     // Larger blurs blur as much as the largest.
     try std.testing.expectEqual(Library.max_blur * 3, (try library.blur(&values, 1000)).?.margin);
-    try std.testing.expectEqual(@as(usize, 4), library.gpuShaders().len);
+    try std.testing.expectEqual(@as(usize, 5), library.gpuShaders().len);
 }
 
 test "percents of a pose move by the box's own size" {
@@ -518,4 +681,54 @@ test "glass bends the backdrop near its rim and leaves the middle" {
     const rim = try machine.layer(.{ 1, 20 }, .{ .context = &dummy, .function = Read.position });
     try std.testing.expect(rim[0] > 0.01 + 1e-3);
     try std.testing.expectApproxEqAbs(@as(f32, 0.2), rim[1], 1e-4);
+}
+
+test "a glass group takes up to eight panes with an area and a pane's material" {
+    const library = try Library.create(std.testing.allocator);
+    defer library.destroy();
+    var values: shader.Values = undefined;
+    try std.testing.expect(try library.glassGroup(&values, .{ .panes = &.{} }) == null);
+    try std.testing.expect(try library.glassGroup(&values, .{ .panes = &.{.{ .x = 0, .y = 0, .width = 0, .height = 10 }} }) == null);
+    var many: [10]geometry.Rect = undefined;
+    for (&many, 0..) |*pane, i| pane.* = .{ .x = @floatFromInt(i * 50), .y = 0, .width = 44, .height = 44 };
+    const effect = (try library.glassGroup(&values, .{ .panes = &many, .radius = 22, .high_contrast = true })).?;
+    try std.testing.expectEqual(library.group_program, effect.program);
+    const program = library.group_program;
+    const words = values.words;
+    try std.testing.expectEqual(@as(f32, 8), @as(f32, @bitCast(words[program.uniform("count").?.offset])));
+    // A 44 DIP pane's material: a bezel of 22 and a rim lit by contrast.
+    try std.testing.expectEqual(@as(f32, 22), @as(f32, @bitCast(words[program.uniform("bezel").?.offset])));
+    try std.testing.expectApproxEqAbs(@as(f32, backdrop.rim_opacity + 0.15), @as(f32, @bitCast(words[program.uniform("rim").?.offset])), 1e-6);
+    try std.testing.expectEqual(@as(f32, 1.5), @as(f32, @bitCast(words[program.uniform("rim_width").?.offset])));
+    try std.testing.expect(effect.margin > 22);
+}
+
+test "panes of a glass group merge where they nearly touch and leave the rest" {
+    const library = try Library.create(std.testing.allocator);
+    defer library.destroy();
+    var values: shader.Values = undefined;
+    // Two panes 4 DIP apart, merged by 24 DIP, and a third far off.
+    const panes = [_]geometry.Rect{ .{ .x = 2, .y = 4, .width = 20, .height = 16 }, .{ .x = 26, .y = 4, .width = 20, .height = 16 }, .{ .x = 70, .y = 4, .width = 16, .height = 16 } };
+    const effect = (try library.glassGroup(&values, .{ .panes = &panes, .radius = 8 })).?;
+    var pixels: [96 * 24]u32 = @splat(0xff000000);
+    const surface: @import("cpu_gradient.zig").Surface = .{ .pixels = &pixels, .width = 96, .height = 24, .stride = 96, .scale = 1, .clip = .{ 0, 0, 96, 24 } };
+    const entry: shader_effects.Entry = .{ .program = effect.program, .values = values, .target = .backdrop, .box = .{ .x = 0, .y = 0, .width = 96, .height = 24 }, .margin = effect.margin };
+    const workspace = try shader_effects.Workspace.create(std.testing.allocator, .{});
+    defer workspace.destroy();
+    const scratch = try std.testing.allocator.alloc(u32, 4 * 96 * 24 * 16);
+    defer std.testing.allocator.free(scratch);
+    _ = shader_effects.applyBackdrop(surface, false, &entry, scratch, workspace);
+    const green = struct {
+        fn of(pixel: u32) u32 {
+            return (pixel >> 8) & 0xff;
+        }
+    }.of;
+    // Light glass lifts black inside a pane, and in the bridge between
+    // the two near ones, at their middle height.
+    try std.testing.expect(green(pixels[12 * 96 + 12]) > 100);
+    try std.testing.expect(green(pixels[12 * 96 + 24]) > 100);
+    // Between the second pane and the third, far apart, black stays.
+    try std.testing.expectEqual(@as(u32, 0xff000000), pixels[12 * 96 + 58]);
+    // Above the panes, the backdrop stays.
+    try std.testing.expectEqual(@as(u32, 0xff000000), pixels[1 * 96 + 12]);
 }

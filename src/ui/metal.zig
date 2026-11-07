@@ -599,7 +599,7 @@ pub const Renderer = struct {
             .tone = .{ f(shading.tone.low), f(shading.tone.high), f(shading.tone.curve), f(shading.tone.saturation) },
             .tint = .{ f(shading.tint[0]), f(shading.tint[1]), f(shading.tint[2]), f(shading.tint[3]) },
             .line = @splat(0),
-            .line2 = @splat(0),
+            .line2 = .{ 0, 0, 0, if (shading.kind == .glass) f(shading.rim_width) else 0 },
             .misc = .{ f(p.box.radius), f(shading.refraction), f(shading.bezel), f(shading.noise) },
             .misc2 = .{ f(shading.rim), if (p.mode == .fill) 3 else @floatFromInt(@backingInt(shading.kind)), @floatFromInt(target.transparent), if (shading.progressive != null) 1 else 0 },
             .background = .{ f(shading.background[0]), f(shading.background[1]), f(shading.background[2]), 0 },

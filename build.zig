@@ -1675,6 +1675,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        addSmoke(b, "smoke-input-region", "tests/input_region_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-macos-chrome", "tests/macos_chrome_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -1754,6 +1755,7 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-chrome", "tests/window_chrome_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-policy", "tests/window_policy_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-input-region", "tests/input_region_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-drawing", "tests/drawing_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -1818,6 +1820,7 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-chrome", "tests/window_chrome_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-policy", "tests/window_policy_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-input-region", "tests/input_region_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-drawing", "tests/drawing_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -3496,6 +3499,7 @@ const app_examples = [_]Example{
     .{ .name = "confetti", .path = "examples/confetti.zig", .browser = true },
     .{ .name = "effort-slider", .path = "examples/effort_slider.zig", .browser = true },
     .{ .name = "chat-glow", .path = "examples/chat_glow.zig", .browser = true },
+    .{ .name = "liquid-glass", .path = "examples/liquid_glass.zig", .browser = true },
     .{ .name = "blackhole", .path = "examples/blackhole.zig" },
     .{ .name = "wind", .path = "examples/wind.zig" },
     .{ .name = "mayoi", .path = "examples/mayoi.zig" },
