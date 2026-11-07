@@ -372,7 +372,12 @@ static NSView *content_view(NSWindow *window) {
             } else location = [view convertPoint:[parent mouseLocationOutsideOfEventStream] fromView:nil];
         } else if (kind == 2) location = NSMakePoint(x, zsm_primary_height() - y);
         else location = [NSEvent mouseLocation];
+        // A menu shown while a button is down takes its release, in its own
+        // loop: the content's press ends with none, cancelled.
+        const BOOL held = view != nil && [NSEvent pressedMouseButtons] != 0;
         [menu popUpMenuPositioningItem:nil atLocation:location inView:view];
+        SEL cancel = NSSelectorFromString(@"zigCancelPointer");
+        if (held && [view window] == parent && [view respondsToSelector:cancel]) ((void (*)(id, SEL))[view methodForSelector:cancel])(view, cancel);
     }
     open = 0;
     [self finish:chosen];

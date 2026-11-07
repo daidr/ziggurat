@@ -13,6 +13,30 @@ const Style = view.Style;
 const Error = view.Error;
 const none = md.none;
 
+pub const reveal = @import("reveal.zig");
+pub const Reveal = reveal.Reveal;
+pub const RevealState = reveal.RevealState;
+pub const RevealUnit = reveal.Unit;
+
+/// The prefix of `source`, Markdown still being written as a language
+/// model's reply, that this pass of `v` shows: text comes in as `how`
+/// says, smoothly, fading in. Parse it and build it with `Options.reveal`
+/// set to `state`; once the reply is complete, pass `streaming` false, in
+/// the same place with the same state, so that what is still to show
+/// keeps coming in. It asks for the passes it needs while text is to show
+/// or fade, and fades nothing under reduced motion.
+///
+///     const shown = markdown_view.show(v, &app.reveal, reply.text, !reply.done, .{});
+///     const tree = try markdown.parseWith(shown, app.storage.buffers(), .{});
+///     _ = try markdown_view.build(v, tree, .{ .reveal = &app.reveal }, .{});
+///     if (reply.done and app.reveal.revealed()) try v.text(reply.time, .{});
+pub fn show(v: *View, state: *RevealState, source: []const u8, streaming: bool, how: Reveal) []const u8 {
+    var next: ?u64 = null;
+    const shown = state.show(source, streaming, v.time(), v.preferences.reduce_motion, how, &next);
+    if (next) |at| v.wakeAt(at + v.frameStep());
+    return shown;
+}
+
 /// Colors that replace the ones derived from `Options.theme`.
 pub const Colors = struct {
     text: ?u32 = null,
@@ -109,6 +133,10 @@ pub const Options = struct {
     /// a sheet for a file. It clicks as the link, stays on the row of the
     /// link's first word and copies as nothing.
     link_icon: ?LinkIcon = null,
+    /// The state of a document `show` reveals, which fades in the text that
+    /// showed a moment ago: text by its runs, code blocks and rules by
+    /// their opacity. The pass counts its text into it for the next one.
+    reveal: ?*RevealState = null,
     /// Makes mentions (`@octocat`) and references to issues (`#123`), which
     /// a parse with `ParseOptions.mentions` and `references` finds, links;
     /// without it, they show as text. A mention shows in bold, as GitHub
@@ -216,6 +244,7 @@ pub fn build(v: *View, tree: md.Tree, options: Options, style: Style) Error!?Act
     try v.column(outer);
     try builder.children(0, options.width, outer.gap);
     try v.end();
+    if (options.reveal) |state| state.counted = builder.counted;
     return builder.activation;
 }
 
@@ -274,6 +303,15 @@ const Builder = struct {
     list_depth: usize = 0,
     /// The heading to scroll into view, or none.
     reveal: u32 = none,
+    /// The text built so far, in document order, which the opacity of
+    /// text fading in is told by (`Options.reveal`).
+    counted: usize = 0,
+
+    /// The opacity of the text at `at`, as `counted` counts it.
+    fn alphaAt(self: *const Builder, at: usize) f32 {
+        const state = self.options.reveal orelse return 1;
+        return state.opacity(at);
+    }
 
     /// The blocks below `parent`, nested in columns of `chunk` when long.
     fn children(self: *Builder, parent: u32, width: f32, gap: f32) Error!void {
@@ -299,7 +337,7 @@ const Builder = struct {
             .paragraph => try self.flow(index, width, self.colors.text, .body),
             .heading => try self.flow(index, width, self.colors.heading, headings[@min(node.level, 6) -| 1]),
             .thematic_break => {
-                try v.column(.{ .height = 1, .background = self.colors.rule, .self_align = .stretch });
+                try v.column(.{ .height = 1, .background = self.colors.rule, .self_align = .stretch, .opacity = self.alphaAt(self.counted) });
                 try v.end();
             },
             .block_quote => if (node.alert != .none) try self.alert(index, node.alert, width) else {
@@ -396,7 +434,9 @@ const Builder = struct {
     fn code(self: *Builder, index: u32, width: f32) Error!void {
         const v = self.v;
         const node = self.tree.get(index);
-        try v.column(.{ .padding = .all(8), .background = self.colors.code_background, .radius = 4, .clip = true, .self_align = .stretch, .max_width = width });
+        const alpha = self.alphaAt(self.counted);
+        self.counted += node.text.len;
+        try v.column(.{ .padding = .all(8), .background = self.colors.code_background, .radius = 4, .clip = true, .self_align = .stretch, .max_width = width, .opacity = alpha });
         if (self.options.code) |face| if (face.embed(face.context, self.tree, index)) |content| {
             try v.embed(content, .{});
             try v.end();
@@ -459,7 +499,10 @@ const Builder = struct {
     /// they wrap onto.
     fn flow(self: *Builder, index: u32, width: f32, color: u32, font: view.Font) Error!void {
         if (self.options.rich) |face| if (!self.resolvesBelow(index)) if (face.embed(face.context, self.tree, index, width, color)) |content| {
-            try self.v.embed(content, .{});
+            // Drawn whole: it fades in as one.
+            const alpha = self.alphaAt(self.counted);
+            self.counted += textLength(self.tree, index);
+            try self.v.embed(content, .{ .opacity = alpha });
             if (index == self.reveal) self.v.scrollIntoView(self.v.lastNode().id);
             return;
         };
@@ -505,6 +548,22 @@ fn blockCount(tree: md.Tree, parent: u32) usize {
     return count;
 }
 
+/// The bytes of text below `index` that a flow builds.
+fn textLength(tree: md.Tree, index: u32) usize {
+    var len: usize = 0;
+    var walker = tree.walk(index);
+    while (walker.next()) |event| {
+        if (!event.entering) continue;
+        const node = tree.get(event.index);
+        len += switch (node.kind) {
+            .text, .code, .math, .mention, .reference => node.text.len,
+            .soft_break => 1,
+            else => 0,
+        };
+    }
+    return len;
+}
+
 /// The first text run below `index`, borrowed from the tree.
 fn firstText(tree: md.Tree, index: u32) []const u8 {
     var walker = tree.walk(index);
@@ -543,6 +602,8 @@ const Line = struct {
     segments: usize = 0,
     /// The column rows are added to, while rows nest in chunks.
     nested: bool = false,
+    /// The opacity of the segment being added, below 1 while it fades in.
+    alpha: f32 = 1,
 
     fn measure(self: *Line, text: []const u8, code: bool) f32 {
         return self.b.options.measurer.textSize(text, self.fontFor(code)).width;
@@ -582,6 +643,10 @@ const Line = struct {
     /// Add `text` in the current style, breaking it between words, or
     /// between any two characters of CJK text.
     fn add(self: *Line, text: []const u8, code: bool) Error!void {
+        // Where the text is in the document, for its fade.
+        const base = self.b.counted;
+        self.b.counted += text.len;
+        const fades = self.b.options.reveal != null and self.b.options.reveal.?.fading();
         // A link's icon wraps with the first word after it.
         const icon_width = self.iconWidth();
         var start: usize = 0;
@@ -592,7 +657,18 @@ const Line = struct {
         var at = start;
         // Width of text[start..at], not yet added as a segment.
         var pending: f32 = icon_width;
+        self.alpha = self.b.alphaAt(base + start);
         while (at < text.len) {
+            if (fades and at > start) {
+                // Words that showed at other moments fade apart.
+                const alpha = self.b.alphaAt(base + at);
+                if (alpha != self.alpha) {
+                    try self.segment(text[start..at], code);
+                    start = at;
+                    pending = 0;
+                    self.alpha = alpha;
+                }
+            }
             const end = nextBreak(text, at);
             const visible = std.mem.trimEnd(u8, text[at..end], " ");
             const visible_width = self.measure(visible, code);
@@ -679,14 +755,14 @@ const Line = struct {
         const color_value = self.color(code);
         if (self.linked()) {
             // Code in a link keeps its face and wash.
-            const style: view.Style = if (code) .{ .font = self.fontFor(true), .background = self.b.colors.code_background, .radius = 3, .shrink = 0 } else .{ .font = self.fontFor(false), .shrink = 0 };
+            const style: view.Style = if (code) .{ .font = self.fontFor(true), .background = self.b.colors.code_background, .radius = 3, .shrink = 0, .opacity = self.alpha } else .{ .font = self.fontFor(false), .shrink = 0, .opacity = self.alpha };
             const url = self.url orelse self.b.tree.get(self.link).url;
             if (self.icon) |which| {
                 // The icon clicks as the link; it has no text to copy.
                 self.icon = null;
                 const size = self.font.size * link_icon_scale;
                 self.used += size + link_icon_gap;
-                const area = try v.pointerArea(.{}, .{ .cursor = .pointer, .shrink = 0, .padding = .{ .right = link_icon_gap } });
+                const area = try v.pointerArea(.{}, .{ .cursor = .pointer, .shrink = 0, .padding = .{ .right = link_icon_gap }, .opacity = self.alpha });
                 try v.icon(which, .{ .size = size }, .{ .color = self.b.options.theme.palette.accent });
                 try v.end();
                 if (area.clicked) self.b.activation = .{ .link = url };
@@ -697,10 +773,10 @@ const Line = struct {
                 try v.end();
             };
         } else if (code) {
-            try v.row(.{ .background = self.b.colors.code_background, .radius = 3, .padding = .{ .left = 3, .right = 3 }, .shrink = 0 });
+            try v.row(.{ .background = self.b.colors.code_background, .radius = 3, .padding = .{ .left = 3, .right = 3 }, .shrink = 0, .opacity = self.alpha });
             try v.text(text, .{ .color = color_value, .font = self.fontFor(true) });
             try v.end();
-        } else try v.text(text, .{ .color = color_value, .font = self.fontFor(false), .shrink = 0 });
+        } else try v.text(text, .{ .color = color_value, .font = self.fontFor(false), .shrink = 0, .opacity = self.alpha });
     }
     fn newLine(self: *Line) Error!void {
         if (!self.open) try self.row();
@@ -774,4 +850,5 @@ pub fn toggleTask(source: []u8, offset: usize, checked: bool) void {
 
 test {
     _ = @import("view_tests.zig");
+    _ = reveal;
 }

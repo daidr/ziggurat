@@ -460,6 +460,10 @@ test "GitHub mentions" {
     try expectReferences("@octocat@x @octocat.dev", github, "mention:@octocat");
     try expectReferences("mail me@example.com", github, "");
     try expectReferences("`@octocat` [@octocat](https://x.y) **@octocat** <@octocat>", github, "mention:@octocat mention:@octocat");
+    // Raw HTML's a, code, pre, style and script elements hold none.
+    try expectReferences("<code>@a #1</code> @b <a href=\"x>y\">@c</a> <b>@d</b> <pre/>@e", github, "mention:@b mention:@d mention:@e");
+    try expectReferences("<CODE class='x'>*@a*</code>**@b**", github, "mention:@b");
+    try expectReferences("<code>a</code> <code>@x", github, "");
     try expectReferences("é@octocat", github, "");
     try expectReferences("@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa @aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", github, "mention:@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     try expectReferences("# Hi @octocat", github, "mention:@octocat");

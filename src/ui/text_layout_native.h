@@ -6,7 +6,11 @@
 #define ZTL_LOCAL_RECTS 16
 enum { ZTL_OK=0,ZTL_FAILED=1,ZTL_CAPACITY=2,ZTL_UNICODE_UNAVAILABLE=3,ZTL_OOM=4 };
 typedef struct ZtlError {uint32_t domain;int32_t code;} ZtlError;
-typedef struct ZtlOptions {float size,width;uint32_t weight,italic,wrap,rtl;const char *family,*locale;} ZtlOptions;
+/* han_runs are runs of UTF-16 units, start and end, whose Han characters
+   take han_locale: those of text in a language that does not write them,
+   in the user's language for them. DirectWrite only. */
+typedef struct ZtlHanRun {uint32_t start,end;} ZtlHanRun;
+typedef struct ZtlOptions {float size,width;uint32_t weight,italic,wrap,rtl;const char *family,*locale,*han_locale;const ZtlHanRun *han_runs;uint32_t han_count;} ZtlOptions;
 typedef struct ZtlRect {float x,y,width,height;} ZtlRect;
 typedef struct ZtlLine {uint32_t start,end,next;float x,y,width,height,baseline;} ZtlLine;
 typedef struct ZtlMetrics {ZtlRect bounds;uint32_t lines,glyphs,missing;} ZtlMetrics;

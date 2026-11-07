@@ -60,6 +60,7 @@ extern fn zlm_window_content_protection(*anyopaque, c_int) void;
 extern fn zlm_window_attention(*anyopaque, c_int) void;
 extern fn zlm_window_chrome(*anyopaque, c_int, f64) void;
 extern fn zlm_window_material(*anyopaque, c_int, c_int) void;
+extern fn zlm_window_tint(*anyopaque, c_int, f64, f64, f64, f64) void;
 extern fn zlm_window_active_appearance(*anyopaque, c_int) void;
 extern fn zlm_window_capture(*anyopaque, *c_int, *c_int, *c_int, *?[*]const u8) ?*anyopaque;
 extern fn zlm_capture_free(*anyopaque) void;
@@ -105,6 +106,7 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
     record.native.native = zlm_window_create(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
     if (options.transparent or options.corner_radius > 0) zlm_window_chrome(record.native.native.?, @intFromBool(options.transparent), options.corner_radius);
+    if (options.vibrancy_tint) |tint| setVibrancyTint(record, tint);
     if (options.vibrancy != .none) setVibrancy(record, options.vibrancy);
     if (options.text_input_mode != .system) {
         zlm_window_text_mode(record.native.native.?, 1);
@@ -154,6 +156,12 @@ pub fn materialOf(material: core.Vibrancy) struct { material: c_int, glass: c_in
 pub fn setVibrancy(record: *core.WindowRecord, material: core.Vibrancy) void {
     const value = materialOf(material);
     zlm_window_material(record.native.native.?, value.material, value.glass);
+}
+/// Liquid Glass takes the tint, through NSGlassEffectView's tintColor;
+/// other materials keep it for when the glass shows.
+pub fn setVibrancyTint(record: *core.WindowRecord, tint: ?core.Rgba) void {
+    const color = tint orelse core.Rgba{ .r = 0, .g = 0, .b = 0, .a = 0 };
+    zlm_window_tint(record.native.native.?, @intFromBool(tint != null), @as(f64, @floatFromInt(color.r)) / 255, @as(f64, @floatFromInt(color.g)) / 255, @as(f64, @floatFromInt(color.b)) / 255, @as(f64, @floatFromInt(color.a)) / 255);
 }
 pub fn setActiveAppearance(record: *core.WindowRecord, enabled: bool) void {
     zlm_window_active_appearance(record.native.native.?, @intFromBool(enabled));

@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+static void han_language(WCHAR out[86]);
 #include "brushes.h"
 #include "image_resource.h"
 #include "coverage_resource.h"
@@ -43,6 +44,10 @@ typedef struct State {
     IDWriteFactory *text_factory;
     IDWriteTextFormat *format;
     IDWriteInlineObject *ellipsis;
+    /* The language of Han characters, which the default locale would draw
+       in another language's font: the first of the user's preferred
+       languages that writes them, when the locale does not; empty else. */
+    WCHAR han[86];
     /* Formats for fonts other than the default, created on first use and
        replaced oldest first. */
     IDWriteTextFormat *variants[8];
@@ -312,6 +317,7 @@ static State *create_renderer(int driver,GpuDomain *domain,int offscreen,HRESULT
     *out = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, &IID_IDWriteFactory, (IUnknown **)&s->text_factory);
     OWN(s->text_factory);
     if (FAILED(*out)) goto failed;
+    han_language(s->han);
     *out = IDWriteFactory_CreateTextFormat(s->text_factory, L"Segoe UI", NULL, DWRITE_FONT_WEIGHT_NORMAL,
         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"", &s->format);
     OWN(s->format);
@@ -615,6 +621,47 @@ void zgpu_geometry_stats(State *s,uint32_t *creations,uint32_t *evictions,uint32
     *creations=s->geometry_creations;*evictions=s->geometry_evictions;*cached=0;
     for(unsigned i=0;i<GEOMETRY_CAPACITY;i++)if(s->shapes[i].path)(*cached)++;
 }
+/* Whether a language writes Han characters: Chinese, with its languages of
+   other codes, Japanese and Korean (ziggurat_text_layout's han.writesHan). */
+static int writes_han(const WCHAR *lang){
+    static const char *names[]={"zh","ja","ko","yue","cmn","wuu","hak","nan","gan","hsn","lzh","cjy","cpx","czh","czo","mnp","cdo"};
+    uint32_t end=0;while(lang[end]&&lang[end]!='-'&&lang[end]!='_')end++;
+    for(uint32_t i=0;i<sizeof names/sizeof names[0];i++){
+        const char *name=names[i];uint32_t k=0;
+        while(k<end&&name[k]&&(lang[k]|0x20)==name[k])k++;
+        if(k==end&&!name[k])return 1;
+    }
+    return 0;
+}
+/* A Han character, or a mark of punctuation or a full-width form that the
+   languages writing Han draw apart (han.isCjk). */
+static int is_han(uint32_t r){
+    return (r>=0x3000&&r<=0x303f)||(r>=0xff00&&r<=0xffef)||(r>=0x2e80&&r<=0x2fdf)||(r>=0x31c0&&r<=0x31ef)||(r>=0x3400&&r<=0x4dbf)||(r>=0x4e00&&r<=0x9fff)||(r>=0xf900&&r<=0xfaff)||r==0x16fe2||r==0x16fe3||r==0x16ff0||r==0x16ff1||(r>=0x20000&&r<=0x3134f);
+}
+static uint32_t scalar_at(const WCHAR *text,uint32_t len,uint32_t i,uint32_t *units){
+    *units=1;
+    if(text[i]>=0xd800&&text[i]<0xdc00&&i+1<len&&text[i+1]>=0xdc00&&text[i+1]<0xe000){*units=2;return 0x10000+(((uint32_t)text[i]-0xd800)<<10)+((uint32_t)text[i+1]-0xdc00);}
+    return text[i];
+}
+static int has_han(const WCHAR *text,uint32_t len){
+    for(uint32_t i=0;i<len;){uint32_t k=1;if(is_han(scalar_at(text,len,i,&k)))return 1;i+=k;}
+    return 0;
+}
+/* The first of the user's preferred languages that writes Han characters,
+   when the locale of their regional formats, which text formats without a
+   locale fall back by, does not (han.userLanguage); empty else. */
+static void han_language(WCHAR out[86]){
+    out[0]=0;
+    WCHAR locale[LOCALE_NAME_MAX_LENGTH];
+    if(GetUserDefaultLocaleName(locale,LOCALE_NAME_MAX_LENGTH)>0&&writes_han(locale))return;
+    ULONG count=0,size=0;
+    if(!GetUserPreferredUILanguages(MUI_LANGUAGE_NAME,&count,NULL,&size)||!size||size>4096)return;
+    WCHAR *list=HeapAlloc(GetProcessHeap(),0,size*sizeof(WCHAR));if(!list)return;
+    if(GetUserPreferredUILanguages(MUI_LANGUAGE_NAME,&count,list,&size)){
+        for(WCHAR *lang=list;*lang;lang+=wcslen(lang)+1)if(writes_han(lang)){size_t n=wcslen(lang);if(n<86){memcpy(out,lang,(n+1)*sizeof(WCHAR));}break;}
+    }
+    HeapFree(GetProcessHeap(),0,list);
+}
 static void release_variants(State *s){for(uint32_t i=0;i<8;i++){DROP(s->variants[i]);s->variant_keys[i]=0;}s->variant_next=0;}
 IDWriteFontCollection *zfont_collection(IDWriteFactory *factory,uint64_t *seen,IDWriteFontCollection **cache);
 /* The text format for a font key (see commands.FontKey); the default format
@@ -641,7 +688,27 @@ static IDWriteTextFormat *variant_format(State *s,uint32_t key,float size,uint16
 void zgpu_text(State *s, float x, float y, float width, float height, uint32_t rgb, const WCHAR *text, uint32_t len, uint32_t key, float size, uint16_t weight, int italic, int monospace, const WCHAR *family) {
     const D2D1_RECT_F r = rectangle(x,y,width,height);
     brush_color(s, rgb);
-    ID2D1RenderTarget_DrawText(RT(s), text, len, variant_format(s,key,size,weight,italic,monospace,family), &r, (ID2D1Brush *)s->brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    IDWriteTextFormat *format=variant_format(s,key,size,weight,italic,monospace,family);
+    /* Han characters in the locale, when it does not write them, take the
+       user's language for them: DirectWrite's fallback for English draws
+       Chinese in a Japanese font where it has the characters and in a
+       Traditional Chinese one where it lacks them. */
+    if(s->han[0]&&has_han(text,len)){
+        IDWriteTextLayout *layout=NULL;
+        if(SUCCEEDED(IDWriteFactory_CreateTextLayout(s->text_factory,text,len,format,r.right-r.left,r.bottom-r.top,&layout))&&layout){
+            for(uint32_t i=0;i<len;){
+                uint32_t n=0;while(i+n<len){uint32_t k=1,cp=scalar_at(text,len,i+n,&k);if(!is_han(cp))break;n+=k;}
+                if(n){DWRITE_TEXT_RANGE range={i,n};IDWriteTextLayout_SetLocaleName(layout,s->han,range);i+=n;continue;}
+                uint32_t k=1;(void)scalar_at(text,len,i,&k);i+=k;
+            }
+            D2D1_POINT_2F origin={r.left,r.top};
+            ID2D1RenderTarget_DrawTextLayout(RT(s),origin,layout,(ID2D1Brush *)s->brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            IDWriteTextLayout_Release(layout);
+            return;
+        }
+        if(layout)IDWriteTextLayout_Release(layout);
+    }
+    ID2D1RenderTarget_DrawText(RT(s), text, len, format, &r, (ID2D1Brush *)s->brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 }
 typedef struct PreparedClip {float x,y,width,height;} PreparedClip;
 float zgpu_scale(State *s){return s->dpi/96.0f;}

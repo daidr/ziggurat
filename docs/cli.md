@@ -4,7 +4,7 @@
 
 ```text
 ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
-ziggurat dev [--web [--port PORT]] [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
+ziggurat dev [--web [--port PORT]] [--sign IDENTITY] [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
 ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
 ziggurat package setup|deb|pkgbuild|app|install-script|install-ps1 --zip PACKAGE ...
 ziggurat publish DIR (--github OWNER/REPO --tag TAG ... | --s3 BUCKET --url BASE ...)
@@ -32,6 +32,8 @@ ziggurat doctor [--webview]
 ## dev
 
 先运行 `zig build`，成功后把安装出的可执行文件作为自己的子进程启动。每 300 ms 比较 `src/`、`build.zig`、`build.zig.zon` 与 `--watch` 目录中文件的路径、大小和修改时间（跳过点目录、`zig-out` 和 `node_modules`）；变化时终止应用并重新构建，构建失败则等待下一次变化。`--frontend` 用系统 shell 启动前端监视命令，退出时一并结束。
+
+在 macOS 上运行的是开发版应用：名为“NAME Dev”、标识为 `IDENTITY.dev`（数据、偏好设置与单实例锁和正式版分开）的 `.app`，每次构建写到 `.ziggurat/dev/macos-ARCH`。它像 Xcode 签 Debug 构建一样用钥匙串里的 Apple Development 身份签名（旧名 Mac Developer 也可以；有多个时取 `macos.signingIdentity` 所在团队的，否则第一个），不加强化运行时与时间戳。这样的签名每次构建都相同，macOS 便记得用户给它的辅助功能、屏幕录制等权限和钥匙串里“始终允许”的条目；没有这样的身份时改为 ad hoc 签名并提示如何获取（Xcode 的 设置 > 账户 > 管理证书 可为 Apple ID 免费生成），ad hoc 签名每次构建都会变，macOS 会把每次构建当作另一个应用重新询问。`--sign` 指定别的身份，`--sign -` 强制 ad hoc。设置了 `macos.provisioningProfile` 时需要用 `--sign` 给出描述文件对应的身份。
 
 `--web` 改为面向浏览器：以 `-Dtarget=wasm32-wasi` 构建，在 `http://localhost:5174`（`--port` 可改，只监听 127.0.0.1）提供 `zig-out/web` 并打开系统浏览器；提供的 HTML 页面注入一小段脚本，每 500 ms 询问 `/__ziggurat/build`，重新构建成功后页面自己刷新。见 [浏览器](browsers.md)。轮询只发生在开发命令中，与应用的空闲路径无关。
 

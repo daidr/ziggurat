@@ -112,6 +112,13 @@ typedef struct NativeWindow {
        material. frameless hides the title bar and its buttons. keep_active
        is setActiveAppearance's. */
     NSView *container,*effect;int glass,clear,transparent,frameless,shadow_stale,keep_active;double radius;
+    /* glass_clear tells that the glass made an opaque window clear
+       (clear_for_glass), its color waiting in backing, retained, for the
+       glass to go. */
+    int glass_clear;NSColor *backing;
+    /* The glass's tint (retained), nil for none: only NSGlassEffectView
+       takes one. */
+    NSColor *tint;
     /* The popup this window is modal to (retained): it shows as the
        popup's child window at its level, not as a sheet, which would hang
        from the popup, no wider than it. */
@@ -205,6 +212,9 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 }
 
 @implementation ZigView
+/* Ends the content's press without a release: a menu popped up while a
+   button was down took the release in its own loop (macos_menu.m). */
+- (void)zigCancelPointer{NativeWindow *s=native;if(!s||s->destroyed)return;NativeEvent cancel={0};cancel.kind=8;emit(s,&cancel);}
 - (void)dealloc{[zigAccessibility release];[zigDrop release];[super dealloc];}
 - (void)setZigDropTarget:(id<NSDraggingDestination>)target{[target retain];[zigDrop release];zigDrop=target;}
 - (id<NSDraggingDestination>)zigDropTarget{return zigDrop;}
@@ -643,7 +653,7 @@ int zlm_window_destroy(NativeWindow *s){
         NSWindow *parent=[window parentWindow];if(parent)[parent removeChildWindow:window];
         [window orderOut:nil];[window close];
         if(s->over_popup){release_window(s->over_popup);s->over_popup=NULL;}
-        [s->view release];[s->delegate release];[s->effect release];[s->container release];[window release];
+        [s->view release];[s->delegate release];[s->effect release];[s->container release];[s->backing release];s->backing=nil;[s->tint release];s->tint=nil;[window release];
         s->view=nil;s->delegate=nil;s->effect=nil;s->container=nil;s->window=nil;
     }
     if(owner){NativeEvent event={0};event.kind=11;s->emit(owner,&event);}
@@ -946,6 +956,56 @@ void zlm_window_attention(NativeWindow *s,int enabled){
     if(enabled&&![NSApp isActive])attention_request=[NSApp requestUserAttention:NSInformationalRequest];
 }
 
+/* Makes a window that is not transparent clear while it shows the glass.
+   NSGlassEffectView draws what is under it in the window, which is the
+   window's own color in an opaque one, a solid gray, where
+   NSVisualEffectView blends with what is behind the window. A rounded
+   window is clear already (zlmw_round), its corners cut. */
+static void clear_for_glass(NativeWindow *s){
+    if(s->glass_clear||s->transparent)return;
+    s->glass_clear=1;
+    if(s->radius>0)return;
+    [s->backing release];s->backing=[[s->window backgroundColor] retain];
+    [s->window setOpaque:NO];
+    [s->window setBackgroundColor:[NSColor clearColor]];
+    [s->window invalidateShadow];
+}
+/* Gives the window back the color clear_for_glass took, once the glass is
+   removed or swapped for another material. */
+static void restore_backing(NativeWindow *s){
+    if(!s->glass_clear)return;
+    s->glass_clear=0;
+    if(s->backing&&!s->transparent&&s->radius<=0){
+        [s->window setBackgroundColor:s->backing];
+        [s->window setOpaque:YES];
+        [s->window invalidateShadow];
+    }
+    [s->backing release];s->backing=nil;
+}
+/* NSGlassEffectView's tint, looked up by name as the class is. */
+@interface NSView (ZigguratGlassTint)
+- (void)setTintColor:(NSColor *)color;
+- (NSColor *)tintColor;
+@end
+static void apply_tint(NativeWindow *s){
+    if(s->effect&&s->glass&&[s->effect respondsToSelector:@selector(setTintColor:)])[s->effect setTintColor:s->tint];
+}
+/* Tints the glass, `has` false removing the tint; other materials take
+   none, and keep it for when the glass shows. */
+void zlm_window_tint(NativeWindow *s,int has,double r,double g,double b,double a){
+    if(s->destroyed)return;
+    @autoreleasepool{
+        [s->tint release];
+        s->tint=has?[[NSColor colorWithSRGBRed:r green:g blue:b alpha:a] retain]:nil;
+        apply_tint(s);
+    }
+}
+/* Test hook: the alpha of the glass's tint, or -1 without one. */
+double zlm_test_tint(NativeWindow *s){
+    if(!s->effect||!s->glass||![s->effect respondsToSelector:@selector(tintColor)])return -1;
+    NSColor *color=[s->effect tintColor];
+    return color?[color alphaComponent]:-1;
+}
 static void update_clear(NativeWindow *s){
     s->clear=s->transparent||s->effect!=nil;
     [s->view setNeedsDisplay:YES];
@@ -957,6 +1017,7 @@ void zlm_window_chrome(NativeWindow *s,int transparent,double radius){
     @autoreleasepool{
         if(transparent){[s->window setOpaque:NO];[s->window setBackgroundColor:[NSColor clearColor]];s->transparent=1;}
         if(radius>0&&s->frameless){s->radius=radius;zlmw_round(s->window,s->container,s->effect,s->glass,radius);}
+        if(s->glass&&s->effect)clear_for_glass(s);
         update_clear(s);
     }
 }
@@ -968,6 +1029,8 @@ void zlm_window_material(NativeWindow *s,int material,int glass_style){
     if(s->destroyed)return;
     @autoreleasepool{
         s->effect=zlmw_set_material(s->container,s->view,s->effect,&s->glass,s->radius,material,glass_style,s->keep_active||s->popup);
+        if(s->effect&&s->glass)clear_for_glass(s);else restore_backing(s);
+        apply_tint(s);
         update_clear(s);
     }
 }
