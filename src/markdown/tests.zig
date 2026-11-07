@@ -388,3 +388,127 @@ test "emphasis opens and closes next to CJK text" {
     try expectHtml("He said “*hello*” to me.", "<p>He said “<em>hello</em>” to me.</p>\n");
     try expectHtml("**Alice**’s and **Bob**’s toys", "<p><strong>Alice</strong>’s and <strong>Bob</strong>’s toys</p>\n");
 }
+
+fn expectGithubHtml(source: []const u8, expected: []const u8) !void {
+    const tree = try md.parseWith(source, storage.buffers(), md.ParseOptions.github);
+    var out: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    try md.html.write(tree, &writer);
+    std.testing.expectEqualStrings(expected, writer.buffered()) catch |err| {
+        std.debug.print("source:\n{s}\n", .{source});
+        return err;
+    };
+}
+
+test "GitHub alerts" {
+    const note = "<div class=\"markdown-alert markdown-alert-note\">\n<p class=\"markdown-alert-title\">Note</p>\n";
+    try expectGithubHtml("> [!NOTE]\n> Body.", note ++ "<p>Body.</p>\n</div>\n");
+    try expectGithubHtml("> [!TIP]\n> a\n\n> [!IMPORTANT]\n> a\n\n> [!WARNING]\n> a\n\n> [!CAUTION]\n> a", "<div class=\"markdown-alert markdown-alert-tip\">\n<p class=\"markdown-alert-title\">Tip</p>\n<p>a</p>\n</div>\n" ++
+        "<div class=\"markdown-alert markdown-alert-important\">\n<p class=\"markdown-alert-title\">Important</p>\n<p>a</p>\n</div>\n" ++
+        "<div class=\"markdown-alert markdown-alert-warning\">\n<p class=\"markdown-alert-title\">Warning</p>\n<p>a</p>\n</div>\n" ++
+        "<div class=\"markdown-alert markdown-alert-caution\">\n<p class=\"markdown-alert-title\">Caution</p>\n<p>a</p>\n</div>\n");
+    try expectGithubHtml("> [!note]\n> Body.", note ++ "<p>Body.</p>\n</div>\n");
+    try expectGithubHtml(">  [!NOTE]   \n> Body.", note ++ "<p>Body.</p>\n</div>\n");
+    try expectGithubHtml(">\n> [!NOTE]\n> Body.", note ++ "<p>Body.</p>\n</div>\n");
+    try expectGithubHtml("> [!NOTE]\nlazy line", note ++ "<p>lazy line</p>\n</div>\n");
+    try expectGithubHtml("> [!NOTE]\n>\n> Body.", note ++ "<p>Body.</p>\n</div>\n");
+    try expectGithubHtml("> [!NOTE]\n> - one", note ++ "<ul>\n<li>one</li>\n</ul>\n</div>\n");
+    try expectGithubHtml("> [!NOTE]\n> [!TIP]\n> Body.", note ++ "<p>[!TIP]\nBody.</p>\n</div>\n");
+    try expectGithubHtml("> [!NOTE]\n>\n> [!TIP]\n> x", note ++ "<p>[!TIP]\nx</p>\n</div>\n");
+    try expectGithubHtml("> [!NOTE] Body.", "<blockquote>\n<p>[!NOTE] Body.</p>\n</blockquote>\n");
+    try expectGithubHtml("> [!TIP]", "<blockquote>\n<p>[!TIP]</p>\n</blockquote>\n");
+    try expectGithubHtml("> [!FOO]\n> Body.", "<blockquote>\n<p>[!FOO]\nBody.</p>\n</blockquote>\n");
+    try expectGithubHtml("> > [!NOTE]\n> > Body.", "<blockquote>\n<blockquote>\n<p>[!NOTE]\nBody.</p>\n</blockquote>\n</blockquote>\n");
+    try expectGithubHtml("> a\n> [!NOTE]\n> Body.", "<blockquote>\n<p>a\n[!NOTE]\nBody.</p>\n</blockquote>\n");
+    try expectGithubHtml("> [!NOTE]\n>\n> [a]: /u", "<blockquote>\n<p>[!NOTE]</p>\n</blockquote>\n");
+    // Without the option, an alert is a quote.
+    try expectHtml("> [!NOTE]\n> Body.", "<blockquote>\n<p>[!NOTE]\nBody.</p>\n</blockquote>\n");
+}
+
+/// The mentions and references of `source`, each as `kind:text`.
+fn expectReferences(source: []const u8, options: md.ParseOptions, expected: []const u8) !void {
+    const tree = try md.parseWith(source, storage.buffers(), options);
+    var out: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    for (tree.nodes, 0..) |node, index| {
+        if (node.kind != .mention and node.kind != .reference) continue;
+        // Only nodes still in the tree.
+        if (!reachable(tree, @intCast(index))) continue;
+        if (writer.buffered().len > 0) try writer.writeByte(' ');
+        try writer.print("{s}:{s}", .{ @tagName(node.kind), node.text });
+    }
+    std.testing.expectEqualStrings(expected, writer.buffered()) catch |err| {
+        std.debug.print("source: {s}\n", .{source});
+        return err;
+    };
+}
+
+fn reachable(tree: md.Tree, index: u32) bool {
+    var walker = tree.walk(0);
+    while (walker.next()) |event| if (event.index == index) return true;
+    return false;
+}
+
+test "GitHub mentions" {
+    const github = md.ParseOptions.github;
+    try expectReferences("hi @octocat and @hubot.", github, "mention:@octocat mention:@hubot");
+    try expectReferences("foo@octocat x@y _@octocat", github, "");
+    try expectReferences("(@a) \"@b\" /@c .@d", github, "mention:@a mention:@b mention:@c mention:@d");
+    try expectReferences("@a, @b! @c? @d: @e.", github, "mention:@a mention:@b mention:@c mention:@d mention:@e");
+    try expectReferences("@foo- @foo_bar @-foo", github, "mention:@foo-");
+    try expectReferences("cc @github/docs", github, "mention:@github/docs");
+    try expectReferences("@octocat@x @octocat.dev", github, "mention:@octocat");
+    try expectReferences("mail me@example.com", github, "");
+    try expectReferences("`@octocat` [@octocat](https://x.y) **@octocat** <@octocat>", github, "mention:@octocat mention:@octocat");
+    try expectReferences("é@octocat", github, "");
+    try expectReferences("@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa @aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", github, "mention:@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    try expectReferences("# Hi @octocat", github, "mention:@octocat");
+    try expectReferences("_a_@octocat **b**@octocat", github, "mention:@octocat mention:@octocat");
+    try expectReferences("&#64;octocat", github, "mention:@octocat");
+    try expectReferences("hi @octocat #1", .{ .references = true }, "reference:#1");
+}
+
+test "GitHub references" {
+    const github = md.ParseOptions.github;
+    try expectReferences("see #874, (#871). a#874 #874abc #874. #0", github, "reference:#874 reference:#871 reference:#874");
+    try expectReferences("GH-874 gh-874 xGH-1", github, "reference:GH-874 reference:gh-874");
+    try expectReferences("octocat/hello-world#12 (b/c_d.e#3) (a.b/c#3)", github, "reference:octocat/hello-world#12 reference:b/c_d.e#3");
+    try expectReferences("x.org/a/b#1 /a/b#1 _#874", github, "");
+    try expectReferences("`#1` [#1](u) *#1*", github, "reference:#1");
+    try expectReferences("#12345678901 #1234567890", github, "reference:#1234567890");
+    try expectReferences("_a_#1 me@x.com#2 #3#4", github, "reference:#1 reference:#2 reference:#3");
+    try expectReferences("hi @octocat #1", .{ .mentions = true }, "mention:@octocat");
+    // They read as text in HTML and in plain text.
+    try expectGithubHtml("cc @octocat on #12", "<p>cc @octocat on #12</p>\n");
+}
+
+test "logins and references of nodes" {
+    const tree = try md.parseWith("@octocat @github/docs #12 GH-7 octocat/hello#3", storage.buffers(), md.ParseOptions.github);
+    var logins: [8][]const u8 = undefined;
+    var refs: [8]md.Reference = undefined;
+    var login_len: usize = 0;
+    var ref_len: usize = 0;
+    var walker = tree.walk(0);
+    while (walker.next()) |event| switch (tree.get(event.index).kind) {
+        .mention => {
+            logins[login_len] = tree.login(event.index);
+            login_len += 1;
+        },
+        .reference => {
+            refs[ref_len] = tree.reference(event.index).?;
+            ref_len += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), login_len);
+    try std.testing.expectEqualStrings("octocat", logins[0]);
+    try std.testing.expectEqualStrings("github/docs", logins[1]);
+    try std.testing.expectEqual(@as(usize, 3), ref_len);
+    try std.testing.expectEqual(@as(u64, 12), refs[0].number);
+    try std.testing.expectEqualStrings("", refs[0].repository);
+    try std.testing.expectEqual(@as(u64, 7), refs[1].number);
+    try std.testing.expectEqualStrings("octocat/hello", refs[2].repository);
+    try std.testing.expectEqual(@as(u64, 3), refs[2].number);
+    var text: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("@octocat @github/docs #12 GH-7 octocat/hello#3", tree.plainText(1, &text));
+}

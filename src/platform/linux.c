@@ -37,6 +37,8 @@ typedef struct NativeWindow {
     ZlgContentHost *content;
     ZlgRegionLayer *regions;
     gboolean content_busy;
+    /* The pointer passes through the window to what is beneath it. */
+    gboolean ignore_pointer;
     void *owner;
     Emit emit;
     gboolean destroyed, preedit;
@@ -1410,12 +1412,40 @@ int zlg_window_traits(NativeWindow *s, int resizable, int movable, int minimizab
     int result=s->destroyed?2:0; release(s); return result;
 }
 void zlg_window_opacity(NativeWindow *s, double opacity) { retain(s);gtk_widget_set_opacity(s->window,opacity);release(s); }
-/* An empty input shape lets the pointer reach the windows below. */
+/* An empty input shape lets the pointer reach the windows below, under
+   X11 and Wayland, layer surfaces included. GTK keeps the widget's shape
+   for when it realizes; it is set on the GdkWindow too, again as the
+   window maps and as its size changes, since client-side decorations set
+   an input shape of their own then. Wayland takes the shape with the
+   surface's next commit, so a frame is drawn for it. */
+static void apply_ignore_pointer(NativeWindow *s) {
+    if (s->destroyed) return;
+    cairo_region_t *empty=s->ignore_pointer?cairo_region_create():NULL;
+    gtk_widget_input_shape_combine_region(s->window,empty);
+    GdkWindow *native=gtk_widget_get_window(s->window);
+    if (native) gdk_window_input_shape_combine_region(native,empty,0,0);
+    if (empty) cairo_region_destroy(empty);
+    gtk_widget_queue_draw(s->area);
+}
+static void ignore_pointer_again(GtkWidget *widget, gpointer data) {
+    (void)widget;
+    NativeWindow *s=data;
+    if (s->ignore_pointer) apply_ignore_pointer(s);
+}
+static void ignore_pointer_allocated(GtkWidget *widget, GdkRectangle *allocation, gpointer data) {
+    (void)allocation;
+    ignore_pointer_again(widget,data);
+}
 void zlg_window_ignore_pointer(NativeWindow *s, int enabled) {
     retain(s);
-    cairo_region_t *empty=enabled?cairo_region_create():NULL;
-    gtk_widget_input_shape_combine_region(s->window,empty);
-    if (empty) cairo_region_destroy(empty);
+    if (!s->destroyed && enabled && !g_object_get_data(G_OBJECT(s->window),"ziggurat-ignore-pointer")) {
+        g_object_set_data(G_OBJECT(s->window),"ziggurat-ignore-pointer",GINT_TO_POINTER(1));
+        g_signal_connect_after(s->window,"realize",G_CALLBACK(ignore_pointer_again),s);
+        g_signal_connect_after(s->window,"map",G_CALLBACK(ignore_pointer_again),s);
+        g_signal_connect_after(s->window,"size-allocate",G_CALLBACK(ignore_pointer_allocated),s);
+    }
+    s->ignore_pointer=enabled!=0;
+    apply_ignore_pointer(s);
     release(s);
 }
 void zlg_window_urgent(NativeWindow *s, int enabled) { retain(s);gtk_window_set_urgency_hint(GTK_WINDOW(s->window),enabled);release(s); }

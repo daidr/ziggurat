@@ -26,7 +26,7 @@ root/
 
 `package.json` 必须匹配 identity、target、四段版本，列出除自身之外的完整文件集合、大小和 SHA-256，并指定实际存在的 executable。该格式与 `scripts/package.ps1` 一致；额外包元数据可以扩展。归档和清单的哈希都通过后，payload 文件同步落盘，版本目录整体移入 `releases`，最后原子替换 `current.json`。
 
-旧版本目录和用户数据不被覆盖。发布前重新读取当前 marker，阻止旧进程把更新版本覆盖回去。两个更新器竞争返回 `UpdateInProgress`。若进程在版本目录移动后、marker 发布前中断，重试会比较已有目录的完整文件集合和逐字节内容，仅在与新验签 stage 完全相同后复用目录并重试 marker；不一致返回 `ReleaseContentMismatch`。进程被终止可能留下私有 staging 目录，宿主可以在确认没有更新任务时清理；模块不自动删除旧版本。
+旧版本目录和用户数据不被覆盖。每个版本解压在自己的目录里，只含 package.json 列出的文件，所以新版本不再带的文件不会残留在运行的版本中，不需要单独的已安装文件清单。发布前重新读取当前 marker，阻止旧进程把更新版本覆盖回去。两个更新器竞争返回 `UpdateInProgress`。若进程在版本目录移动后、marker 发布前中断，重试会比较已有目录的完整文件集合和逐字节内容，仅在与新验签 stage 完全相同后复用目录并重试 marker；不一致返回 `ReleaseContentMismatch`。进程被终止可能留下私有 staging 目录，宿主可以在确认没有更新任务时清理；模块不自动删除旧版本。
 
 `readCurrent` 返回受约束的相对路径与版本，供宿主启动器选择版本。marker 所在目录由应用保护，它本身不是抵御本地目录篡改的认证边界。原子文件切换不等于对所有文件系统的断电持久性保证。更新器不会自动终止正在运行的程序，也不覆盖 Windows 正在运行的 EXE。
 
@@ -66,6 +66,8 @@ root/
 有自己更新服务、需要用户凭据的接口或运行时切换通道的应用，可以给 `FeedBackend` 一个 `UpdateSource`（`Config.source`，或运行时 `FeedBackend.setSource`，传 null 恢复 `Config.feed`）：`feed(context, allocator, prereleases)` 返回发布索引（`release` 写出的 feed.json，至多 1 MiB），`files` 是下载归档与补丁的 `download.Source`，按索引里的 URL 取文件。两者都在后台工作线程上调用。来源只替换传输：解析与上限、大小、对构建内公钥的签名校验、暂存与发布都与默认索引相同，未用该公钥签名的版本或补丁被拒绝，应用保持原样。一次安装沿用找到该版本的那次检查的来源与通道。
 
 默认的 HTTP 传输以固定的 `ziggurat-updater` 作为 User-Agent，不带应用名：有的发布主机对含非 ASCII 字节的 User-Agent 返回 400。
+
+短暂的失败会重试：`http.get` 与 `http.Source` 遇到网络错误或 429、500、502、503、504 时，分别在 1 秒和 3 秒后再请求，共三次；服务器给出秒数形式的 `Retry-After` 时至少等待该时长（上限 30 秒），日期形式忽略。其他状态（如 404）立即失败，返回最后一次的错误。`http.Retry` 可改延迟序列，`cancel` 指向取消标志时等待随取消结束；`FeedBackend` 把它接到用户的取消上。
 
 ## 命令行工具
 

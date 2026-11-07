@@ -217,7 +217,7 @@ pub const FeedBackend = struct {
             if (bytes.len > update.feed.max_feed_bytes) return error.FeedTooLarge;
             return bytes;
         }
-        if (std.mem.startsWith(u8, self.config.feed, "https://")) return update.http.get(allocator, client, self.config.feed, update.feed.max_feed_bytes);
+        if (std.mem.startsWith(u8, self.config.feed, "https://")) return update.http.getRetrying(allocator, client, self.config.feed, update.feed.max_feed_bytes, .{ .cancel = &self.control.cancelled });
         return std.Io.Dir.cwd().readFileAlloc(zio.io(), self.config.feed, allocator, .limited(update.feed.max_feed_bytes));
     }
 
@@ -273,6 +273,7 @@ pub const FeedBackend = struct {
         var downloads = try install_root.createDirPathOpen(zio.io(), "downloads", .{ .open_options = .{ .follow_symlinks = false } });
         defer downloads.close(zio.io());
         var http_source: update.http.Source = .init(&client);
+        http_source.retry.cancel = &self.control.cancelled;
         const files = if (self.job_source) |source| source.files else http_source.source();
         const v = self.version;
         const archive_name = try std.fmt.allocPrint(allocator, "{s}-{d}.{d}.{d}.{d}.zip", .{ self.config.target, v.major, v.minor, v.patch, v.revision });

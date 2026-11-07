@@ -1464,6 +1464,33 @@ HRESULT zwv_process_id(State *s,uint32_t *pid) {
     if (SUCCEEDED(hr)) *pid=value;
     return hr;
 }
+/* The GPU process of the web view's environment, which its web views
+   share, from ICoreWebView2Environment8's GetProcessInfos; 0 on runtimes
+   older than it and while the environment runs no GPU process. */
+HRESULT zwv_gpu_process_id(State *s,uint32_t *pid) {
+    *pid=0;
+    if (s->closed || s->recovering || !s->webview || !s->environment) return E_ABORT;
+    ICoreWebView2Environment8 *environment=NULL;
+    if (FAILED(ICoreWebView2Environment_QueryInterface(s->environment,&IID_ICoreWebView2Environment8,(void **)&environment)) || !environment) return S_OK;
+    ICoreWebView2ProcessInfoCollection *infos=NULL;
+    HRESULT hr=ICoreWebView2Environment8_GetProcessInfos(environment,&infos);
+    ICoreWebView2Environment8_Release(environment);
+    if (FAILED(hr) || !infos) return S_OK;
+    UINT32 count=0;
+    if (SUCCEEDED(ICoreWebView2ProcessInfoCollection_get_Count(infos,&count))) {
+        for (UINT32 i=0;i<count && !*pid;i++) {
+            ICoreWebView2ProcessInfo *info=NULL;
+            if (FAILED(ICoreWebView2ProcessInfoCollection_GetValueAtIndex(infos,i,&info)) || !info) continue;
+            COREWEBVIEW2_PROCESS_KIND kind;
+            INT32 value=0;
+            if (SUCCEEDED(ICoreWebView2ProcessInfo_get_Kind(info,&kind)) && kind==COREWEBVIEW2_PROCESS_KIND_GPU &&
+                SUCCEEDED(ICoreWebView2ProcessInfo_get_ProcessId(info,&value)) && value>0) *pid=(uint32_t)value;
+            ICoreWebView2ProcessInfo_Release(info);
+        }
+    }
+    ICoreWebView2ProcessInfoCollection_Release(infos);
+    return S_OK;
+}
 HRESULT zwv_zoom(State *s,double *value,_Bool set) {
     if (s->closed || s->recovering || !s->controller) return E_ABORT;
     if (set) {

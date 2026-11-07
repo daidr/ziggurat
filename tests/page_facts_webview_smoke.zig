@@ -147,6 +147,11 @@ const Probe = struct {
         }
         const pid = self.view.processId() catch |err| return self.fail(err);
         if ((pid != null) == linux) return self.fail(error.WrongProcessId);
+        // The GPU process starts when a page first needs it, so only Linux,
+        // which has no API for it, is sure.
+        const gpu = self.view.gpuProcessId() catch |err| return self.fail(err);
+        if (linux and gpu != null) return self.fail(error.WrongProcessId);
+        if (gpu) |id| if (pid) |process| if (id == process) return self.fail(error.WrongProcessId);
         if (self.step == .untrusted) {
             if (self.messages != 1) return self.fail(error.TrustedMessageMissing);
             self.step = .done;

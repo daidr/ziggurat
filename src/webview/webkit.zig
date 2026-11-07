@@ -210,6 +210,8 @@ pub extern fn zwk_evaluate(*anyopaque, [*:0]const u8, u64) c_int;
 pub extern fn zwk_evaluate_cancel(*anyopaque, u64) void;
 pub extern fn zwk_post(*anyopaque, [*:0]const u8) c_int;
 pub extern fn zwk_zoom(*anyopaque, *f64, c_int) c_int;
+/// macOS only: the page's web content and GPU processes, 0 when unknown.
+pub extern fn zwk_process_ids(*anyopaque, *u32, *u32) c_int;
 pub extern fn zwk_user_agent(*anyopaque, ?[*:0]const u8, ?*?[*:0]u8) c_int;
 pub extern fn zwk_devtools(*anyopaque, c_int, ?*c_int, ?*c_int) c_int;
 pub extern fn zwk_devtools_counts(*u32) void;

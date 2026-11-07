@@ -789,6 +789,7 @@ extern fn zwv_audio(*anyopaque, c_int, *c_int) i32;
 const ContentVerdict = *const fn (*anyopaque, [*:0]const u16, ?[*:0]const u16, c_int) callconv(.c) u32;
 extern fn zwv_content_rules(*anyopaque, ?ContentVerdict, ?[*:0]const u16) i32;
 extern fn zwv_process_id(*anyopaque, *u32) i32;
+extern fn zwv_gpu_process_id(*anyopaque, *u32) i32;
 extern fn zwv_user_agent(*anyopaque, ?[*:0]const u16, ?*?[*:0]u16) i32;
 extern fn zwv_string_free([*:0]u16) void;
 extern fn zwv_document_source(*anyopaque, *?[*:0]u16) i32;
@@ -3866,14 +3867,45 @@ pub const View = struct {
     /// The operating system's process that runs the page, for an app's own
     /// task manager or memory report; null when unknown. Windows: WebView2's
     /// browser process, which the app's views share and whose children
-    /// render the pages. Linux: WebKitGTK has no API for it, always null.
+    /// render the pages. macOS: the page's web content process, from
+    /// WebKit's private `_webProcessIdentifier`, null while WebKit runs none
+    /// for it. Linux: WebKitGTK has no API for it, always null.
     pub fn processId(self: *View) !?u32 {
         _ = try self.propertyWindow();
-        if (is_webkit) return null;
+        if (is_webkit and @import("builtin").os.tag != .macos) return null;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         var pid: u32 = 0;
-        try self.propertyResult(zwv_process_id(self.native.?, &pid));
+        if (is_webkit) {
+            var gpu: u32 = 0;
+            try webkit.check(webkit.zwk_process_ids(self.native.?, &pid, &gpu));
+        } else try self.propertyResult(zwv_process_id(self.native.?, &pid));
+        return if (pid == 0) null else pid;
+    }
+    /// The operating system's process that does the page's graphics and
+    /// media; null when unknown. On macOS it is WebKit's GPU process
+    /// (com.apple.WebKit.GPU), which plays the page's audio and video, so
+    /// an app showing what a page plays can capture it with a Core Audio
+    /// process tap (macOS 14.2 and later), from WebKit's private
+    /// `_gpuProcessIdentifier`: null until WebKit starts it, which it does
+    /// once a page first plays media or draws with the GPU. On Windows it
+    /// is WebView2's GPU process, a child of `processId`'s browser process,
+    /// from `ICoreWebView2Environment8.GetProcessInfos`, null on runtimes
+    /// without it; WebView2's sound comes from its audio service, a utility
+    /// process, so capture the tree of `processId`'s process for that.
+    /// Linux: WebKitGTK has no API for it, always null. The app's views
+    /// may share the process, and it gets a new ID whenever the web view
+    /// starts it again, so ask again rather than keep it.
+    pub fn gpuProcessId(self: *View) !?u32 {
+        _ = try self.propertyWindow();
+        if (is_webkit and @import("builtin").os.tag != .macos) return null;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        var pid: u32 = 0;
+        if (is_webkit) {
+            var web: u32 = 0;
+            try webkit.check(webkit.zwk_process_ids(self.native.?, &web, &pid));
+        } else try self.propertyResult(zwv_gpu_process_id(self.native.?, &pid));
         return if (pid == 0) null else pid;
     }
     /// A fact the page's script told; false when the event is gone stale.

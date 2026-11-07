@@ -370,3 +370,27 @@ test "a link's icon starts its text, clicks as the link and keeps to its first w
     try h.render();
     try equalStrings("https://example.com", doc.last.?.link);
 }
+
+test "alerts show their title, and resolved mentions and references are links" {
+    const Resolver = struct {
+        fn destination(_: *anyopaque, tree: md.Tree, index: u32) ?[]const u8 {
+            if (tree.get(index).kind == .mention) return if (std.mem.eql(u8, tree.login(index), "octocat")) "/people/octocat" else null;
+            return if (tree.reference(index).?.number == 12) "/issues/12" else null;
+        }
+    };
+    var context: u8 = 0;
+    var doc: Doc = .{ .tree = try md.parseWith("> [!WARNING]\n> Mind @octocat on #12, not @nobody on #13.", parsed.buffers(), md.ParseOptions.github) };
+    var h = harness(&doc);
+    try h.render();
+    _ = try h.find(.{ .kind = .text, .text = "Warning" });
+    // Without a resolver, they are text.
+    try equal(@as(usize, 0), h.count(.{ .kind = .link }));
+    doc.options.resolve = .{ .context = &context, .destination = Resolver.destination };
+    try h.render();
+    try equal(@as(usize, 2), h.count(.{ .kind = .link }));
+    try h.click(.{ .kind = .link, .text = "@octocat" });
+    try equalStrings("/people/octocat", doc.last.?.link);
+    try h.click(.{ .kind = .link, .text = "#12" });
+    try equalStrings("/issues/12", doc.last.?.link);
+    _ = try h.find(.{ .kind = .text, .text = "@nobody" });
+}

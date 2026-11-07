@@ -41,6 +41,16 @@ fn build(self: *Reader, v: *view.View) anyerror!void {
 
 
 
+### GitHub 提示块、提及与引用
+
+`ParseOptions` 的 `alerts`、`mentions`、`references` 分别读取 GitHub 评论里的三种写法，`ParseOptions.github` 同时打开三者，默认都关闭：
+
+- 提示块：顶层块引用的第一行单独是 `[!NOTE]`、`[!TIP]`、`[!IMPORTANT]`、`[!WARNING]` 或 `[!CAUTION]`（不区分大小写，两侧可有空格或 Tab；之前可以有空的引用行）时，这个块引用的 `alert` 是对应种类，标记行不属于它的内容，正文从下一行开始。标记独占一段且后面还有块时也是提示块；整个引用只有标记、标记后还有文字（`> [!NOTE] 正文`）、未知种类、嵌套在列表或其他引用里，或标记前已有文字时，仍是普通块引用。`Alert.title()` 给出 GitHub 显示的标题。HTML 输出与 GitHub 相同的 `markdown-alert` div，不含图标。
+- 提及：`@octocat` 与 `@github/docs` 是 `.mention` 节点，`Tree.login` 返回 `octocat` 或 `github/docs`。登录名是字母、数字与连字符（以字母或数字开头，最多 39 个），前面不能紧挨单词字符，后面不能紧跟单词或“点加单词”（所以 `me@example.com`、`@octocat.dev` 不是提及）。
+- 引用：`#123`、`GH-123`（不区分大小写）与 `octocat/hello#123` 是 `.reference` 节点，`Tree.reference` 返回仓库（本仓库为空）与编号。编号 1 到 10 位、不以 0 开头，后面不能紧跟单词。
+
+提及与引用只在代码、链接和图片之外的文本里识别，与 GitHub 一样：强调结束后紧挨的位置算作单词开头（`_a_#1`、`**b**@octocat` 会识别），实体或转义写出的 `&#64;octocat` 也会识别。原始 HTML 按字面保留，因此 `<code>@x</code>` 里的 `@x` 也会被识别，这是与 GitHub 不同之处。它们在 HTML 与 `plainText` 中按原文输出：是否存在、链接到哪里由视图决定。
+
 块容器（块引用、列表、列表项）最多嵌套 32 层，更深的标记作为文本保留而不是报错。行内解析每个块最多跟踪 256 个分隔符和 64 个方括号，超出的部分保持字面文本，因此病态输入的工作量随输入线性增长。
 
 ## 视图
@@ -56,6 +66,12 @@ fn build(self: *Reader, v: *view.View) anyerror!void {
 映射：标题与段落是文字行；块引用是左侧竖条加内容列；列表是标记列（`•`、`◦`、`▪` 按层级，或 `1.`/`1)` 编号）加内容列，紧凑列表的间距取 `tight_gap`；分隔线是 1 DIP 高的条；表格每行是等宽列的 `grid`，表头行带底色，单元格按列对齐；行内代码放在带底色的小行容器里；图片显示替代文字。
 
 不使用富文本嵌入（`options.rich`）时，字体通过 `Style.font` 表达：标题按级别使用 `.heading1` 到 `.heading6`，表头为半粗体，正文用标签字体；强调是斜体，加粗是粗体（已是粗体的标题保持不变），两者可以叠加；行内代码与回退显示的代码块行使用等宽字体，行内代码的字号按 `.code` 与正文的比例随所在块缩放。折行按各段文字的实际字体测量，所以标题会比正文更早换行。链接沿用所在块的字体（标题里的链接是标题字号，加粗里的链接是粗体），`options.link_weight` 给链接文字设最低字重（默认 `.regular` 不设下限），已经更粗的保持不变，使链接在灰度主题或色觉障碍读者面前不只靠颜色区分；链接里的行内代码保留等宽字体与底色，字重随链接一起提升。删除线没有对应的字体变体，以 `strikethrough` 颜色区分。颜色默认取自 `options.theme` 的调色板，可以用 `options.colors` 逐项替换；强调与加粗默认使用正文颜色。
+
+### 提示块与提及链接
+
+提示块显示为左侧竖条、图标和标题都取该种类颜色的块引用，正文保持正文颜色。颜色默认是 GitHub 的配色（按 `options.theme` 背景的明暗取浅色或深色版本），可用 `options.colors.alerts` 按 note、tip、important、warning、caution 的顺序替换；图标是 `view.Icon` 的 `info`、`light_bulb`、`report`、`warning` 与 `stop`。
+
+`options.resolve`（`Resolve{ context, destination }`）把提及与引用变成链接：`destination(context, tree, index)` 返回目的地（例如应用内的路径），激活时作为 `.link` 交付，与普通链接相同；返回 null 时保持文字，如同 GitHub 对不认识的人或 issue 的处理。没有 `resolve` 时它们都是文字。提及链接以粗体显示。每次构建都会对显示的每个提及与引用调用一次，应查询手头已有的数据（例如一张表），查询结果变化时下一遍自然跟随。含有已解析链接的块不交给 `options.rich`，而用视图文字与链接构建。
 
 ### 锚点
 
