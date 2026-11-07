@@ -463,3 +463,46 @@ test "layers of masks make one mask: a ring of the content box excluded from the
     try testing.expectEqual(@as(u8, 0), at(coverage, x0 + 60, y0 + 20));
     try testing.expectEqual(@as(u8, 255), at(coverage, x0 + 60, y0 + 0));
 }
+
+const Interactive = struct {
+    state: view.GlassInteraction = .{},
+    last: ui.backdrop_effects.Glass = .{},
+    fn build(self: *Interactive, v: *View) anyerror!void {
+        try v.column(.{ .padding = view.Insets.all(20) });
+        self.last = try self.state.glass(v, .{ .tint = .{ .r = 0, .g = 120, .b = 255, .a = 80 } });
+        const area = try v.pointerArea(.{}, .{ .width = 120, .height = 40, .radius = 20, .material = .{ .glass = self.last } });
+        try v.text("Glass", .{});
+        try v.end();
+        try self.state.follow(v, area);
+        try v.end();
+    }
+};
+
+test "an interactive glass lights as the pointer hovers it and grows as it is pressed" {
+    var storage: Storage = .{};
+    var app: Interactive = .{};
+    var h = Harness.init(&app, Interactive.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.render();
+    try testing.expectEqual(@as(f32, 0), app.last.hover);
+    try h.hoverAt(100, 60);
+    // Lit within 120 ms, a pass at a time.
+    try h.advance(60 * std.time.ns_per_ms);
+    try testing.expect(app.last.hover > 0 and app.last.hover < 1);
+    try testing.expect(app.state.moving());
+    try h.advance(100 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(f32, 1), app.last.hover);
+    try testing.expectEqual(@as(f32, 0), app.last.press);
+    try h.press(100, 60, .{});
+    try h.advance(200 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(f32, 1), app.last.press);
+    try testing.expect(app.last.tint != null);
+    try h.release(100, 60);
+    try h.hoverAt(400, 400);
+    try h.advance(200 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(f32, 0), app.last.press);
+    try testing.expectEqual(@as(f32, 0), app.last.hover);
+    try testing.expect(!app.state.moving());
+}

@@ -161,3 +161,28 @@ test "an app with an all-windows-closed handler keeps running without windows" {
     try app.run();
     try equal(2, probe.calls);
 }
+
+test "an input region reaches the backend as a copy without empty rectangles" {
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    const window = try app.createWindow(.{ .decoration = .borderless, .transparent = true });
+    const native = &record(window).native;
+    try expect(native.input_region == null and (try window.inputRegion()) == null);
+    var rects = [_]z.Rect{ .{ .x = 10, .y = 80, .width = 120, .height = 140 }, .{ .x = 0, .y = 0, .width = 0, .height = 40 }, .{ .x = 5, .y = 5, .width = 160, .height = -1 }, .{ .x = 0, .y = 0, .width = std.math.nan(f32), .height = 4 }, .{ .x = 0, .y = 0, .width = 200, .height = 60 } };
+    try window.setInputRegion(&rects);
+    rects[0].x = 99; // the caller's slice is its own
+    try std.testing.expectEqualSlices(z.Rect, &.{ .{ .x = 10, .y = 80, .width = 120, .height = 140 }, .{ .x = 0, .y = 0, .width = 200, .height = 60 } }, native.input_region.?);
+    try equal(1, native.input_region_updates);
+    // The same region again changes nothing.
+    try window.setInputRegion(&.{ .{ .x = 10, .y = 80, .width = 120, .height = 140 }, .{ .x = 0, .y = 0, .width = 200, .height = 60 } });
+    try equal(1, native.input_region_updates);
+    try window.setInputRegion(&.{.{ .x = 0, .y = 0, .width = 0, .height = 10 }});
+    try expect(native.input_region != null and native.input_region.?.len == 0);
+    try window.setInputRegion(null);
+    try expect(native.input_region == null and (try window.inputRegion()) == null);
+    try equal(3, native.input_region_updates);
+    try window.setInputRegion(&.{.{ .x = 1, .y = 2, .width = 3, .height = 4 }});
+    // The window frees what it keeps as it closes.
+    try equal(z.CloseResult.closed, try window.requestCloseFrom(.user));
+    try std.testing.expectError(error.Closed, window.setInputRegion(null));
+}

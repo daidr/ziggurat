@@ -35,6 +35,7 @@
 | `confetti` | [confetti.zig](../examples/confetti.zig) | 纸屑：CPU 上逐帧模拟与绘制到 `ui.PixelImage`，在绘制之外提交，覆盖整个窗口 |
 | `effort-slider` | [effort_slider.zig](../examples/effort_slider.zig) | 分档“努力程度”滑块：从 Low 到 Max 再到 Galaxy，拇指为矢量轮廓画出的大脑，超过 Max 时爆开、卡片抖动、轨道闪烁；拖动、点击轨道、方向键与 Home/End；卡片在 CPU 上绘制到 `ui.PixelImage` |
 | `chat-glow` | [chat_glow.zig](../examples/chat_glow.zig) | 带流光边缘的聊天：CPU 绘制的光球、头像与输入框光环，Oklab 锥形渐变，逐词流出的回复与停止 |
+| `liquid-glass` | [liquid_glass.zig](../examples/liquid_glass.zig) | 彩色背景上的玻璃：三种清透度的面板、悬停变亮按下变大的交互玻璃、边角随间距融合的玻璃组（滑块调间距），macOS 上窗口自己的 Liquid Glass 与着色切换 |
 | `blackhole` | [blackhole.zig](../examples/blackhole.zig) | CPU 光线追踪的史瓦西黑洞：渲染线程 + 线程池分行、泛光与收尾处理、按渲染时间自适应分辨率，拖动/甩动/缩放视角 |
 | `wind` | [wind.zig](../examples/wind.zig) | 风中的字符场：系统等宽字体轮廓生成图集，场、单元与字形三遍在 CPU 上计算；指针扰动、点击涟漪、Ctrl+R 换种子 |
 | `mayoi` | [mayoi.zig](../examples/mayoi.zig) | 幸存者小游戏：代码绘制的像素画以原分辨率合成到 `ui.PixelImage`、静态图片 HUD 图标、合成音效与流式播放的 lo-fi 曲子、手柄、暂停与升级选择 |

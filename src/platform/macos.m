@@ -123,12 +123,19 @@ typedef struct NativeWindow {
        popup's child window at its level, not as a sheet, which would hang
        from the popup, no wider than it. */
     struct NativeWindow *over_popup;
+    /* ignore_mouse is setIgnorePointer's; region (region_count rectangles
+       of four doubles, DIP from the content's top left, owned) is
+       setInputRegion's while has_region, the window then on the list of
+       region_next; ignoring is whether the window lets the mouse through,
+       as either set it last. */
+    int ignore_mouse,ignoring,has_region;double *region;size_t region_count;struct NativeWindow *region_next;
 } NativeWindow;
+static void region_follow(NativeWindow *s);static void region_unlist(NativeWindow *s);static void region_watch(void);
 enum {POPUP=1,POPUP_FOCUSABLE=2,POPUP_TOPMOST=4};
 
 static void retain_window(NativeWindow *s){s->refs++;}
 static atomic_uint live_windows;
-static void release_window(NativeWindow *s){if(--s->refs==0){[s->marked release];[s->cursor release];free(s);atomic_fetch_sub(&live_windows,1);}}
+static void release_window(NativeWindow *s){if(--s->refs==0){[s->marked release];[s->cursor release];free(s->region);free(s);atomic_fetch_sub(&live_windows,1);}}
 static int emit(NativeWindow *s,NativeEvent *event){retain_window(s);int result=0;if(s->owner&&!s->destroyed)result=s->emit(s->owner,event);release_window(s);return result;}
 static uint32_t modifiers(NSEventModifierFlags flags){
     return ((flags&NSEventModifierFlagShift)?1u:0u)|((flags&NSEventModifierFlagControl)?2u:0u)|((flags&NSEventModifierFlagOption)?4u:0u)|((flags&NSEventModifierFlagCommand)?8u:0u);
@@ -263,7 +270,10 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 - (void)viewDidChangeBackingProperties{[super viewDidChangeBackingProperties];if(native)notify_size(native);}
 - (void)updateTrackingAreas{
     for(NSTrackingArea *area in [self trackingAreas])[self removeTrackingArea:area];
-    NSTrackingArea *area=[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved|NSTrackingActiveInKeyWindow|NSTrackingInVisibleRect owner:self userInfo:nil];
+    /* A window with an input region follows the pointer's moves over it
+       while the app is not active too (region_follow). */
+    NSTrackingAreaOptions active=native&&native->has_region?NSTrackingActiveAlways:NSTrackingActiveInKeyWindow;
+    NSTrackingArea *area=[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved|active|NSTrackingInVisibleRect owner:self userInfo:nil];
     [self addTrackingArea:area];[area release];[super updateTrackingAreas];
 }
 - (NSPoint)local:(NSEvent *)event{return [self convertPoint:[event locationInWindow] fromView:nil];}
@@ -570,9 +580,9 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
 
 @implementation ZigDelegate
 - (BOOL)windowShouldClose:(NSWindow *)window{(void)window;NativeWindow *s=native;if(s){NativeEvent close={0};close.kind=10;emit(s,&close);}return NO;}
-- (void)windowDidResize:(NSNotification *)note{(void)note;NativeWindow *s=native;if(s){notify_size(s);notify_state(s);}}
+- (void)windowDidResize:(NSNotification *)note{(void)note;NativeWindow *s=native;if(s){region_follow(s);notify_size(s);notify_state(s);}}
 - (void)windowWillMove:(NSNotification *)note{zlmw_drag_will_move([note object]);}
-- (void)windowDidMove:(NSNotification *)note{(void)note;NativeWindow *s=native;if(s){NativeEvent moved={0};moved.kind=22;emit(s,&moved);}}
+- (void)windowDidMove:(NSNotification *)note{(void)note;NativeWindow *s=native;if(s){region_follow(s);NativeEvent moved={0};moved.kind=22;emit(s,&moved);}}
 - (void)windowDidBecomeKey:(NSNotification *)note{(void)note;NativeWindow *s=native;if(!s)return;NativeEvent focus={0};focus.kind=7;focus.flags=1;emit(s,&focus);notify_state(s);}
 - (void)windowDidResignKey:(NSNotification *)note{
     (void)note;NativeWindow *s=native;if(!s)return;retain_window(s);
@@ -653,6 +663,7 @@ int zlm_window_destroy(NativeWindow *s){
         NSWindow *parent=[window parentWindow];if(parent)[parent removeChildWindow:window];
         [window orderOut:nil];[window close];
         if(s->over_popup){release_window(s->over_popup);s->over_popup=NULL;}
+        if(s->has_region){s->has_region=0;region_unlist(s);region_watch();}
         [s->view release];[s->delegate release];[s->effect release];[s->container release];[s->backing release];s->backing=nil;[s->tint release];s->tint=nil;[window release];
         s->view=nil;s->delegate=nil;s->effect=nil;s->container=nil;s->window=nil;
     }
@@ -945,7 +956,80 @@ int zlm_window_traits(NativeWindow *s,int resizable,int movable,int minimizable,
     return 0;
 }
 void zlm_window_opacity(NativeWindow *s,float value){[s->window setAlphaValue:value];}
-void zlm_window_ignore_pointer(NativeWindow *s,int enabled){[s->window setIgnoresMouseEvents:enabled];}
+/* An input region (setInputRegion) lets the mouse through a window but
+   where its rectangles are, as a desktop pet's window lets clicks through
+   to the apps under it but on its character. AppKit has no such region:
+   the window server hands a press to the window under it, and a window
+   takes the mouse everywhere or nowhere (ignoresMouseEvents). Hit testing
+   in the window (hitTest:) cannot help, since the window server already
+   gave the press to the app: it never goes on to another app's window.
+
+   So the window lets the mouse through while the pointer is outside the
+   region and takes it while the pointer is in it, switched as the pointer
+   moves, before the press comes: a press then goes where the pointer is,
+   as it would through a region. The moves come from two monitors, which
+   only observe: the global one sees those the window server sends other
+   apps, as while the window lets the mouse through, and the local one
+   those this app gets, as while it takes it, which the content view's
+   tracking area, active always while the window has a region, asks for
+   over the window when the app is not active. The pointer is read as it
+   is now (mouseLocation), not where the event says it was. A button held
+   keeps the window as it is, so a drag that started on the character ends
+   there, as one that started under the window ends there, and its release
+   settles it. A window moving or resizing under a still pointer follows
+   it too, and so does a new region. The monitors exist only while a window
+   has a region: a global monitor of moves wakes the app at every move of
+   the mouse over other apps. */
+static NativeWindow *region_windows;
+static id region_global,region_local;
+static int region_contains(const NativeWindow *s,double x,double y){
+    for(size_t i=0;i<s->region_count;i++){const double *r=s->region+i*4;if(x>=r[0]&&y>=r[1]&&x<r[0]+r[2]&&y<r[1]+r[3])return 1;}
+    return 0;
+}
+static void region_follow(NativeWindow *s){
+    if(!s||s->destroyed||s->ignore_mouse||!s->has_region)return;
+    NSPoint p=[NSEvent mouseLocation];
+    NSRect c=[s->window contentRectForFrameRect:[s->window frame]];
+    int held=[NSEvent pressedMouseButtons]!=0;
+    /* AppKit's y goes up from the bottom of the content. */
+    int through=held?s->ignoring:!region_contains(s,p.x-c.origin.x,c.origin.y+c.size.height-p.y);
+    if(through!=s->ignoring){s->ignoring=through;[s->window setIgnoresMouseEvents:through];}
+}
+static void region_moved(void){for(NativeWindow *s=region_windows;s;s=s->region_next)region_follow(s);}
+/* Watches the pointer while a window has an input region, and stops once
+   none has. */
+static void region_watch(void){
+    if((region_windows!=NULL)==(region_global!=nil))return;
+    if(!region_windows){
+        [NSEvent removeMonitor:region_global];[NSEvent removeMonitor:region_local];
+        [region_global release];[region_local release];region_global=region_local=nil;return;
+    }
+    const NSEventMask mask=NSEventMaskMouseMoved|NSEventMaskLeftMouseUp|NSEventMaskRightMouseUp|NSEventMaskOtherMouseUp;
+    region_global=[[NSEvent addGlobalMonitorForEventsMatchingMask:mask handler:^(NSEvent *event){(void)event;region_moved();}] retain];
+    region_local=[[NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent *(NSEvent *event){region_moved();return event;}] retain];
+}
+static void region_unlist(NativeWindow *s){
+    for(NativeWindow **at=&region_windows;*at;at=&(*at)->region_next)if(*at==s){*at=s->region_next;s->region_next=NULL;release_window(s);break;}
+}
+void zlm_window_ignore_pointer(NativeWindow *s,int enabled){
+    s->ignore_mouse=enabled;s->ignoring=enabled;[s->window setIgnoresMouseEvents:enabled];
+    region_follow(s); /* false gives the region back the mouse */
+}
+/* rects holds x, y, width, height in DIP from the content's top left; has
+   0 gives the window all of it back. */
+void zlm_window_input_region(NativeWindow *s,const double *rects,size_t count,int has){
+    if(s->destroyed)return;
+    const int had=s->has_region;
+    free(s->region);s->region=NULL;s->region_count=0;s->has_region=has!=0;
+    if(has&&count){s->region=malloc(count*4*sizeof(double));if(s->region){memcpy(s->region,rects,count*4*sizeof(double));s->region_count=count;}}
+    if(has&&!had){retain_window(s);s->region_next=region_windows;region_windows=s;[s->view updateTrackingAreas];}
+    else if(!has&&had){
+        region_unlist(s);[s->view updateTrackingAreas];
+        if(!s->ignore_mouse&&s->ignoring){s->ignoring=0;[s->window setIgnoresMouseEvents:NO];}
+    }
+    region_watch();
+    region_follow(s);
+}
 void zlm_window_content_protection(NativeWindow *s,int enabled){[s->window setSharingType:enabled?NSWindowSharingNone:NSWindowSharingReadOnly];}
 /* Bounces the Dock icon until the app is active; a request per window
    would need the window to own it, which macOS does not offer. */
@@ -1105,3 +1189,17 @@ void zlm_test_click(NativeWindow *s,double x,double y,int how){
 }
 /* AppKit's terminate:, as the Dock menu's Quit sends it. */
 void zlm_test_terminate(void){@autoreleasepool{[NSApp terminate:nil];}}
+/* Moves the pointer to x, y in DIP from the content's top left of a window
+   with an input region and has the window follow it, as a move would;
+   returns whether it then lets the mouse through, or -1 when the pointer
+   cannot be moved. */
+int zlm_test_input_region_through(NativeWindow *s,double x,double y){@autoreleasepool{
+    NSRect c=[s->window contentRectForFrameRect:[s->window frame]];
+    NSScreen *main=[[NSScreen screens] firstObject];if(!main)return -1;
+    /* Quartz's global y goes down from the top of the main display. */
+    CGPoint at=CGPointMake(c.origin.x+x,NSMaxY([main frame])-(c.origin.y+c.size.height-y));
+    if(CGWarpMouseCursorPosition(at)!=kCGErrorSuccess)return -1;
+    CGAssociateMouseAndMouseCursorPosition(true);
+    region_follow(s);
+    return [s->window ignoresMouseEvents]?1:0;
+}}

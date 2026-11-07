@@ -194,6 +194,15 @@ pub const Style = struct {
     /// painted in place of `material` and `background` once
     /// `Host.prepareShaderEffects` has run; until then those draw.
     refraction: ?ui.effects.Glass = null,
+    /// One surface of glass behind the panes inside this container (nodes
+    /// with `glass_pane`), merging where they nearly touch, as AppKit's
+    /// glass effect container draws them, in place of `material` and
+    /// `background`. The panes keep their own backgrounds, borders and
+    /// hit areas. It draws once `Host.prepareShaderEffects` has run; until
+    /// then, and with Reduce Transparency, each pane is its own glass.
+    glass_group: ?GlassGroup = null,
+    /// A pane of the glass group around this node (`glass_group`).
+    glass_pane: bool = false,
     /// Opacity of the node and its descendants, composited as one layer.
     opacity: f32 = 1,
     /// Blur the node and its descendants as one layer, as a Gaussian of
@@ -743,6 +752,67 @@ pub const Presence = struct {
     }
 };
 
+/// An interactive glass: it grows a little as it is pressed and lights its
+/// rim as the pointer hovers it, within 150 ms and 120 ms, as AppKit's
+/// interactive glass does. Kept by the application at a stable address
+/// across passes, it follows a pointer area over the glass:
+///
+///     const area = try v.pointerArea(.{}, .{ .material = .{ .glass = try state.glass(v, base) }, .radius = 18 });
+///     ... children ...
+///     try v.end();
+///     try state.follow(v, area);
+///
+/// `glass` gives `base` the press and hover of the pass, and `follow`
+/// aims them at what the pointer does over the area, which the next pass
+/// shows, asking for passes while they move.
+pub const GlassInteraction = struct {
+    press: ?animation.Channel = null,
+    hover: ?animation.Channel = null,
+    pressed: bool = false,
+    hovered: bool = false,
+
+    /// `base` pressed and hovered as of this pass.
+    pub fn glass(self: *GlassInteraction, v: *View, base: ui.backdrop_effects.Glass) Error!ui.backdrop_effects.Glass {
+        var result = base;
+        result.press = @floatCast(try sample(&self.press, v));
+        result.hover = @floatCast(try sample(&self.hover, v));
+        if (self.moving()) v.wakeAt(v.now + v.frameStep());
+        return result;
+    }
+    /// Aims the glass at the press and hover of `area`.
+    pub fn follow(self: *GlassInteraction, v: *View, area: PointerArea) Error!void {
+        try aim(&self.press, &self.pressed, area.pressed, v, 150);
+        try aim(&self.hover, &self.hovered, area.hovered, v, 120);
+        if (self.moving()) v.wakeAt(v.now + v.frameStep());
+    }
+    /// True while the glass grows, shrinks or lights.
+    pub fn moving(self: *const GlassInteraction) bool {
+        inline for (.{ self.press, self.hover }) |channel| if (channel) |value| if (value.run != null) return true;
+        return false;
+    }
+    fn sample(channel: *?animation.Channel, v: *View) Error!f64 {
+        const value = if (channel.*) |*c| c else return 0;
+        if (value.reduce_motion != v.preferences.reduce_motion) value.setReducedMotion(v.now, v.preferences.reduce_motion) catch return error.InvalidValue;
+        return std.math.clamp((value.advance(v.now) catch return error.InvalidValue).value, 0, 1);
+    }
+    fn aim(channel: *?animation.Channel, current: *bool, wanted: bool, v: *View, ms: u64) Error!void {
+        if (channel.* == null) channel.* = animation.Channel.init(0) catch return error.InvalidValue;
+        if (current.* == wanted) return;
+        current.* = wanted;
+        channel.*.?.retarget(v.now, if (wanted) 1 else 0, .{ .motion = .{ .tween = .{ .duration_ns = ms * std.time.ns_per_ms } } }) catch return error.InvalidValue;
+    }
+};
+/// The glass of a `Style.glass_group`: up to eight panes merge.
+pub const GlassGroup = struct {
+    style: ui.backdrop_effects.Style = .regular,
+    tint: ?ui.Color = null,
+    clarity: f32 = 0,
+    /// The corners of each pane, in DIP.
+    radius: f32 = 0,
+    /// How smoothly panes blend into one surface, in DIP: 24 bridges panes
+    /// up to about 12 DIP apart; 0 keeps them apart.
+    merge: f32 = 24,
+};
 /// Edge effects of a clipping container; see `Style.edges`.
 pub const Edges = struct {
     top: ?ui.backdrop_effects.ScrollEdge = null,
@@ -755,8 +825,9 @@ pub const Edges = struct {
 pub const Preferences = struct {
     /// Loading indicators hold a still pose and schedule no frames.
     reduce_motion: bool = false,
-    /// Backdrop effects draw opaque fills.
+    /// Backdrop effects and refraction draw opaque fills.
     reduce_transparency: bool = false,
+    /// Glass lights its rim brighter and wider; opaque fills are outlined.
     high_contrast: bool = false,
     /// What the pointing devices can do, as Media Queries 4's `pointer`,
     /// `any-pointer`, `hover` and `any-hover`, whose zero is a mouse's:
@@ -7175,7 +7246,7 @@ pub const View = struct {
                         },
                         else => {},
                     }
-                    if (try self.paintRefraction(target, style, bounds)) {} else if (style.material) |material| target.material(bounds, style.radius, material) else if (node.kind != .toast) {
+                    if (try self.paintGlassGroup(target, all, at, style, bounds)) {} else if (try self.paintRefraction(target, style, bounds)) {} else if (style.material) |material| target.material(bounds, style.radius, material) else if (node.kind != .toast) {
                         if (style.gradient) |fill| paintGradient(target, bounds, style.radius, null, fill) else if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color)) else if (style.theme) |inner| {
                             // A themed scope fills with its theme, as the root
                             // does with the window's.
@@ -7723,10 +7794,37 @@ pub const View = struct {
         return opened;
     }
     /// Paint a container's refraction, true when it replaces the fill.
+    /// Paint a container's glass group behind its panes, true when it
+    /// replaces the fill.
+    fn paintGlassGroup(self: *const View, target: anytype, all: []const Node, at: usize, style: Style, bounds: Rect) !bool {
+        const group = style.glass_group orelse return false;
+        var panes: [ui.effects.max_group_panes]Rect = undefined;
+        var count: usize = 0;
+        var index = at + 1;
+        while (index < all[at].end and count < panes.len) : (index += 1) {
+            const node = &all[index];
+            if (!node.style.glass_pane or node.hidden() or !(node.bounds.width > 0 and node.bounds.height > 0)) continue;
+            panes[count] = .{ .x = node.bounds.x - bounds.x, .y = node.bounds.y - bounds.y, .width = node.bounds.width, .height = node.bounds.height };
+            count += 1;
+        }
+        if (count == 0) return true;
+        const glass: ui.backdrop_effects.Glass = .{ .style = group.style, .tint = group.tint, .clarity = group.clarity };
+        const library = self.effects;
+        if (library == null or self.preferences.reduce_transparency) {
+            // Each pane its own glass, or the opaque surface asked for.
+            for (panes[0..count]) |pane| target.material(.{ .x = bounds.x + pane.x, .y = bounds.y + pane.y, .width = pane.width, .height = pane.height }, group.radius, .{ .glass = glass });
+            return true;
+        }
+        const dark = if (@TypeOf(target) == *ui.Frame) ui.backdrop_effects.isDark(target.currentTheme().palette.background) else false;
+        var values: ui.shader.Values = undefined;
+        const effect = try library.?.glassGroup(&values, .{ .panes = panes[0..count], .radius = group.radius, .merge = group.merge, .style = group.style, .tint = group.tint, .clarity = group.clarity, .dark = dark, .high_contrast = self.preferences.high_contrast });
+        if (effect) |value| target.backdropShader(bounds, 0, value);
+        return true;
+    }
     fn paintRefraction(self: *const View, target: anytype, style: Style, bounds: Rect) !bool {
         const glass = style.refraction orelse return false;
         const library = self.effects orelse return false;
-        if (self.preferences.reduce_transparency or self.preferences.high_contrast) return false;
+        if (self.preferences.reduce_transparency) return false;
         var values: ui.shader.Values = undefined;
         target.backdropShader(bounds, style.radius, try library.glass(&values, glass, style.radius));
         return true;
@@ -8327,8 +8425,9 @@ pub const Host = struct {
         self.invalidate();
     }
     /// Apply the system's accessibility appearance: reduced motion stills
-    /// loading indicators, and reduced transparency or high contrast turn
-    /// backdrop effects into opaque fills. Repaints when attached.
+    /// loading indicators, reduced transparency turns backdrop effects into
+    /// opaque fills, and high contrast lights glass's rim and outlines the
+    /// opaque fills. Repaints when attached.
     pub fn setPreferences(self: *Host, value: Preferences) !void {
         try self.context.setBackdropPreferences(.{ .reduce_transparency = value.reduce_transparency, .high_contrast = value.high_contrast });
         self.view.preferences = value;
@@ -10287,4 +10386,38 @@ test "fitting a window to its content tells a size once, and holds against back 
     try view.arrange(.{ .x = 0, .y = 0, .width = 400, .height = 400 }, .{}, .{});
     try std.testing.expectEqual(@as(f32, 170), view.nodes()[0].measured.preferred.width);
     try std.testing.expectEqual(@as(f32, 104), view.nodes()[0].measured.preferred.height);
+}
+
+test "a glass group paints one surface behind its panes, or each pane its own glass" {
+    const library = try ui.effects.Library.create(std.testing.allocator);
+    defer library.destroy();
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    const Pass = struct {
+        fn run(v: *View) !void {
+            v.reset(.{}, null);
+            try v.row(.{ .glass_group = .{ .radius = 18, .merge = 24 }, .gap = 6, .background = 0xff0000 });
+            try v.text("Cut", .{ .glass_pane = true, .padding = Insets.all(8) });
+            try v.text("Copy", .{ .glass_pane = true, .padding = Insets.all(8) });
+            try v.text("Paste", .{ .padding = Insets.all(8) });
+            try v.end();
+            try v.finish();
+            try v.arrange(.{ .x = 0, .y = 0, .width = 300, .height = 100 }, .{}, .{});
+        }
+    };
+    try Pass.run(&view);
+    // Without the shader library each pane is its own glass, and the
+    // group's background is not painted.
+    var recorder: Recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expectEqual(@as(usize, 2), recorder.effects);
+    view.effects = library;
+    recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expectEqual(@as(usize, 1), recorder.effects);
+    // Reduce Transparency asks for opaque panes, which materials draw.
+    view.preferences.reduce_transparency = true;
+    recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expectEqual(@as(usize, 2), recorder.effects);
 }

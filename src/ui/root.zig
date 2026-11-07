@@ -4615,13 +4615,19 @@ pub const Frame = struct {
                 try buffer.roundedRect(.{ .x = absolute_bounds.x, .y = y, .width = absolute_bounds.width, .height = height }, 0, alphaColor(if (dark) 0xffffff else 0, alpha));
             },
             .glass => |glass| {
-                if (!std.math.isFinite(glass.noise) or !std.math.isFinite(glass.clarity)) return error.InvalidGeometry;
+                if (!std.math.isFinite(glass.noise) or !std.math.isFinite(glass.clarity) or !std.math.isFinite(glass.press) or !std.math.isFinite(glass.hover)) return error.InvalidGeometry;
+                // A pressed interactive glass grows a little, as AppKit's.
+                const grow = std.math.clamp(glass.press, 0, 1);
+                const dx = 1.1 * grow;
+                const dy = 0.45 * grow;
+                const box: layout.Rect = .{ .x = absolute_bounds.x - dx, .y = absolute_bounds.y - dy, .width = absolute_bounds.width + 2 * dx, .height = absolute_bounds.height + 2 * dy };
+                const corner = if (radius > 0) radius + dy else radius;
                 if (opaque_fill) {
-                    try buffer.roundedRect(absolute_bounds, radius, fallback);
-                    if (preferences.high_contrast) try buffer.strokeRect(absolute_bounds, radius, 1, .rgb(palette.border));
+                    try buffer.roundedRect(box, corner, fallback);
+                    if (preferences.high_contrast) try buffer.strokeRect(box, corner, 1, .rgb(palette.border));
                     return;
                 }
-                try buffer.backdropEffect(.{ .bounds = absolute_bounds, .radius = radius, .kind = .glass, .style = glass.style, .dark = dark, .tint = glass.tint orelse .{ .r = 0, .g = 0, .b = 0, .a = 0 }, .noise = glass.noise, .clarity = glass.clarity, .fallback = fallback });
+                try buffer.backdropEffect(.{ .bounds = box, .radius = corner, .kind = .glass, .style = glass.style, .dark = dark, .tint = glass.tint orelse .{ .r = 0, .g = 0, .b = 0, .a = 0 }, .noise = glass.noise, .clarity = glass.clarity, .hover = glass.hover, .high_contrast = preferences.high_contrast, .fallback = fallback });
             },
             .blur => |blur| {
                 if (!std.math.isFinite(blur.radius) or blur.radius < 0) return error.InvalidGeometry;
@@ -5272,9 +5278,21 @@ test "backdrop effects record opaque fills for system preferences and an unprepa
     try std.testing.expectEqual(@as(f32, 46), list[3].shape.bounds.y);
     try std.testing.expectEqual(@as(f32, 0.5), list[3].shape.bounds.height);
     try std.testing.expect(commands.softwareOnly(list));
-    // Reduced transparency and high contrast fill opaquely, outlined in high contrast.
+    // Higher contrast lights the glass's rim; it stays glass.
     buffer.reset();
     try context.setBackdropPreferences(.{ .high_contrast = true });
+    frame.backdropEffect(bounds, 12, .{ .glass = .{ .hover = 0.5 } });
+    try std.testing.expect(buffer.commands().len == 1 and buffer.commands()[0] == .backdrop);
+    try std.testing.expect(buffer.backdropEntries()[0].high_contrast);
+    try std.testing.expectEqual(@as(f32, 0.5), buffer.backdropEntries()[0].hover);
+    // A pressed interactive glass grows by 1.1 DIP each side and 0.45 above and below.
+    buffer.reset();
+    frame.backdropEffect(bounds, 12, .{ .glass = .{ .press = 1 } });
+    try std.testing.expectApproxEqAbs(@as(f32, -1.1), buffer.backdropEntries()[0].bounds.x, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 12.45), buffer.backdropEntries()[0].radius, 1e-4);
+    // Reduced transparency fills opaquely, outlined in high contrast.
+    buffer.reset();
+    try context.setBackdropPreferences(.{ .reduce_transparency = true, .high_contrast = true });
     frame.backdropEffect(bounds, 12, .{ .glass = .{} });
     frame.backdropEffect(bounds, 0, .{ .blur = .{ .radius = 4 } });
     try std.testing.expectEqual(@as(usize, 3), buffer.commands().len);

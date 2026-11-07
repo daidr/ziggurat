@@ -75,6 +75,27 @@ try window.setDocumentEdited(true); // 标题前加 "*"
 
 `setOpacity(0..1)`、`setIgnorePointer`、`setContentProtection`、`flashFrame`、`setSkipTaskbar` 各有同名能力位。Windows 以 `WS_EX_LAYERED` + `SetLayeredWindowAttributes` 实现整体透明，指针穿透再加 `WS_EX_TRANSPARENT`；内容保护使用 `WDA_EXCLUDEFROMCAPTURE`，旧系统退回 `WDA_MONITOR`（截图中显示为黑色）；闪烁用 `FlashWindowEx` 持续到窗口回到前台；任务栏隐藏经 `ITaskbarList::DeleteTab`，资源管理器重启（`TaskbarButtonCreated`）后重新隐藏。GTK 以 `gtk_widget_set_opacity`（需要合成器，否则不提供 opacity 能力）、空输入形状、urgency hint 与 skip-taskbar hint 实现；Linux 不提供内容保护。`opacity` 与 `skip_taskbar` 也可在 `WindowOptions` 中设定，创建后立即应用，能力不足时创建失败并回收窗口。
 
+### 点击穿透窗口与输入区域
+
+桌面宠物是一个无边框、透明、始终置顶的窗口，显示一个角色，偶尔加一个对话气泡：点在它们上面的点击交给应用，其他地方的点击交给它下面的窗口或桌面，就像宠物窗口不存在一样。`setInputRegion(rects)` 给出窗口接收指针的矩形（DIP，相对客户区左上角）；其他地方的按下、移动与滚轮穿透到后面：
+
+```zig
+const pet = try app.createWindow(.{ .decoration = .borderless, .transparent = true, .skip_taskbar = true, .width = 320, .height = 240 });
+try pet.setAlwaysOnTop(true);
+const character: z.Rect = .{ .x = 200, .y = 120, .width = 110, .height = 110 };
+try pet.setInputRegion(&.{character});
+// 气泡出现时它也接收点击，直到它消失。
+try pet.setInputRegion(&.{ character, .{ .x = 10, .y = 10, .width = 220, .height = 90 } });
+```
+
+接收点击的东西移动或改变大小时要重新设置：矩形固定在窗口里，窗口可以整体移动（`setClientBounds`，或从角色上 `startMove`）。`setInputRegion(null)` 恢复整个窗口接收指针（初始状态），空切片让它全部穿透，与 `setIgnorePointer(true)` 一样；`setIgnorePointer(true)` 生效期间优先于区域。面积为零或非有限的矩形会被丢弃，窗口保留一份副本（`inputRegion()` 读回，窗口关闭时释放）。内容层的 `passthrough` 是另一回事：它只让指针穿过元素到窗口自己下面的内容，不会到别的窗口。
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| 区域 | 指针在矩形外时窗口让鼠标穿透（`ignoresMouseEvents`），随指针移动切换：区域存在期间有一个全局和一个本地的鼠标移动/松开监视器，内容视图的跟踪区改为始终活动；窗口移动、缩放或区域改变时也重新判断 | 窗口的输入形状：X11 的 SHAPE 扩展、Wayland 的 input region（`gdk_window_input_shape_combine_region`，偏移到客户区在 GdkWindow 中的位置），在 realize、map 和 GTK 自己的 size-allocate 之后重新设置 | 光标在矩形外时分层窗口加上 `WS_EX_TRANSPARENT`，窗口显示期间用 `USER_TIMER_MINIMUM` 计时器在系统时钟的每个 tick（15.6 ms）查询光标；16 ms 的计时器会被取整成两个 tick，光标进入后 17–35 ms 的快速点击可能落在切换途中而谁都收不到 |
+
+macOS 与 Windows 在有按钮按住时保持现状：从角色上开始的拖动在角色上结束，从后面开始的在后面结束，松开时再决定下一次谁接收指针。`HTTRANSPARENT` 只会传给同一线程的窗口，`SetWindowRgn` 会把窗口画在区域外的阴影或光晕一起裁掉，所以 Windows 不用它们。浏览器忽略输入区域。`zig build smoke-input-region` 在 Linux 上用 XTest 真实点击一个叠在另一个窗口上的宠物窗口，检查角色上的点击给宠物、其他地方的给后面的窗口，以及空区域、null 和 `setIgnorePointer` 优先；macOS 上移动光标检查 `ignoresMouseEvents` 跟随，Windows 上只检查设置路径。
+
 `setDocumentEdited(true)` 在 Windows 与 Linux 的原生标题前加 `*`，与系统编辑器一致；`setTitle` 保留该标记，`title(buffer)` 读回不含标记的标题。窗口记录持有一份标题副本，由 App 的分配器分配，随记录释放。
 
 ## App 激活

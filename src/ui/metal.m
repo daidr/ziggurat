@@ -70,7 +70,7 @@ _Static_assert(sizeof(ZmEffectParams)==112,"effect parameter layout");
    physical coordinates of the current target. misc is radius, refraction,
    bezel and noise; misc2 rim, kind (0 blur, 1 glass, 2 scroll edge, 3 the
    opaque fill), transparent and whether the blur is progressive; line and
-   line2 the progressive blur's line (x, y, dx, dy; length, from, to). */
+   line2 the progressive blur's line (x, y, dx, dy; length, from, to) and, for glass, the rim's width in pixels (0 for 1). */
 typedef struct ZmGlass {float box[4],clip[4],tone[4],tint[4],line[4],line2[4],misc[4],misc2[4],background[4],fill[4];uint32_t region[4],out[4];} ZmGlass;
 typedef struct ZmGlassLevel {uint32_t radius;float lo,hi;uint32_t weights;} ZmGlassLevel;
 _Static_assert(sizeof(ZmGlass)==192,"backdrop layout");
@@ -242,12 +242,12 @@ static NSString *const shader_source=@
 "  if(kind==3u)color=pack(g.fill.rgb);\n"
 "  else if(kind==0u)color=round(res.read(local)*255.0);\n"
 "  else if(kind==2u){float3 c=toned(straight(round(res.read(local)*255.0)),0.25,0.03);color=pack(c+(g.background.rgb-c)*0.8245);}\n"
-"  else{float depth=max(-sd,0.0);float bezel=g.misc.z;float2 n=float2(0.0);if(depth<bezel||depth<3.0)n=edge_normal(g.box,radius,px,py);\n"
+"  else{float depth=max(-sd,0.0);float bezel=g.misc.z;float rw=g.line2.w>0.0?g.line2.w:1.0;float2 n=float2(0.0);if(depth<bezel||depth<3.0*rw)n=edge_normal(g.box,radius,px,py);\n"
 "    float sx=px,sy=py;if(depth<bezel){float k=g.misc.y*lens(depth,bezel);sx-=n.x*k;sy-=n.y*k;}\n"
 "    float3 c=straight(bilinear_clamped(res,float2(g.region.xy),sx,sy));\n"
 "    float l=luma(c);float target=g.tone.x+(g.tone.y-g.tone.x)*(1.0-precise::pow(max(1.0-l,0.0),g.tone.z));c=clamp(target+(c-l)*((g.tone.y-g.tone.x)*g.tone.w),0.0,1.0);\n"
 "    if(g.tint.a>0.0)c+=(g.tint.rgb-c)*g.tint.a;\n"
-"    if(depth<3.0){float a=g.misc2.x*precise::exp(-depth*depth);c+=(abs(n.y)-c)*a;}\n"
+"    if(depth<3.0*rw){float q=depth/rw;float a=g.misc2.x*precise::exp(-q*q);c+=(abs(n.y)-c)*a;}\n"
 "    if(g.misc.w>0.0)c+=(grain(xy.x,xy.y)-0.5)*g.misc.w*0.08;\n"
 "    color=pack(c);}\n"
 "  float4 result=blend_bytes(d,color,amount);if(g.misc2.z==0.0)result.a=255.0;\n"
