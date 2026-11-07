@@ -6,6 +6,7 @@ extern fn zlm_test_paint(*anyopaque) void;
 extern fn zlm_test_close(*anyopaque) void;
 extern fn zlm_test_commit(*anyopaque, [*:0]const u8) void;
 extern fn zlm_test_compose(*anyopaque, [*:0]const u8, usize) void;
+extern fn zlm_test_compose_key(*anyopaque, c_int) void;
 extern fn zlm_test_title_is(*anyopaque, [*:0]const u8) c_int;
 extern fn zlm_test_terminate() void;
 extern fn zlm_test_click(*anyopaque, f64, f64, c_int) void;
@@ -22,6 +23,10 @@ const Probe = struct {
     calls: usize = 0,
     commits: usize = 0,
     preedits: usize = 0,
+    /// Syllables an input method committed, and the Returns that reached
+    /// the content as keys.
+    composed: usize = 0,
+    returns: usize = 0,
     /// Presses and releases of the secondary button, and of the primary one.
     secondary: [2]usize = .{ 0, 0 },
     primary: usize = 0,
@@ -58,13 +63,22 @@ const Probe = struct {
         const self: *Probe = @ptrCast(@alignCast(ptr));
         switch (event) {
             .text_input => |value| {
+                if (std.mem.eql(u8, value.text, "가")) {
+                    self.composed += 1;
+                    return true;
+                }
                 std.debug.assert(std.mem.eql(u8, value.text, "AppKit 输入 / 😀"));
                 std.debug.assert(value.producer == .appkit_text_input);
                 self.commits += 1;
                 if (self.close_in_text) _ = self.window.destroy() catch unreachable;
                 return true;
             },
+            .key_input => |key| {
+                if (key.key == .enter) self.returns += 1;
+                return key.key == .enter;
+            },
             .text_preedit => |value| {
+                if (std.mem.eql(u8, value.text, "가")) return true;
                 std.debug.assert(std.mem.eql(u8, value.text, "にほん"));
                 std.debug.assert(value.selection_start == "にほ".len);
                 self.preedits += 1;
@@ -129,6 +143,16 @@ pub fn main() !void {
         for (blue, [_]u8{ 0x77, 0x4c, 0x27, 0xff }) |got, want| try std.testing.expect(@abs(@as(i16, got) - want) <= 2);
         zlm_test_compose(probe.native(), "にほん", 2);
         try std.testing.expectEqual(@as(usize, 1), probe.preedits);
+        try probe.window.cancelTextComposition();
+        // Return that the Korean input method commits a syllable with and
+        // passes on reaches the content once; one the input method keeps,
+        // or passes on while it still composes, does not.
+        zlm_test_compose_key(probe.native(), 0);
+        try std.testing.expectEqual([2]usize{ 1, 1 }, [2]usize{ probe.composed, probe.returns });
+        zlm_test_compose_key(probe.native(), 1);
+        try std.testing.expectEqual([2]usize{ 2, 1 }, [2]usize{ probe.composed, probe.returns });
+        zlm_test_compose_key(probe.native(), 2);
+        try std.testing.expectEqual([2]usize{ 2, 1 }, [2]usize{ probe.composed, probe.returns });
         // A press keeping the secondary button's number, a Control-click and
         // the secondary button itself are secondary clicks, a refused terminate:, release and all.
         for (0..3) |how| zlm_test_click(probe.native(), 40, 40, @intCast(how));

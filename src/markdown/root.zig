@@ -7,6 +7,7 @@
 const std = @import("std");
 const blocks = @import("blocks.zig");
 const inlines = @import("inlines.zig");
+const extras = @import("github.zig");
 pub const html = @import("html.zig");
 pub const entities = @import("entities.zig");
 
@@ -45,11 +46,18 @@ pub const Kind = enum(u8) {
     /// TeX within a paragraph, its source in `text` without delimiters;
     /// `level` 1 for display math, between `$$` or `\[ \]`.
     math,
+    /// A mention of a person or a team, `text` as written: `@octocat` or
+    /// `@github/docs` (`ParseOptions.mentions`). `login` says whom.
+    mention,
+    /// A reference to an issue or a pull request, `text` as written:
+    /// `#123`, `GH-123` or `octocat/hello#123` (`ParseOptions.references`).
+    /// `reference` says which.
+    reference,
 
     /// True for kinds that hold child nodes, even when a node has none.
     pub fn isContainer(self: Kind) bool {
         return switch (self) {
-            .thematic_break, .code_block, .text, .soft_break, .hard_break, .code, .math => false,
+            .thematic_break, .code_block, .text, .soft_break, .hard_break, .code, .math, .mention, .reference => false,
             else => true,
         };
     }
@@ -61,6 +69,41 @@ pub const Kind = enum(u8) {
 };
 
 pub const Alignment = enum(u8) { none, left, center, right };
+
+/// The kind of a GitHub alert (`ParseOptions.alerts`).
+pub const Alert = enum(u8) {
+    none,
+    note,
+    tip,
+    important,
+    warning,
+    caution,
+
+    /// The alert's title, as GitHub shows it: Note, Tip, Important,
+    /// Warning or Caution; empty for none.
+    pub fn title(self: Alert) []const u8 {
+        return switch (self) {
+            .none => "",
+            .note => "Note",
+            .tip => "Tip",
+            .important => "Important",
+            .warning => "Warning",
+            .caution => "Caution",
+        };
+    }
+
+    /// The alert a line marks, as `[!NOTE]`, in any case and with spaces
+    /// or tabs around it, or none.
+    pub fn ofLine(line: []const u8) Alert {
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (trimmed.len < 6 or trimmed[0] != '[' or trimmed[1] != '!' or trimmed[trimmed.len - 1] != ']') return .none;
+        const name = trimmed[2 .. trimmed.len - 1];
+        inline for (.{ .note, .tip, .important, .warning, .caution }) |kind| {
+            if (std.ascii.eqlIgnoreCase(name, @as(Alert, kind).title())) return kind;
+        }
+        return .none;
+    }
+};
 pub const Task = enum(u8) { none, unchecked, checked };
 
 pub const Node = struct {
@@ -98,6 +141,9 @@ pub const Node = struct {
     fenced: bool = false,
     /// A link written as a bare address.
     autolink: bool = false,
+    /// The kind of a block quote that is a GitHub alert, its `[!NOTE]`
+    /// line not among its children (`ParseOptions.alerts`).
+    alert: Alert = .none,
     /// Zero-based source line a block starts on.
     line: u32 = 0,
 };
@@ -133,6 +179,23 @@ pub const Tree = struct {
     pub fn get(self: Tree, index: u32) *const Node {
         return &self.nodes[index];
     }
+    /// Whom a mention mentions: a login, as `octocat`, or a team, as
+    /// `github/docs`; empty for other nodes.
+    pub fn login(self: Tree, index: u32) []const u8 {
+        const node = self.get(index);
+        if (node.kind != .mention or node.text.len == 0) return "";
+        return node.text[1..];
+    }
+    /// The repository a reference is in, as `owner/name` or empty for the
+    /// document's own, and the number of the issue or pull request; null
+    /// for other nodes.
+    pub fn reference(self: Tree, index: u32) ?Reference {
+        const node = self.get(index);
+        if (node.kind != .reference) return null;
+        const at = std.mem.lastIndexOfAny(u8, node.text, "#-") orelse return null;
+        const number = std.fmt.parseInt(u64, node.text[at + 1 ..], 10) catch return null;
+        return .{ .repository = if (node.text[at] == '#') node.text[0..at] else "", .number = number };
+    }
     pub fn indexOf(self: Tree, node: *const Node) u32 {
         return @intCast(node - self.nodes.ptr);
     }
@@ -152,7 +215,7 @@ pub const Tree = struct {
             if (!event.entering) continue;
             const node = self.get(event.index);
             const piece = switch (node.kind) {
-                .text, .code, .code_block, .math => node.text,
+                .text, .code, .code_block, .math, .mention, .reference => node.text,
                 .soft_break, .hard_break => " ",
                 else => continue,
             };
@@ -174,6 +237,9 @@ pub fn utf8Prefix(bytes: []const u8) usize {
     const width = std.unicode.utf8ByteSequenceLength(bytes[start]) catch return start;
     return if (start + width <= bytes.len) bytes.len else start;
 }
+
+/// Where a reference points (`Tree.reference`).
+pub const Reference = struct { repository: []const u8, number: u64 };
 
 pub const Children = struct {
     tree: Tree,
@@ -242,6 +308,22 @@ pub const ParseOptions = struct {
     /// dollar followed by a space or a digit, nor before a closing one
     /// that follows a space or is followed by a digit.
     dollar_math: bool = false,
+    /// GitHub's alerts: a block quote at the top level whose first line is
+    /// `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]` or `[!CAUTION]`
+    /// alone, in any case, followed by its text (`Node.alert`). A marker
+    /// alone in its quote stays text.
+    alerts: bool = false,
+    /// GitHub's mentions of people and teams, as `@octocat` and
+    /// `@github/docs`, in text outside code and links (`Kind.mention`).
+    mentions: bool = false,
+    /// GitHub's references to issues and pull requests, as `#123`,
+    /// `GH-123` and `octocat/hello#123`, in text outside code and links
+    /// (`Kind.reference`).
+    references: bool = false,
+
+    /// What GitHub's comments read beyond its Markdown: alerts, mentions
+    /// and references.
+    pub const github: ParseOptions = .{ .alerts = true, .mentions = true, .references = true };
 };
 
 /// Parse state shared by the block and inline passes.
@@ -360,10 +442,14 @@ pub fn parseWith(source: []const u8, buffers: Buffers, options: ParseOptions) Er
     var builder: Builder = .{ .nodes = buffers.nodes, .text = buffers.text, .options = options };
     _ = try builder.add(none, .{ .kind = .document });
     try blocks.parse(&builder, source);
+    if (options.alerts) extras.alerts(&builder);
     const block_count = builder.len;
     var index: u32 = 0;
     while (index < block_count) : (index += 1) switch (builder.nodes[index].kind) {
-        .paragraph, .heading, .table_cell => try inlines.parse(&builder, index),
+        .paragraph, .heading, .table_cell => {
+            try inlines.parse(&builder, index);
+            if (options.mentions or options.references) try extras.references(&builder, index);
+        },
         else => {},
     };
     return .{ .nodes = builder.nodes[0..builder.len], .text = builder.text[0..builder.text_len] };

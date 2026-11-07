@@ -372,7 +372,17 @@ Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须�
 
 两项都由 View 在每个顶层文档开始时运行的同一段脚本完成（`src/webview/page_facts.js`），与页面来源和信任无关：Linux 运行在私有 script world 中，经私有消息通道只到达 View；Windows 用 `AddScriptToExecuteOnDocumentCreated` 在页面脚本之前取得 `chrome.webview.postMessage`，消息带 `\x01ziggurat-facts:` 前缀，在来源与 IPC 授权检查之前交给 View，不会成为 `Event.message`。页面也能发出同样前缀的消息，但只能谎报自己的主题色和内容尺寸，窗口尺寸仍受应用给的限制。两项都关闭时不注入脚本。
 
-`View.processId()` 返回运行页面的操作系统进程 ID，供应用自己的任务管理器或内存报告使用：Windows 是同一 App 的页面共用的 WebView2 浏览器进程（`msedgewebview2.exe`），WebKitGTK 没有对应 API，Linux 总是 null。
+`View.processId()` 返回运行页面的操作系统进程 ID，供应用自己的任务管理器或内存报告使用：Windows 是同一 App 的页面共用的 WebView2 浏览器进程（`msedgewebview2.exe`）；macOS 是页面的 Web 内容进程（WebKit 私有的 `_webProcessIdentifier`），WebKit 还没为页面启动进程时为 null；WebKitGTK 没有对应 API，Linux 总是 null。
+
+`View.gpuProcessId()` 返回负责页面图形与媒体的进程：
+
+| 平台 | 进程 |
+|---|---|
+| macOS | WebKit 的 GPU 进程（`com.apple.WebKit.GPU`），页面的音频和视频从这里播放，取自 WebKit 私有的 `_gpuProcessIdentifier`；WebKit 不回答或还没启动它时为 null，它在页面第一次播放媒体或用 GPU 绘制时启动。显示页面所播内容的应用（例如音乐可视化）可以用 Core Audio 进程 tap（`CATapDescription`，macOS 14.2 起）按这个 ID 采集声音 |
+| Windows | WebView2 的 GPU 进程（`msedgewebview2.exe --type=gpu-process`），是 `processId` 浏览器进程的子进程，取自 `ICoreWebView2Environment8.GetProcessInfos`；没有这个接口的运行时为 null。WebView2 的声音来自音频服务这个 utility 进程而不是它，要采集声音应采集 `processId` 进程的整棵进程树 |
+| Linux | WebKitGTK 没有对应 API，总是 null |
+
+窗口关闭后也是 null。应用的多个页面可能共用这个进程；它每次运行都会换 ID，崩溃或退出后重新启动也会换，所以每次需要时重新查询而不要保存。
 
 ## 不受信任页面、开窗手势与自动播放
 

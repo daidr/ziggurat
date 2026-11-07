@@ -39,9 +39,12 @@ music.play();
 - WAV：8/16/24/32 位整数 PCM、32/64 位浮点，含 `WAVE_FORMAT_EXTENSIBLE`；数据块长度为 0 或全 1 时按流式写入、长度未知处理。
 - FLAC：纯 Zig 解码，支持 constant/verbatim/fixed/LPC 子帧、三种立体声去相关、wasted bits、4–32 位，校验帧头 CRC-8 与帧 CRC-16；seek 用帧头二分定位，不依赖 seek table。
 - MP3：由 minimp3（CC0）解码 MPEG-1/2/2.5 Layer III，跳过 ID3v2 标签，按 Xing/Info 帧去掉编码器延迟与尾部填充；seek 精确到样本。输入可以是内存或文件，按需读取。
+- AAC-LC：纯 Zig 解码（霍夫曼、M/S 与强度立体声、噪声替代、TNS、正弦/KBD 窗与 IMDCT），每包 1024 帧。可以在 MP4 里，也可以是 ADTS 帧的 .aac 文件。打开 .aac 时会扫一遍全部帧，用来定长和 seek。HE-AAC（SBR）及其参数立体声不解码，打开时报 `error.UnsupportedEncoding`。超过两个声道时只播前方左右声道。seek 会先解码目标包的前一包（它的声音和目标包重叠），所以 seek 后的结果与顺序解码一致，只有噪声替代带随机生成的噪声不同。
+- MP4（.m4a、.mp4，以及 DASH 那样切成片段的 .m4s）：读取第一条声音轨。不分片的文件从 moov 的样本表找包。分片文件随播放逐个读 moof/trun，长度取 sidx 段索引；没有 sidx 时打开时会读完全部片段来定长。编辑列表（elst）标出的编码器预滚会被去掉，最后一包的填充也会被去掉；AAC 包按每包 1024 帧排布，不看文件写的时长。内置 AAC-LC、Apple Lossless（ALAC，16/20/24/32 位，逐样本无损）和 FLAC（dfLa）三种编解码器。`mp4.openWith` 可以传入自己的 `mp4.CodecFormat`（按样本条目 fourcc 匹配），`mp4.readTrack` 不解码就能读出轨道的编解码器、配置、时长和是否分片，`Track.decodable` 判断某组编解码器能否解码它。
+- 以 ID3 标签开头的文件，按标签之后的字节判断格式（MP3、FLAC、ADTS 都支持标签在前）。
 - Ogg Vorbis：由 stb_vorbis（MIT 或 Unlicense，二选一）解码，seek 精确到样本。它只能从内存解码，所以文件流也会先整体读入内存，上限 512 MiB。
 - 两个 C 解码器用 C 运行时分配自己的状态，不经 `Engine` 的分配器；它们只在解码线程或 `decodeSound` 的调用方线程上运行，混音线程照旧不分配。源码按固定提交放在 `src/audio/third_party/`，版本、哈希与许可证见那里的 README，测试会核对哈希。
-- `Options.formats` 是按顺序匹配文件开头的格式列表（`?` 匹配任意字节），默认 `default_formats` 为 WAV、FLAC、Ogg Vorbis 与 MP3；应用可以追加自己的 `Format`。
+- `Options.formats` 是按顺序匹配文件开头的格式列表（`?` 匹配任意字节），默认 `default_formats` 为 WAV、FLAC、Ogg Vorbis、MP4、MP3 与 ADTS AAC；应用可以追加自己的 `Format`。
 
 ## 输出与失败路径
 
@@ -60,4 +63,4 @@ music.play();
 
 ## 验证
 
-`zig build test-audio` 已接默认 test/check：WAV 各编码与截断、FLAC 用独立编码器生成的立体声 16 位与单声道 24 位文件逐样本比对与前后 seek、MP3 与 Ogg Vorbis 的 440 Hz 测试音（长度、过零次数、峰值）及 seek 结果与顺序解码一致、损坏与截断数据、分配失败无泄漏；混音逐样本行为（结尾静音、叠加与截断、循环与区间循环、暂停淡出与恢复淡入、音量渐变、声像、变速、重采样、seek/stop）；流的无缝循环、区间循环、seek、空循环停止、释放后播完关闭解码器；句柄失效与槽位复用；经测试后端 App 的结束通知、App 停止后的丢弃与引擎先销毁时的排队任务；测试后端设备丢失后重开；无设备时按时播放并报告原因；空设备的时钟、追赶与重试；输出提前混音时播放器的位置（缓冲、seek、暂停后放完、变速、循环）与改变延迟后按新时长重开输出。`zig build smoke-audio` 在真实系统输出上播放 200 ms 并打开一个 WAV 流，有设备走真实后端，无设备走失败路径，两种情况都要求按时结束。CI 主机没有声卡，真实设备上的出声只由本地运行确认。
+`zig build test-audio` 已接默认 test/check：WAV 各编码与截断、FLAC 用独立编码器生成的立体声 16 位与单声道 24 位文件逐样本比对与前后 seek、MP3 与 Ogg Vorbis 的 440 Hz 测试音（长度、过零次数、峰值）及 seek 结果与顺序解码一致；AAC（MP4、ADTS、分片 MP4）对左右声道测试音的信噪比、去掉预滚与填充后的长度和 seek；ALAC 与 FLAC-in-MP4 逐样本比对；ID3 标签在前、HE-AAC 拒绝、IMDCT 与直接求和一致；损坏与截断数据、分配失败无泄漏；混音逐样本行为（结尾静音、叠加与截断、循环与区间循环、暂停淡出与恢复淡入、音量渐变、声像、变速、重采样、seek/stop）；流的无缝循环、区间循环、seek、空循环停止、释放后播完关闭解码器；句柄失效与槽位复用；经测试后端 App 的结束通知、App 停止后的丢弃与引擎先销毁时的排队任务；测试后端设备丢失后重开；无设备时按时播放并报告原因；空设备的时钟、追赶与重试；输出提前混音时播放器的位置（缓冲、seek、暂停后放完、变速、循环）与改变延迟后按新时长重开输出。`zig build smoke-audio` 在真实系统输出上播放 200 ms 并打开一个 WAV 流，有设备走真实后端，无设备走失败路径，两种情况都要求按时结束。CI 主机没有声卡，真实设备上的出声只由本地运行确认。

@@ -53,6 +53,9 @@ pub const Icon = enum {
     filter,
     play,
     pause,
+    light_bulb,
+    report,
+    stop,
 
     /// SVG path data on the 24-unit grid, for a stroke of `stroke` units.
     pub fn pathData(self: Icon) []const u8 {
@@ -98,6 +101,9 @@ pub const Icon = enum {
             .filter => "M4 5H20L14 12.5V19L10 17V12.5Z",
             .play => "M8 5 19 12 8 19Z",
             .pause => "M9 5V19M15 5V19",
+            .light_bulb => "M12 3A6 6 0 0 0 8.4 13.8C9.2 14.5 9.5 15.2 9.5 16.5H14.5C14.5 15.2 14.8 14.5 15.6 13.8A6 6 0 0 0 12 3ZM9.5 19H14.5M10.5 21.5H13.5",
+            .report => "M4 4.5H20V16H12L7.5 20V16H4ZM12 7.5V11.5M12 13.5V13.5",
+            .stop => "M8.3 3H15.7L21 8.3V15.7L15.7 21H8.3L3 15.7V8.3ZM12 7.5V12.5M12 16V16",
         };
     }
 

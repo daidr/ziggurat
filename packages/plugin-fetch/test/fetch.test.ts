@@ -198,6 +198,24 @@ test("other schemes go to the WebView's fetch", async () => {
   }
 });
 
+test("URLs with credentials are refused before reaching the host", async () => {
+  host.respond = () => ({ parts: [head(204)] });
+  for (const url of ["https://user:password@example.com/", "http://user@example.com/", "https://:password@example.com/"]) {
+    for (const input of [url, new URL(url)]) {
+      await expect(plugin.fetch(input)).rejects.toThrow(TypeError);
+      expect(host.calls).toEqual([]);
+    }
+  }
+});
+
+test("an empty userinfo and an explicit authorization header pass", async () => {
+  host.respond = () => ({ parts: [head(204)] });
+  await plugin.fetch("https://:@example.com/", { headers: { authorization: "Basic dXNlcjpwYXNzd29yZA==" } });
+  const params = host.calls[0]!.params!;
+  expect(params.url).toBe("https://example.com/");
+  expect(params.headers).toContainEqual({ name: "authorization", value: "Basic dXNlcjpwYXNzd29yZA==" });
+});
+
 test("a host without the plugin says to register it", async () => {
   host.plugin = false;
   await expect(plugin.fetch("https://api.example.com/")).rejects.toThrow("register it with Host.use");

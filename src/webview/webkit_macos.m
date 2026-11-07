@@ -3222,6 +3222,27 @@ int zwk_zoom(ZwkState *state,double *value,int write) {
     else *value=s->view.pageZoom/page_scale(s);
     return ZWK_OK;
 }
+/* The processes of the page: its web content process, from WebKit's
+   private -[WKWebView _webProcessIdentifier], and WebKit's GPU process
+   (com.apple.WebKit.GPU), which plays its audio and video, from the
+   private _gpuProcessIdentifier; 0 for one WebKit doesn't answer or
+   hasn't started yet. */
+int zwk_process_ids(ZwkState *state,uint32_t *web,uint32_t *gpu) {
+    ZwkPage *s=page_of(state);
+    *web=0; *gpu=0;
+    if (!live(s)) return ZWK_CLOSED;
+    SEL web_selector=NSSelectorFromString(@"_webProcessIdentifier");
+    SEL gpu_selector=NSSelectorFromString(@"_gpuProcessIdentifier");
+    if ([s->view respondsToSelector:web_selector]) {
+        pid_t pid=((pid_t (*)(id,SEL))objc_msgSend)(s->view,web_selector);
+        if (pid>0) *web=(uint32_t)pid;
+    }
+    if ([s->view respondsToSelector:gpu_selector]) {
+        pid_t pid=((pid_t (*)(id,SEL))objc_msgSend)(s->view,gpu_selector);
+        if (pid>0) *gpu=(uint32_t)pid;
+    }
+    return ZWK_OK;
+}
 /* Cuts the region's view to corners of radii, in its points, from its
    top-left clockwise: with the layer's corner radius when they are the
    same, which is as continuous as AppKit's, else a mask of their path. */

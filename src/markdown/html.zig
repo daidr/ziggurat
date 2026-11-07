@@ -22,7 +22,7 @@ pub fn write(tree: md.Tree, writer: *Writer) Writer.Error!void {
                     image_depth -= 1;
                     if (image_depth == 0) try imageEnd(&out, node);
                 },
-                .text, .code, .math => try out.escaped(node.text),
+                .text, .code, .math, .mention, .reference => try out.escaped(node.text),
                 .soft_break, .hard_break => try out.raw(" "),
                 else => {},
             }
@@ -49,7 +49,15 @@ pub fn write(tree: md.Tree, writer: *Writer) Writer.Error!void {
             },
             .block_quote => {
                 try out.cr();
-                try out.raw(if (entering) "<blockquote>\n" else "</blockquote>\n");
+                if (node.alert != .none) {
+                    // As GitHub writes alerts, without its icons.
+                    if (entering) {
+                        const name = node.alert.title();
+                        var lower: [16]u8 = undefined;
+                        try out.print("<div class=\"markdown-alert markdown-alert-{s}\">\n", .{std.ascii.lowerString(&lower, name)});
+                        try out.print("<p class=\"markdown-alert-title\">{s}</p>\n", .{name});
+                    } else try out.raw("</div>\n");
+                } else try out.raw(if (entering) "<blockquote>\n" else "</blockquote>\n");
             },
             .list => {
                 try out.cr();
@@ -113,7 +121,9 @@ pub fn write(tree: md.Tree, writer: *Writer) Writer.Error!void {
                     try out.print("<{s}>", .{tag});
                 } else try out.print("<{s} align=\"{s}\">", .{ tag, @tagName(node.alignment) });
             },
-            .text => try out.escaped(node.text),
+            // Mentions and references are links only where a host
+            // resolves them.
+            .text, .mention, .reference => try out.escaped(node.text),
             .soft_break => try out.raw("\n"),
             .hard_break => try out.raw("<br />\n"),
             .emphasis => try out.raw(if (entering) "<em>" else "</em>"),

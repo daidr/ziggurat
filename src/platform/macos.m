@@ -101,6 +101,11 @@ typedef struct NativeWindow {
        primary button's. Its release is secondary too. */
     int secondary_click;
     NSMutableString *marked;NSRange marked_selection;
+    /* The key keyDown: kept from the content while the input method
+       composed, during interpretKeyEvents: only; doCommandBySelector:
+       sends it if the input method ends the composition and passes the key
+       on. Not retained: the event outlives keyDown:. */
+    NSEvent *withheld;
     NSCursor *cursor;
     /* The content view holds the material (effect) behind the view. clear
        tells that paint frames are transparent: the window is or it shows a
@@ -400,6 +405,11 @@ static void page_key(NativeWindow *s,NSEvent *event){
     if(!s->destroyed&&page_has_keyboard(self))[s->window makeFirstResponder:self];
     release_window(s);
 }
+/* Has the input method interpret a key the view got; it answers with the
+   view's NSTextInputClient methods. Tests stand in for an input method here
+   (zlm_test_compose_key). */
+static void interpret_default(NSView *view,NSEvent *event){[view interpretKeyEvents:@[event]];}
+static void (*interpret_keys)(NSView *,NSEvent *)=interpret_default;
 - (void)keyDown:(NSEvent *)event{
     NativeWindow *s=native;if(!s)return;
     if(page_has_keyboard(self)){page_key(s,event);return;}
@@ -428,7 +438,9 @@ static void page_key(NativeWindow *s,NSEvent *event){
         const unichar first=[text length]?[text characterAtIndex:0]:0;
         if([text length]&&!(first<0x20||first==0x7f||(first>=0xf700&&first<=0xf8ff))){emit_text(s,12,text,0);release_window(s);return;}
     }
-    [self interpretKeyEvents:@[event]];
+    s->withheld=composing?event:nil;
+    interpret_keys(self,event);
+    s->withheld=nil;
     release_window(s);
 }
 /* The Edit menu's actions (copy: and the others, which its roles send to
@@ -490,8 +502,32 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
     BOOL down=(flags&own)!=0 || ((flags&other)==0 && (flags&mask)!=0);
     NativeEvent key={0};key.kind=down?18:26;key.width=[event keyCode];key.flags=(int)modifiers(flags);emit(s,&key);
 }
+/* The input method passes on the key it was given (insertNewline: for
+   Return, moveLeft: for the left arrow…), as the Korean one does once
+   Return or an arrow committed the syllable it composed: the content gets
+   the key keyDown: held back, as it gets a key typed without composing,
+   and a key it leaves unhandled acts as one does. Input methods that keep
+   the key, as Return choosing a candidate in Japanese or Chinese, ask for
+   no command, or still compose; a key the content got already, or a command
+   outside keyDown:, is not sent again. */
 - (void)doCommandBySelector:(SEL)selector{
-    NativeWindow *s=native;if(!s)return;uint32_t shift=0;int edit=edit_for_selector(selector,&shift);
+    NativeWindow *s=native;if(!s)return;
+    NSEvent *event=s->withheld;
+    if(event&&![s->marked length]){
+        s->withheld=nil;
+        retain_window(s);
+        int handled=key_event(s,event,18);
+        if(!handled&&!s->destroyed){
+            const unsigned short code=[event keyCode];const uint32_t flags=modifiers([event modifierFlags]);
+            if(!(flags&(2|4))&&(code==0x30||code==0x24||code==0x4c||code==0x31)){
+                NativeEvent activate={0};activate.kind=15;activate.key=code==0x30?0:1;emit(s,&activate);handled=1;
+            }
+        }
+        const int gone=s->destroyed;
+        release_window(s);
+        if(handled||gone)return;
+    }
+    uint32_t shift=0;int edit=edit_for_selector(selector,&shift);
     if(edit>=0)emit_edit(s,edit,shift);
 }
 - (void)insertText:(id)string replacementRange:(NSRange)range{
@@ -761,6 +797,24 @@ int zlm_test_make_key(NativeWindow *s){
 void zlm_test_close(NativeWindow *s){@autoreleasepool{[s->delegate windowShouldClose:s->window];}}
 void zlm_test_commit(NativeWindow *s,const char *text){@autoreleasepool{[s->view insertText:[NSString stringWithUTF8String:text] replacementRange:NSMakeRange(NSNotFound,0)];}}
 void zlm_test_compose(NativeWindow *s,const char *text,size_t caret){@autoreleasepool{[s->view setMarkedText:[NSString stringWithUTF8String:text] selectedRange:NSMakeRange(caret,0) replacementRange:NSMakeRange(NSNotFound,0)];}}
+/* Stands in for an input method composing 가 as Return is pressed: mode 0
+   commits it and passes Return on (Korean), 1 commits it and keeps Return
+   (Japanese choosing a candidate), 2 passes Return on while it still
+   composes. */
+static int test_compose_mode;
+static void interpret_test(NSView *view,NSEvent *event){
+    (void)event;ZigView *zig=(ZigView *)view;
+    if(test_compose_mode!=2)[zig insertText:@"가" replacementRange:NSMakeRange(NSNotFound,0)];
+    if(test_compose_mode!=1)[zig doCommandBySelector:@selector(insertNewline:)];
+}
+void zlm_test_compose_key(NativeWindow *s,int mode){@autoreleasepool{
+    [s->view setMarkedText:@"가" selectedRange:NSMakeRange(1,0) replacementRange:NSMakeRange(NSNotFound,0)];
+    NSEvent *event=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:[s->window windowNumber] context:nil characters:@"\r" charactersIgnoringModifiers:@"\r" isARepeat:NO keyCode:0x24];
+    test_compose_mode=mode;interpret_keys=interpret_test;
+    [s->view keyDown:event];
+    interpret_keys=interpret_default;
+    if([s->marked length])[s->view unmarkText];
+}}
 int zlm_test_title_is(NativeWindow *s,const char *title){@autoreleasepool{return [[s->window title] isEqualToString:[NSString stringWithUTF8String:title]];}}
 /* Chooses an item of the application menu by its titles, as a click
    would; an ampersand in a requested title is a mnemonic and is skipped.

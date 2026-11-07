@@ -171,7 +171,9 @@ fn collect(allocator: std.mem.Allocator, tree: md.Tree, index: u32, options: Opt
             .strong => strong += delta,
             .strikethrough => struck += delta,
             .link, .image => return false,
-            .text => span.text = node.text,
+            // Mentions and references are text here; a view that
+            // resolves them into links draws them itself.
+            .text, .mention, .reference => span.text = node.text,
             .soft_break => span.text = " ",
             .hard_break => span.text = "\n",
             .code => {

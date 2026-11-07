@@ -25,6 +25,23 @@ pub const Colors = struct {
     quote: ?u32 = null,
     rule: ?u32 = null,
     image: ?u32 = null,
+    /// The bar, icon and title of GitHub's alerts, by kind: note, tip,
+    /// important, warning and caution. GitHub's colors by default, light or
+    /// dark as the theme's background is.
+    alerts: ?[5]u32 = null,
+};
+
+/// Where mentions and references go (`Options.resolve`).
+pub const Resolve = struct {
+    context: *anyopaque,
+    /// The destination of mention or reference `index` of `tree`, as a
+    /// path of the app's, which activates as a link to it does; null to
+    /// leave it text, as GitHub does for a person or an issue it does not
+    /// know. `Tree.login` and `Tree.reference` say whom and which. Asked
+    /// for each one shown whenever the view builds, so it looks up what
+    /// the app has at hand; the returned bytes must stay valid through the
+    /// pass.
+    destination: *const fn (context: *anyopaque, tree: md.Tree, index: u32) ?[]const u8,
 };
 
 /// Monospace drawing for code blocks, such as `ziggurat_markdown_code`.
@@ -92,6 +109,12 @@ pub const Options = struct {
     /// a sheet for a file. It clicks as the link, stays on the row of the
     /// link's first word and copies as nothing.
     link_icon: ?LinkIcon = null,
+    /// Makes mentions (`@octocat`) and references to issues (`#123`), which
+    /// a parse with `ParseOptions.mentions` and `references` finds, links;
+    /// without it, they show as text. A mention shows in bold, as GitHub
+    /// shows them. Blocks holding a resolved one are built from view text
+    /// and links rather than by `rich`.
+    resolve: ?Resolve = null,
 };
 
 /// Chooses the icon at the start of a link's text (`Options.link_icon`).
@@ -196,7 +219,7 @@ pub fn build(v: *View, tree: md.Tree, options: Options, style: Style) Error!?Act
     return builder.activation;
 }
 
-const Resolved = struct { text: u32, heading: u32, emphasis: u32, strong: u32, strikethrough: u32, code: u32, code_background: u32, quote: u32, rule: u32, image: u32 };
+const Resolved = struct { text: u32, heading: u32, emphasis: u32, strong: u32, strikethrough: u32, code: u32, code_background: u32, quote: u32, rule: u32, image: u32, alerts: [5]u32 };
 fn resolve(options: Options) Resolved {
     const p = options.theme.palette;
     const c = options.colors;
@@ -211,6 +234,30 @@ fn resolve(options: Options) Resolved {
         .quote = c.quote orelse p.disabled_text,
         .rule = c.rule orelse p.disabled_border,
         .image = c.image orelse p.disabled_text,
+        .alerts = c.alerts orelse alertColors(isDark(p.background)),
+    };
+}
+
+/// GitHub's colors of alerts: note, tip, important, warning and caution.
+pub fn alertColors(dark: bool) [5]u32 {
+    return if (dark) .{ 0x4493f8, 0x3fb950, 0xab7df8, 0xd29922, 0xf85149 } else .{ 0x0969da, 0x1a7f37, 0x8250df, 0x9a6700, 0xd1242f };
+}
+
+fn isDark(rgb: u32) bool {
+    const r: f32 = @floatFromInt((rgb >> 16) & 0xff);
+    const g: f32 = @floatFromInt((rgb >> 8) & 0xff);
+    const b: f32 = @floatFromInt(rgb & 0xff);
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
+}
+
+/// The icon of an alert's title.
+pub fn alertIcon(alert: md.Alert) view.Icon {
+    return switch (alert) {
+        .none, .note => .info,
+        .tip => .light_bulb,
+        .important => .report,
+        .warning => .warning,
+        .caution => .stop,
     };
 }
 
@@ -255,7 +302,7 @@ const Builder = struct {
                 try v.column(.{ .height = 1, .background = self.colors.rule, .self_align = .stretch });
                 try v.end();
             },
-            .block_quote => {
+            .block_quote => if (node.alert != .none) try self.alert(index, node.alert, width) else {
                 try v.row(.{ .gap = 12, .alignment = .stretch });
                 try v.column(.{ .width = 3, .background = self.colors.rule });
                 try v.end();
@@ -272,6 +319,41 @@ const Builder = struct {
             .table => try self.table(index, width),
             else => {},
         }
+    }
+
+    /// A GitHub alert: a quote whose bar, icon and title take its kind's
+    /// color, its text the color of text.
+    fn alert(self: *Builder, index: u32, kind: md.Alert, width: f32) Error!void {
+        const v = self.v;
+        const color = self.colors.alerts[@backingInt(kind) - 1];
+        try v.row(.{ .gap = 12, .alignment = .stretch });
+        try v.column(.{ .width = 3, .background = color });
+        try v.end();
+        try v.column(.{ .gap = self.options.gap, .grow = 1 });
+        try v.row(.{ .gap = 8, .alignment = .center });
+        try v.icon(alertIcon(kind), .{ .size = view.Font.body.size }, .{ .color = color });
+        try v.text(kind.title(), .{ .color = color, .font = .{ .weight = .semibold } });
+        try v.end();
+        try self.children(index, @max(1, width - 15), self.options.gap);
+        try v.end();
+        try v.end();
+    }
+
+    /// Where mention or reference `index` goes, or null for text.
+    fn destination(self: *Builder, index: u32) ?[]const u8 {
+        const resolver = self.options.resolve orelse return null;
+        return resolver.destination(resolver.context, self.tree, index);
+    }
+
+    /// Whether a mention or reference below `index` resolves to a link.
+    fn resolvesBelow(self: *Builder, index: u32) bool {
+        if (self.options.resolve == null) return false;
+        var walker = self.tree.walk(index);
+        while (walker.next()) |event| switch (self.tree.get(event.index).kind) {
+            .mention, .reference => if (self.destination(event.index) != null) return true,
+            else => {},
+        };
+        return false;
     }
 
     fn list(self: *Builder, index: u32, width: f32) Error!void {
@@ -376,7 +458,7 @@ const Builder = struct {
     /// one node per run of one style; links stay activatable on every row
     /// they wrap onto.
     fn flow(self: *Builder, index: u32, width: f32, color: u32, font: view.Font) Error!void {
-        if (self.options.rich) |face| if (face.embed(face.context, self.tree, index, width, color)) |content| {
+        if (self.options.rich) |face| if (!self.resolvesBelow(index)) if (face.embed(face.context, self.tree, index, width, color)) |content| {
             try self.v.embed(content, .{});
             if (index == self.reveal) self.v.scrollIntoView(self.v.lastNode().id);
             return;
@@ -402,6 +484,7 @@ const Builder = struct {
                     };
                 },
                 .text => try line.add(node.text, false),
+                .mention, .reference => try line.reference(event.index, node),
                 .code, .math => try line.add(node.text, true),
                 .soft_break => try line.add(" ", false),
                 .hard_break => try line.newLine(),
@@ -448,6 +531,9 @@ const Line = struct {
     font: view.Font,
     style: InlineStyle = .{},
     link: u32 = none,
+    /// Where the current run's link goes when it is not the link node's
+    /// own: a resolved mention's or reference's.
+    url: ?[]const u8 = null,
     /// The icon still to draw at the start of the current link's text.
     icon: ?view.Icon = null,
     used: f32 = 0,
@@ -545,6 +631,23 @@ const Line = struct {
             try self.segment(text[start..], code);
     }
 
+    /// A mention or a reference: a link of its own where `Options.resolve`
+    /// gives it a destination, a mention's text in bold, else text.
+    fn reference(self: *Line, index: u32, node: *const md.Node) Error!void {
+        const url = if (self.link == none) self.b.destination(index) else null;
+        if (url == null) return self.add(node.text, false);
+        self.link = index;
+        self.url = url;
+        const strong = node.kind == .mention;
+        if (strong) self.style.strong += 1;
+        defer {
+            if (strong) self.style.strong -= 1;
+            self.link = none;
+            self.url = null;
+        }
+        try self.add(node.text, false);
+    }
+
     /// The width a link's icon still to draw takes, gap included.
     fn iconWidth(self: *Line) f32 {
         if (self.icon == null or !self.linked()) return 0;
@@ -577,7 +680,7 @@ const Line = struct {
         if (self.linked()) {
             // Code in a link keeps its face and wash.
             const style: view.Style = if (code) .{ .font = self.fontFor(true), .background = self.b.colors.code_background, .radius = 3, .shrink = 0 } else .{ .font = self.fontFor(false), .shrink = 0 };
-            const url = self.b.tree.get(self.link).url;
+            const url = self.url orelse self.b.tree.get(self.link).url;
             if (self.icon) |which| {
                 // The icon clicks as the link; it has no text to copy.
                 self.icon = null;
