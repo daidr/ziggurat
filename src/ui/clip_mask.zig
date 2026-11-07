@@ -6,6 +6,16 @@
 //! costs nothing to cut to again and a moving one makes a new mask every
 //! frame. The renderers read the mask as a clip's coverage (`Buffer.
 //! pushMaskClip`): what is drawn inside shows as much as the mask there.
+//!
+//! A mask let go keeps its pixels' memory for the paint after, as a spare
+//! a mask of another size takes in place of allocating its own: a clip
+//! that grows or turns, as a card opening out to fill the window, makes a
+//! new mask in every frame, and each takes the memory of the one before.
+//! A side that outgrows the spare doubles it, so a growing clip allocates
+//! a few times in place of every frame; a mask under a quarter of a spare
+//! takes memory of its own size, so a clip that shrank much doesn't keep
+//! its largest. Spares count toward `max_bytes` by the memory they keep,
+//! and those no paint took go at the paint after.
 const std = @import("std");
 const drawing = @import("ziggurat_drawing_resources");
 const vector = @import("ziggurat_vector");
@@ -32,7 +42,14 @@ pub const Stats = struct {
     refused: u64 = 0,
     kept: usize = 0,
     bytes: usize = 0,
+    /// Masks that took a spare's memory in place of allocating their own,
+    /// and the spares kept now.
+    recycled: u64 = 0,
+    spares: usize = 0,
 };
+
+/// Spares of let go masks' memory kept at once.
+pub const max_spares = 4;
 
 /// What makes the coverage of a release: a renderer giving back the
 /// residency of an identity it holds. Called before a mask's pixels go.
@@ -44,6 +61,8 @@ pub const Release = struct {
 const Entry = struct {
     key: u64,
     used: u64,
+    /// The memory the entry keeps: all of `pixels`, which may be more than
+    /// its coverage takes, or a prepared path's coverage.
     bytes: usize,
     /// Owned pixels, or a prepared path's coverage.
     pixels: []u8 = &.{},
@@ -65,8 +84,13 @@ pub const Masks = struct {
     entries: [max_masks]?Entry = @splat(null),
     /// Paints begun so far; an entry remembers the last that used it.
     paints: u64 = 0,
+    /// The memory the masks and the spares keep.
     bytes: usize = 0,
     stats: Stats = .{},
+    /// Memory of masks let go, each with the paint it was let go in.
+    spares: [max_spares]?Spare = @splat(null),
+
+    const Spare = struct { pixels: []u8, since: u64 };
 
     pub fn create(allocator: std.mem.Allocator) !*Masks {
         const self = try allocator.create(Masks);
@@ -81,6 +105,7 @@ pub const Masks = struct {
             self.free(entry);
             slot.* = null;
         };
+        for (&self.spares) |*spare| self.dropSpare(spare);
         self.allocator.destroy(self);
     }
     /// Start a paint: let go of the masks no paint used since the one
@@ -88,6 +113,8 @@ pub const Masks = struct {
     /// any of them now.
     pub fn beginPaint(self: *Masks, release: ?Release) void {
         self.paints += 1;
+        // Spares the paint before took no mask into are let go.
+        for (&self.spares) |*spare| if (spare.*) |value| if (value.since + 1 < self.paints) self.dropSpare(spare);
         for (&self.entries) |*slot| if (slot.*) |*entry| {
             if (entry.used + 1 >= self.paints) continue;
             if (entry.lease.pins > entry.lease.residency_pins) continue;
@@ -98,14 +125,85 @@ pub const Masks = struct {
             self.stats.released += 1;
         };
     }
+    /// Let go of a mask, its owned pixels' memory kept as a spare where
+    /// there is room for one.
     fn free(self: *Masks, entry: *Entry) void {
-        if (entry.prepared) |prepared| prepared.close() catch {} else self.allocator.free(entry.pixels);
-        self.bytes -= entry.bytes;
+        if (entry.prepared) |prepared| {
+            prepared.close() catch {};
+            self.bytes -= entry.bytes;
+            return;
+        }
+        if (entry.pixels.len == 0) {
+            self.bytes -= entry.bytes;
+            return;
+        }
+        // The smallest spare goes for a larger one.
+        var open: ?*?Spare = null;
+        for (&self.spares) |*spare| {
+            if (spare.* == null) {
+                open = spare;
+                break;
+            }
+            if (open == null or spare.*.?.pixels.len < open.?.*.?.pixels.len) open = spare;
+        }
+        if (open.?.*) |value| {
+            if (value.pixels.len >= entry.pixels.len) {
+                self.allocator.free(entry.pixels);
+                self.bytes -= entry.bytes;
+                return;
+            }
+            self.dropSpare(open.?);
+        }
+        // Its memory stays counted, as the spare's.
+        open.?.* = .{ .pixels = entry.pixels, .since = self.paints };
+    }
+    fn dropSpare(self: *Masks, spare: *?Spare) void {
+        const value = spare.* orelse return;
+        self.allocator.free(value.pixels);
+        self.bytes -= value.pixels.len;
+        spare.* = null;
+    }
+    /// Zeroed memory for a mask of `bytes`: a spare's, the smallest that
+    /// holds it, unless it takes less than a quarter of it, or new memory,
+    /// twice as much for a mask that outgrew a spare, which goes, so that
+    /// the masks of a clip growing take it for a while. The
+    /// memory is counted in `bytes`; `room` made room for `bytes` of it.
+    fn takePixels(self: *Masks, bytes: usize) ![]u8 {
+        var best: ?*?Spare = null;
+        var outgrown: ?*?Spare = null;
+        for (&self.spares) |*spare| if (spare.*) |value| {
+            const n = value.pixels.len;
+            if (n >= bytes and bytes >= n / 4) {
+                if (best == null or n < best.?.*.?.pixels.len) best = spare;
+            } else if (n < bytes and (outgrown == null or n > outgrown.?.*.?.pixels.len)) outgrown = spare;
+        };
+        if (best) |spare| {
+            const pixels = spare.*.?.pixels;
+            spare.* = null;
+            @memset(pixels, 0);
+            self.stats.recycled += 1;
+            return pixels;
+        }
+        var size = bytes;
+        if (outgrown) |spare| {
+            self.dropSpare(spare);
+            if (self.bytes + 2 * bytes <= max_bytes) size = 2 * bytes;
+        }
+        const pixels = try self.allocator.alloc(u8, size);
+        @memset(pixels, 0);
+        self.bytes += size;
+        return pixels;
+    }
+    /// Give back memory `takePixels` gave for a mask that is not made.
+    fn returnPixels(self: *Masks, pixels: []u8) void {
+        self.allocator.free(pixels);
+        self.bytes -= pixels.len;
     }
     pub fn statsNow(self: *const Masks) Stats {
         var result = self.stats;
         result.bytes = self.bytes;
         for (self.entries) |slot| result.kept += @intFromBool(slot != null);
+        for (self.spares) |spare| result.spares += @intFromBool(spare != null);
         return result;
     }
     fn find(self: *Masks, key: u64) ?*Entry {
@@ -127,6 +225,18 @@ pub const Masks = struct {
                 break;
             };
             if (open != null and self.bytes + bytes <= max_bytes) return open;
+            // A spare that holds the mask takes no more memory; others go
+            // before any mask does.
+            if (open != null) {
+                for (self.spares) |spare| if (spare) |value| if (value.pixels.len >= bytes and bytes >= value.pixels.len / 4) return open;
+                var dropped = false;
+                for (&self.spares) |*spare| if (spare.* != null) {
+                    self.dropSpare(spare);
+                    dropped = true;
+                    break;
+                };
+                if (dropped) continue;
+            }
             // The mask used longest ago, and not in this paint.
             var oldest: ?*?Entry = null;
             for (&self.entries) |*slot| if (slot.*) |entry| {
@@ -162,14 +272,13 @@ pub const Masks = struct {
             self.stats.refused += 1;
             return null;
         };
-        const pixels = try self.allocator.alloc(u8, bytes);
-        errdefer self.allocator.free(pixels);
-        @memset(pixels, 0);
+        const memory = try self.takePixels(bytes);
+        errdefer self.returnPixels(memory);
+        const pixels = memory[0..bytes];
         const stored: ?brushes.Stored = if (gradient) |g| try brushes.Stored.init(g) else null;
         fillShape(pixels, stride, box, rect, radius, if (stored) |*s| s else null, scale);
         const identity = try drawing.reserveRasterIdentity();
-        slot.* = .{ .key = key, .used = self.paints, .bytes = bytes, .pixels = pixels, .lease = drawing.Lease.init(std.Thread.getCurrentId()), .identity = identity, .coverage = .{ .pixels = pixels, .width = width, .height = height, .stride = stride, .origin_x = box[0], .origin_y = box[1], .scale = scale } };
-        self.bytes += bytes;
+        slot.* = .{ .key = key, .used = self.paints, .bytes = memory.len, .pixels = memory, .lease = drawing.Lease.init(std.Thread.getCurrentId()), .identity = identity, .coverage = .{ .pixels = pixels, .width = width, .height = height, .stride = stride, .origin_x = box[0], .origin_y = box[1], .scale = scale } };
         self.stats.made += 1;
         return try slot.*.?.view();
     }
@@ -199,9 +308,9 @@ pub const Masks = struct {
             self.stats.refused += 1;
             return null;
         };
-        const pixels = try self.allocator.alloc(u8, bytes);
-        errdefer self.allocator.free(pixels);
-        @memset(pixels, 0);
+        const memory = try self.takePixels(bytes);
+        errdefer self.returnPixels(memory);
+        const pixels = memory[0..bytes];
         var stored: [max_layers]brushes.Stored = undefined;
         for (layers, 0..) |layer, i| stored[i] = try brushes.Stored.init(layer.gradient);
         for (0..height) |row| {
@@ -214,8 +323,7 @@ pub const Masks = struct {
             }
         }
         const identity = try drawing.reserveRasterIdentity();
-        slot.* = .{ .key = key, .used = self.paints, .bytes = bytes, .pixels = pixels, .lease = drawing.Lease.init(std.Thread.getCurrentId()), .identity = identity, .coverage = .{ .pixels = pixels, .width = width, .height = height, .stride = stride, .origin_x = box[0], .origin_y = box[1], .scale = scale } };
-        self.bytes += bytes;
+        slot.* = .{ .key = key, .used = self.paints, .bytes = memory.len, .pixels = memory, .lease = drawing.Lease.init(std.Thread.getCurrentId()), .identity = identity, .coverage = .{ .pixels = pixels, .width = width, .height = height, .stride = stride, .origin_x = box[0], .origin_y = box[1], .scale = scale } };
         self.stats.made += 1;
         return try slot.*.?.view();
     }
@@ -516,4 +624,51 @@ test "layers of masks composite from the bottom up" {
     add[0].composite = .add;
     try std.testing.expectEqual(@as(f32, 1), layeredAlpha(&add, &stored, 5.5, 5.5, 1));
     try std.testing.expectEqual(@as(f32, 1), layeredAlpha(&add, &stored, 20.5, 20.5, 1));
+}
+
+test "a clip growing in every paint takes the memory of its mask before" {
+    const masks = try Masks.create(std.testing.allocator);
+    defer masks.destroy(null);
+    const visible: Rect = .{ .x = 0, .y = 0, .width = 2400, .height = 1500 };
+    // A card opening out over 40 frames, from a cover to the window.
+    var allocations: u64 = 0;
+    for (0..40) |frame| {
+        masks.beginPaint(null);
+        const t: f32 = @as(f32, @floatFromInt(frame)) / 39;
+        const rect: Rect = .{ .x = 100 * (1 - t), .y = 100 * (1 - t), .width = 200 + 2200 * t, .height = 120 + 1380 * t };
+        const before = masks.stats.recycled;
+        const view = (try masks.shape(rect, 24, null, visible, 1, null)).?;
+        if (masks.stats.recycled == before) allocations += 1;
+        // The mask is of the clip, whatever memory it took.
+        const c = view.coverage;
+        try std.testing.expectEqual(@as(u32, @intFromFloat(@ceil(rect.x + rect.width) - @floor(rect.x))), c.width);
+        try std.testing.expectEqual(@as(u8, 255), c.pixels[(c.height / 2) * c.stride + c.width / 2]);
+        try std.testing.expectEqual(@as(u8, 0), c.pixels[0]);
+        try std.testing.expect(masks.bytes <= max_bytes);
+    }
+    std.debug.print("growing clip: {d} allocations in 40 frames, {d} bytes kept\n", .{ allocations, masks.bytes });
+    try std.testing.expect(allocations <= 12);
+}
+
+test "a mask that shrank much takes memory of its own size, and idle spares go" {
+    const masks = try Masks.create(std.testing.allocator);
+    defer masks.destroy(null);
+    const visible: Rect = .{ .x = 0, .y = 0, .width = 1000, .height = 1000 };
+    masks.beginPaint(null);
+    _ = (try masks.shape(.{ .x = 0, .y = 0, .width = 800, .height = 800 }, 8, null, visible, 1, null)).?;
+    masks.beginPaint(null);
+    masks.beginPaint(null);
+    // The large mask went, its memory a spare, counted as it keeps it.
+    try std.testing.expectEqual(@as(usize, 1), masks.statsNow().spares);
+    try std.testing.expectEqual(@as(usize, 800 * 800), masks.bytes);
+    // A small mask doesn't keep the large memory.
+    _ = (try masks.shape(.{ .x = 0, .y = 0, .width = 100, .height = 100 }, 8, null, visible, 1, null)).?;
+    try std.testing.expectEqual(@as(u64, 0), masks.stats.recycled);
+    try std.testing.expectEqual(@as(usize, 800 * 800 + 100 * 100), masks.bytes);
+    // A paint that takes no spare lets it go at the next.
+    masks.beginPaint(null);
+    _ = (try masks.shape(.{ .x = 0, .y = 0, .width = 100, .height = 100 }, 8, null, visible, 1, null)).?;
+    masks.beginPaint(null);
+    try std.testing.expectEqual(@as(usize, 0), masks.statsNow().spares);
+    try std.testing.expectEqual(@as(usize, 100 * 100), masks.bytes);
 }

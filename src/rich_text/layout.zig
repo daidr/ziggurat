@@ -36,6 +36,10 @@ pub const Style = struct {
     /// Raises the span's text or object that many DIP above the baseline,
     /// or lowers it when negative; the line makes room for it.
     baseline_shift: f32 = 0,
+    /// The span's language, a BCP 47 tag; "" is the paragraph's
+    /// (`Options.lang`). Korean keeps its words whole across lines, as
+    /// CSS's `word-break: keep-all` (see `view.line_breaks.Keep`).
+    lang: []const u8 = "",
 };
 
 pub const Span = struct {
@@ -62,6 +66,12 @@ pub const Options = struct {
     /// Moves the first line this many DIP in and wraps it that much
     /// narrower, as a book indents its paragraphs.
     indent: f32 = 0,
+    /// The paragraph's language, a BCP 47 tag, which spans that set none
+    /// take: Korean ("ko", "ko-KR") breaks lines between words, at spaces
+    /// and after punctuation, not between any two syllables, as CSS's
+    /// `word-break: keep-all`; a word wider than `width` still breaks
+    /// within it unless `no_break_words`.
+    lang: []const u8 = "",
     /// Breaks lines only between words: a word wider than `width`
     /// overflows it rather than breaking between its characters.
     no_break_words: bool = false,
@@ -270,7 +280,7 @@ pub const Layout = struct {
                     break;
                 }
                 const length: u32 = @intCast(sequenceLength(text[at]));
-                if (s.style.object != null or breaksAround(decode(text[at..@min(s.end, at + length)]))) {
+                if (s.style.object != null or self.breaksAroundIn(k, decode(text[at..@min(s.end, at + length)]))) {
                     if (at == start) {
                         at += length;
                         rune += 1;
@@ -296,6 +306,15 @@ pub const Layout = struct {
         }
     }
 
+    /// Whether lines break around `codepoint` in span k: as in CJK text,
+    /// but between the letters of a language keeping its words whole.
+    fn breaksAroundIn(self: *const Layout, k: u32, codepoint: u21) bool {
+        if (!breaksAround(codepoint)) return false;
+        const lang = self.spans.items[k].style.lang;
+        const keep = view.line_breaks.keepsWords(if (lang.len != 0) lang else self.options.lang);
+        return !(keep and view.line_breaks.wordInside(codepoint));
+    }
+
     fn glue(self: *Layout) void {
         const words = self.words.items;
         const text = self.text.items;
@@ -305,7 +324,7 @@ pub const Layout = struct {
             if (next.span == w.span or w.hyphen > 0) continue;
             if (self.spans.items[w.span].style.object != null or self.spans.items[next.span].style.object != null) continue;
             const last = lastCodepoint(text[w.start..w.end]);
-            w.glued = !isSpace(text[w.end - 1]) and !breaksAround(last) and !isSpace(text[next.start]) and !breaksAround(decode(text[next.start..@min(next.end, next.start + @as(u32, @intCast(sequenceLength(text[next.start]))))]));
+            w.glued = !isSpace(text[w.end - 1]) and !self.breaksAroundIn(w.span, last) and !isSpace(text[next.start]) and !self.breaksAroundIn(next.span, decode(text[next.start..@min(next.end, next.start + @as(u32, @intCast(sequenceLength(text[next.start]))))]));
         }
         var i = words.len;
         while (i > 0) {

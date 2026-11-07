@@ -218,3 +218,41 @@ test "focus given to a field's box goes to its input" {
     try testing.expectEqual((try h.find(.{ .kind = .embed, .nth = 0 })).id, h.focused().?.id);
     try testing.expect(app.focused);
 }
+
+const Card = struct {
+    turn: f32 = 0,
+    flips: usize = 0,
+    fn build(self: *Card, v: *View) anyerror!void {
+        try v.row(.{ .gap = 10 });
+        // The two faces of a card turning over, the back a half turn more.
+        try v.column(.{ .key = 1, .width = 80, .height = 60, .pose = .{ .rotate_y = self.turn }, .backface_hidden = true });
+        if (try v.button("Front", .{})) self.flips += 1;
+        try v.end();
+        try v.column(.{ .key = 2, .width = 80, .height = 60, .pose = .{ .rotate_y = self.turn + 180 }, .backface_hidden = true });
+        if (try v.button("Back", .{})) self.flips += 1;
+        try v.end();
+        try v.end();
+    }
+};
+
+test "a face turned away from the viewer draws and takes nothing, keeping its room" {
+    var storage: Storage = .{};
+    var app: Card = .{ .turn = 30 };
+    var h = Harness.init(&app, Card.build, storage.buffers(), .{});
+    try h.render();
+    try testing.expect(h.visible(try h.find(.{ .text = "Front" })) != null);
+    try testing.expect(h.visible(try h.find(.{ .text = "Back" })) == null);
+    try testing.expectError(error.Hidden, h.click(.{ .text = "Back" }));
+    try h.click(.{ .text = "Front" });
+    try testing.expectEqual(@as(usize, 1), app.flips);
+    const room = try h.boundsOf(.{ .key = 2 });
+    // Past a quarter turn the back shows and the front goes, both keeping
+    // their room.
+    app.turn = 150;
+    try h.render();
+    try testing.expect(h.visible(try h.find(.{ .text = "Front" })) == null);
+    try testing.expect(h.visible(try h.find(.{ .text = "Back" })) != null);
+    try testing.expectEqual(room.x, (try h.boundsOf(.{ .key = 2 })).x);
+    try h.click(.{ .text = "Back" });
+    try testing.expectEqual(@as(usize, 2), app.flips);
+}

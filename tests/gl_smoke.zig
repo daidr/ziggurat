@@ -189,6 +189,7 @@ const Probe = struct {
     content: ui.Context = undefined,
     images: Images = undefined,
     draw_image: bool = false,
+    transient: bool = false,
     effect: ?*ui.shader.Program = null,
     effect_values: ui.shader.Values = undefined,
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
@@ -198,6 +199,7 @@ const Probe = struct {
         frame.roundedRect(.{ .x = 80, .y = 10, .width = 60, .height = 40 }, 10, rgba(0xe0, 0x40, 0x20, 0xff));
         frame.label(.{ .x = 10, .y = 60, .width = 280, .height = 30 }, "OpenGL / 图形", 0x123456);
         if (self.draw_image) frame.image(.{ .x = 200, .y = 10, .width = 32, .height = 32 }, self.images.image, .{}) catch {};
+        if (self.transient) frame.label(.{ .x = 10, .y = 120, .width = 200, .height = 30 }, "A text of one frame", 0x123456);
         if (self.effect) |program| {
             frame.beginEffect(.{ .x = 240, .y = 100, .width = 30, .height = 30 }, .{ .program = program, .values = &self.effect_values }, .{}) catch return;
             frame.rect(.{ .x = 240, .y = 100, .width = 30, .height = 30 }, 0xff0000);
@@ -312,6 +314,25 @@ fn windowFrames(allocator: std.mem.Allocator) !void {
         try std.testing.expectEqual(@as(u32, 0xffffffff), gpu.pixelForTest(390 * scale, 230 * scale));
     } else std.debug.print("the window kept its size: no resize checked\n", .{});
     try std.testing.expectEqual(@as(usize, 0), probe.content.fallbacks);
+
+    // A text drawn for one frame goes once frames no longer draw it: the
+    // renderer sweeps every 120 frames, dropping texts idle for 240.
+    probe.transient = true;
+    probe.window.invalidate();
+    gl.Renderer.displayForTest("OpenGL");
+    const kept = gpu.textStats().entries;
+    probe.transient = false;
+    const sweeps = gpu.stats().sweeps;
+    var frame: usize = 0;
+    while (frame < 480) : (frame += 1) {
+        probe.window.invalidate();
+        gl.Renderer.displayForTest("OpenGL");
+    }
+    std.debug.print("sweeps: {d}, texts kept {d} then {d}\n", .{ gpu.stats().sweeps - sweeps, kept, gpu.textStats().entries });
+    try std.testing.expect(gpu.stats().sweeps - sweeps >= 3);
+    // Those still on screen that no frame drew again go too, and are drawn
+    // again when a frame draws them.
+    try std.testing.expect(gpu.textStats().entries < kept);
     _ = try probe.window.destroy();
     try app.dispatch();
 }
@@ -383,6 +404,15 @@ const LayerScene = struct {
         frame.rect(.{ .x = 74, .y = 128, .width = 10, .height = 8 }, 0xffff00);
         try frame.endGroup();
         try frame.popOpacity();
+        // A rounded card that clips, holding a column that clips too and
+        // fills its bottom: the card's corners cut the column, as on the
+        // CPU, though the column's own clip is a rectangle.
+        frame.roundedRect(.{ .x = 10, .y = 145, .width = 100, .height = 50 }, 14, rgba(0xdd, 0xdd, 0xdd, 0xff));
+        try frame.pushRoundedClip(.{ .x = 10, .y = 145, .width = 100, .height = 50 }, 14, null);
+        try frame.pushClip(.{ .x = 10, .y = 170, .width = 100, .height = 25 });
+        frame.rect(.{ .x = 0, .y = 160, .width = 120, .height = 40 }, 0x0040ff);
+        try frame.popClip();
+        try frame.popClip();
     }
     fn blurred(_: *anyopaque, frame: *ui.Frame) !void {
         frame.rect(.{ .x = 120, .y = 45, .width = 20, .height = 20 }, 0x40c040);
@@ -463,9 +493,10 @@ fn layerFrames(allocator: std.mem.Allocator) !void {
     const stats = try renderLayers(allocator, app, &scene_state, false, &gpu);
     _ = try renderLayers(allocator, app, &scene_state, true, &software);
     // Six groups (one filtered, one the overlapping opacity), a transform,
-    // and the rounded clip's mask drawn as two runs; two filter passes.
+    // the rounded clip's mask drawn as two runs and the card's as one; two
+    // filter passes.
     std.debug.print("gl layers: {d} composited\n", .{stats.layers});
-    try std.testing.expectEqual(@as(u64, 9), stats.layers);
+    try std.testing.expectEqual(@as(u64, 10), stats.layers);
     try std.testing.expectEqual(@as(u64, 2), stats.filter_passes);
     try std.testing.expectEqual(gpu.items.len, software.items.len);
     const stride: usize = size.width;
@@ -491,6 +522,11 @@ fn layerFrames(allocator: std.mem.Allocator) !void {
     try std.testing.expect(near(0x0000ff, effectAt(gpu.items, size.scale, stride, 165, 20), 2));
     try std.testing.expect(near(0xff0000, effectAt(gpu.items, size.scale, stride, 158, 10), 2));
     try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 153, 5), 2));
+    // The column's bottom corners are the card's: rounded, cut on the GPU.
+    try std.testing.expect(near(0x0040ff, effectAt(gpu.items, size.scale, stride, 60, 185), 2));
+    try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 10.5, 194.5), 2));
+    try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 109.5, 194.5), 2));
+    try std.testing.expect(near(0x0040ff, effectAt(gpu.items, size.scale, stride, 15, 175), 2));
 
     var worst: i32 = 0;
     var worst_at: usize = 0;
@@ -812,7 +848,7 @@ fn glassFrames(allocator: std.mem.Allocator) !void {
 }
 
 const layer_width = 200;
-const layer_height = 140;
+const layer_height = 200;
 extern fn getenv([*:0]const u8) ?[*:0]const u8;
 
 /// On a software rasterizer, unless asked, windows draw with the software

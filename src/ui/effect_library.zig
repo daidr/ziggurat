@@ -133,6 +133,54 @@ pub const Pose = struct {
         result.y_percent = 0;
         return result;
     }
+    /// Whether the pose turns the front of the content, which faces the
+    /// viewer, away: whether its normal, by the inverse transpose of the
+    /// pose's 4×4 map, perspective included, points away, as Chromium's
+    /// `IsBackFaceVisible` has it, so that content pushed off its axis by
+    /// `depth` faces where the viewer sees it from, as the items at the
+    /// sides of a carousel turn their backs as they pass the viewer's line.
+    /// See `view.Style.backface_hidden`.
+    pub fn facesAway(self: Pose) bool {
+        if (self.rotate_x == 0 and self.rotate_y == 0) return false;
+        const radians = std.math.pi / 180.0;
+        const cz = @cos(@as(f64, self.rotate) * radians);
+        const sz = @sin(@as(f64, self.rotate) * radians);
+        const cx = @cos(@as(f64, self.rotate_x) * radians);
+        const sx = @sin(@as(f64, self.rotate_x) * radians);
+        const cy = @cos(@as(f64, self.rotate_y) * radians);
+        const sy = @sin(@as(f64, self.rotate_y) * radians);
+        // The columns of R = Ry * Rx * Rz times the scales: x, y and z.
+        var axes: [3][3]f64 = undefined;
+        for (0..3) |i| {
+            const v0 = [3]f64{ if (i == 0) self.scale_x else 0, if (i == 1) self.scale_y else 0, if (i == 2) 1 else 0 };
+            const v1 = [3]f64{ v0[0] * cz - v0[1] * sz, v0[0] * sz + v0[1] * cz, v0[2] };
+            const v2 = [3]f64{ v1[0], v1[1] * cx - v1[2] * sx, v1[1] * sx + v1[2] * cx };
+            axes[i] = .{ v2[0] * cy + v2[2] * sy, v2[1], -v2[0] * sy + v2[2] * cy };
+        }
+        const d: f64 = self.depth;
+        const moved = [3]f64{ self.x + d * cx * sy, self.y - d * sx, self.z + d * cx * cy };
+        const k: f64 = if (self.perspective > 0) 1 / @as(f64, self.perspective) else 0;
+        // Rows of the 4×4 map about the origin: the turn and the move, then
+        // the perspective's w = 1 - z / distance.
+        const m = [4][4]f64{
+            .{ axes[0][0], axes[1][0], axes[2][0], moved[0] },
+            .{ axes[0][1], axes[1][1], axes[2][1], moved[1] },
+            .{ axes[0][2], axes[1][2], axes[2][2], moved[2] },
+            .{ -k * axes[0][2], -k * axes[1][2], -k * axes[2][2], 1 - k * moved[2] },
+        };
+        const det3 = struct {
+            fn of(a: [4][4]f64, r: [3]usize, c: [3]usize) f64 {
+                return a[r[0]][c[0]] * (a[r[1]][c[1]] * a[r[2]][c[2]] - a[r[1]][c[2]] * a[r[2]][c[1]]) -
+                    a[r[0]][c[1]] * (a[r[1]][c[0]] * a[r[2]][c[2]] - a[r[1]][c[2]] * a[r[2]][c[0]]) +
+                    a[r[0]][c[2]] * (a[r[1]][c[0]] * a[r[2]][c[1]] - a[r[1]][c[1]] * a[r[2]][c[0]]);
+            }
+        }.of;
+        // The determinant along the last column; the inverse's entry at row
+        // and column 2 is the cofactor there over it.
+        const det = -m[0][3] * det3(m, .{ 1, 2, 3 }, .{ 0, 1, 2 }) + m[1][3] * det3(m, .{ 0, 2, 3 }, .{ 0, 1, 2 }) - m[2][3] * det3(m, .{ 0, 1, 3 }, .{ 0, 1, 2 }) + m[3][3] * det3(m, .{ 0, 1, 2 }, .{ 0, 1, 2 });
+        if (det == 0 or !std.math.isFinite(det)) return false;
+        return det3(m, .{ 0, 1, 3 }, .{ 0, 1, 3 }) * det < 0;
+    }
     /// Column-major homography from box-relative content DIP to box-relative
     /// screen DIP, for a box of `size`.
     pub fn homography(self: Pose, size: [2]f32) [9]f64 {
@@ -377,6 +425,22 @@ test "identity and translated poses map content corners" {
     const result = try machine.layer(.{ 15, 6 }, .{ .context = &dummy, .function = Read.position });
     try std.testing.expectApproxEqAbs(@as(f32, 5), result[0], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 10), result[1], 1e-4);
+}
+
+test "a pose faces away past a quarter turn, and a carousel's side items as they pass" {
+    try std.testing.expect(!(Pose{ .rotate_y = 80 }).facesAway());
+    try std.testing.expect((Pose{ .rotate_y = 100 }).facesAway());
+    try std.testing.expect((Pose{ .rotate_x = 180 }).facesAway());
+    try std.testing.expect(!(Pose{ .rotate_y = 360 }).facesAway());
+    // A flip shows the back face of the other side: the two faces of a card.
+    try std.testing.expect(!(Pose{ .rotate_y = 30 + 180 + 180 }).facesAway());
+    try std.testing.expect((Pose{ .rotate_y = 30 + 180 }).facesAway());
+    // Mirrored in 2D, it still faces the viewer.
+    try std.testing.expect(!(Pose{ .scale_x = -1 }).facesAway());
+    // Pushed out from its axis on a ring and turned 80 degrees, its plane
+    // passes the viewer's line before a quarter turn, in perspective.
+    try std.testing.expect((Pose{ .depth = 300, .rotate_y = 80, .perspective = 600 }).facesAway());
+    try std.testing.expect(!(Pose{ .depth = 300, .rotate_y = 80, .perspective = 0 }).facesAway());
 }
 
 test "a half turn about the centre and a perspective tilt" {

@@ -3491,6 +3491,34 @@ test "a hit map moves, scales and turns rectangles as a pose draws them" {
     try std.testing.expectApproxEqAbs(@as(f32, 20), half.height, 1e-3);
 }
 
+test "a card turned in perspective far from the window's origin stays in front of the viewer" {
+    // A card 650 DIP down, turned over about X in perspective: the window's
+    // origin is past the turned plane's horizon, its divisor negative there,
+    // yet the card's corners are in front and map where it draws them.
+    const box: Rect = .{ .x = 40, .y = 650, .width = 200, .height = 120 };
+    const pose: effects.Pose = .{ .rotate_x = -70, .perspective = 500 };
+    const map = HitMap.ofPose(pose, box);
+    const m = map.matrix;
+    try std.testing.expect(m[8] < 0);
+    const h = pose.homography(.{ box.width, box.height });
+    for ([_][2]f64{ .{ 0, 0 }, .{ 200, 0 }, .{ 0, 120 }, .{ 200, 120 } }) |corner| {
+        const shown = map.point(box.x + corner[0], box.y + corner[1]).?;
+        const w = h[2] * corner[0] + h[5] * corner[1] + h[8];
+        try std.testing.expect(w > 0);
+        try std.testing.expectApproxEqAbs(box.x + (h[0] * corner[0] + h[3] * corner[1] + h[6]) / w, shown[0], 1e-6);
+        try std.testing.expectApproxEqAbs(box.y + (h[1] * corner[0] + h[4] * corner[1] + h[7]) / w, shown[1], 1e-6);
+    }
+    // The map back takes a point where it shows to where it was drawn.
+    const back = HitMap{ .matrix = map.inverse().? };
+    const middle = map.point(box.x + 100, box.y + 60).?;
+    const drawn = back.point(middle[0], middle[1]).?;
+    try std.testing.expectApproxEqAbs(@as(f64, box.x + 100), drawn[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, box.y + 60), drawn[1], 1e-6);
+    // Its hits cover the turned card, not the whole plane.
+    const hits = map.apply(box);
+    try std.testing.expect(hits.width > 0 and hits.width < 1000 and hits.height > 0 and hits.height < box.height);
+}
+
 /// What `Frame.setNodeExtras` adds to the control and semantic node of
 /// `id`: its place in Tab's order and the ARIA states and properties a
 /// widget's options leave out. Strings are borrowed until the frame is
