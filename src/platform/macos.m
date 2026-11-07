@@ -212,6 +212,9 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 }
 
 @implementation ZigView
+/* Ends the content's press without a release: a menu popped up while a
+   button was down took the release in its own loop (macos_menu.m). */
+- (void)zigCancelPointer{NativeWindow *s=native;if(!s||s->destroyed)return;NativeEvent cancel={0};cancel.kind=8;emit(s,&cancel);}
 - (void)dealloc{[zigAccessibility release];[zigDrop release];[super dealloc];}
 - (void)setZigDropTarget:(id<NSDraggingDestination>)target{[target retain];[zigDrop release];zigDrop=target;}
 - (id<NSDraggingDestination>)zigDropTarget{return zigDrop;}
