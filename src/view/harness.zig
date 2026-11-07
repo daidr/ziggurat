@@ -671,7 +671,22 @@ pub const Harness = struct {
         if (interactive(node.kind)) {
             if (hit == null or hit.? != node) return error.Covered;
         } else if (node.embed == null and hit != null) return error.Covered;
-        if (button == .secondary and self.menuAnchorAt(point) != self.menuAnchorOf(node)) return error.Covered;
+        if (button == .secondary) {
+            const opened = self.menuAnchorAt(point);
+            const own = self.menuAnchorOf(node);
+            if (opened != own and !self.opensInnerMenu(node, own, opened)) return error.Covered;
+        }
+    }
+    /// True when a secondary press on `node`, which has no menu of its own
+    /// (`own` is around it, or none), opens the menu of content inside it,
+    /// as a list's row whose content has the row's menu: nothing between
+    /// them takes the press, as `at` found, and the menu is that content's.
+    fn opensInnerMenu(self: *const Harness, node: *const Node, own: ?u32, opened: ?u32) bool {
+        const all = self.view.nodes();
+        const index: u32 = @intCast(node - all.ptr);
+        const inner = opened orelse return false;
+        if (own != null and own.? == index) return false;
+        return inner > index and inner < node.end;
     }
     fn within(self: *const Harness, node: *const Node, layer: *const Node) bool {
         const all = self.view.nodes();

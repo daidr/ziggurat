@@ -155,3 +155,33 @@ test "a named secondary click opens the target's own menu, or none other" {
     // No menu here or around: the click goes, and nothing takes it.
     try testing.expect(!try h.rightClick(.{ .text = "Elsewhere" }));
 }
+
+const RowMenus = struct {
+    chosen: usize = 0,
+    renamed: usize = 0,
+    fn build(self: *RowMenus, v: *View) anyerror!void {
+        try v.listBox(.{ .name = "Files", .width = 200 });
+        for (0..2) |i| {
+            _ = try v.listItemBase(usize, &self.chosen, i, .{ .key = i + 1, .name = if (i == 0) "First" else "Second" });
+            try v.column(.{ .padding = .all(6), .grow = 1 });
+            try v.textf("File {d}", .{i}, .{});
+            try v.end();
+            if (try v.popoverMenu(.{ .name = "File menu" })) {
+                if (try v.menuItem("Rename", .{}, .{})) self.renamed += 1;
+            }
+            try v.end();
+            try v.end();
+        }
+        try v.end();
+    }
+};
+
+test "a secondary click on a row without a menu of its own opens the menu of its content" {
+    var storage: Storage = .{};
+    var app: RowMenus = .{};
+    var h = Harness.init(&app, RowMenus.build, storage.buffers(), .{});
+    try h.render();
+    try testing.expect(try h.rightClick(.{ .name = "Second" }));
+    try h.click(.{ .text = "Rename" });
+    try testing.expectEqual(@as(usize, 1), app.renamed);
+}
