@@ -404,3 +404,76 @@ test "balanced rich text keeps its lines as many, about as wide as each other" {
     text.setWidth(150);
     try testing.expectEqual(@as(f32, 140), text.lines.items[0].width);
 }
+
+test "Korean spans keep their words whole across lines, others break between syllables" {
+    // Ten DIP a byte: a Hangul syllable takes 30.
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .width = 100 });
+    defer text.deinit();
+    const spans = [_]rich.Span{.{ .text = "가나 다라마바" }};
+    try text.setSpans(&spans);
+    // Without a language a syllable is a word of its own.
+    try testing.expectEqualStrings("가나 다", runText(&text, 0));
+    var korean = RichText.init(testing.allocator, .{ .measurer = measurer, .width = 100, .lang = "ko-KR" });
+    defer korean.deinit();
+    try korean.setSpans(&spans);
+    try testing.expectEqualStrings("가나 ", runText(&korean, 0));
+    try testing.expectEqual(@as(usize, 2), korean.lines.items.len);
+    // A span's own language wins over the text's.
+    var spanned = RichText.init(testing.allocator, .{ .measurer = measurer, .width = 100 });
+    defer spanned.deinit();
+    try spanned.setSpans(&.{.{ .text = "가나 다라마바", .lang = "ko" }});
+    try testing.expectEqualStrings("가나 ", runText(&spanned, 0));
+}
+
+test "a span's padding takes room in the line and pads its background on each line" {
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .width = 1000 });
+    defer text.deinit();
+    try text.setSpans(&.{
+        .{ .text = "ab " },
+        .{ .text = "code", .background = 0x112233, .padding_x = 4, .padding_y = 2 },
+        .{ .text = " cd" },
+    });
+    // The padded piece moves in by its padding, and what follows by both.
+    try testing.expectEqual(@as(f32, 34), text.runs.items[1].x);
+    try testing.expectEqual(@as(f32, 40), text.runs.items[1].width);
+    try testing.expectEqual(@as(f32, 78), text.runs.items[2].x);
+    try testing.expectEqual(@as(f32, 30 + 40 + 8 + 30), text.size.width);
+    var recorder: Recorder = .{};
+    text.paintTo(&recorder, .{ .x = 0, .y = 0 });
+    try testing.expectEqual(@as(usize, 1), recorder.fillsOf(0x112233));
+    const fill = recorder.fills[0];
+    try testing.expectEqual(@as(f32, 30), fill.bounds.x);
+    try testing.expectEqual(@as(f32, 48), fill.bounds.width);
+    try testing.expectEqual(@as(f32, -2), fill.bounds.y);
+    // Wrapped, each line's piece gets its own padding, and lines break to
+    // fit it: "ab code" no longer fits 70.
+    var wrapped = RichText.init(testing.allocator, .{ .measurer = measurer, .width = 74 });
+    defer wrapped.deinit();
+    try wrapped.setSpans(&.{
+        .{ .text = "ab " },
+        .{ .text = "co de", .background = 0x112233, .padding_x = 4 },
+    });
+    try testing.expectEqual(@as(usize, 2), wrapped.lines.items.len);
+    var lines: Recorder = .{};
+    wrapped.paintTo(&lines, .{ .x = 0, .y = 0 });
+    try testing.expectEqual(@as(usize, 2), lines.fillsOf(0x112233));
+}
+
+test "a span casts its shadow under every span's text" {
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .shadow = .{ .x = 1, .y = 2, .color = .{ .r = 0, .g = 0, .b = 0, .a = 255 } } });
+    defer text.deinit();
+    try text.setSpans(&.{
+        .{ .text = "ab ", .color = 0xffffff },
+        .{ .text = "cd", .color = 0xffffff, .shadow = .{ .x = 3, .y = 3, .color = .{ .r = 255, .g = 0, .b = 0, .a = 255 } } },
+        .{ .text = " ef", .color = 0xffffff, .shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } } },
+    });
+    var recorder: Recorder = .{};
+    text.paintTo(&recorder, .{ .x = 0, .y = 0 });
+    // Two shadows, the text's and the span's own, then three texts.
+    try testing.expectEqual(@as(usize, 5), recorder.label_count);
+    try testing.expectEqual(@as(u32, 0x000000), recorder.labels[0].color);
+    try testing.expectEqual(@as(u32, 0xff0000), recorder.labels[1].color);
+    try testing.expectEqual(recorder.labels[2].bounds.x + 1, recorder.labels[0].bounds.x);
+    try testing.expectEqual(recorder.labels[3].bounds.y + 3, recorder.labels[1].bounds.y);
+    for (recorder.labels[2..5]) |label| try testing.expectEqual(@as(u32, 0xffffff), label.color);
+}

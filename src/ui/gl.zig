@@ -136,7 +136,7 @@ extern fn zglr_test_pixels(*anyopaque, [*]u32, u32, u32) c_int;
 extern fn zglr_test_backend(*anyopaque) c_int;
 extern fn zglr_test_damage(*[4]i32) u64;
 
-const NativeStats = extern struct { device_creations: u32, context_creations: u32, resizes: u32, presents: u32, memory_presents: u32, busy_presents: u32, text_rasters: u32, text_entries: u32, frames: u64, instances: u64, batches: u64, layers: u64, filter_passes: u64, partial_frames: u64, text_hits: u64, offscreen_targets: u64, device_losses: u64, damage_submissions: u64, effect_passes: u64, backdrops: u64, indicators: u64 };
+const NativeStats = extern struct { device_creations: u32, context_creations: u32, resizes: u32, presents: u32, memory_presents: u32, busy_presents: u32, text_rasters: u32, text_entries: u32, frames: u64, instances: u64, batches: u64, layers: u64, filter_passes: u64, partial_frames: u64, text_hits: u64, offscreen_targets: u64, device_losses: u64, damage_submissions: u64, effect_passes: u64, backdrops: u64, indicators: u64, sweeps: u64 };
 /// A backdrop effect's plan for src/ui/gl_renderer.c (ZlGlass).
 const Glass = extern struct { box: [4]f32, clip: [4]f32, tone: [4]f32, tint: [4]f32, line: [4]f32, line2: [4]f32, misc: [4]f32, misc2: [4]f32, background: [4]f32, fill: [4]f32, region: [4]u32, out: [4]u32 };
 const GlassLevel = extern struct { radius: u32, lo: f32, hi: f32, weights: u32 };
@@ -177,8 +177,10 @@ pub const Options = struct {
 /// device_losses the devices this renderer lost with its domain,
 /// damage_submissions what the toplevel added to the Wayland surface's
 /// damage, effect_passes shader and backdrop passes run, backdrops backdrop
-/// effects and indicators loading indicators drawn.
-pub const Stats = struct { device_creations: u32 = 0, context_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, memory_presents: u32 = 0, busy_presents: u32 = 0, text_rasters: u32 = 0, text_entries: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, text_hits: u64 = 0, offscreen_targets: u64 = 0, device_losses: u64 = 0, damage_submissions: u64 = 0, effect_passes: u64 = 0, backdrops: u64 = 0, indicators: u64 = 0 };
+/// effects and indicators loading indicators drawn; sweeps the times the
+/// renderer let go of texts no frame drew for a while and of pooled targets
+/// no frame took (`gpu_sweep.h`).
+pub const Stats = struct { device_creations: u32 = 0, context_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, memory_presents: u32 = 0, busy_presents: u32 = 0, text_rasters: u32 = 0, text_entries: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, text_hits: u64 = 0, offscreen_targets: u64 = 0, device_losses: u64 = 0, damage_submissions: u64 = 0, effect_passes: u64 = 0, backdrops: u64 = 0, indicators: u64 = 0, sweeps: u64 = 0 };
 
 /// Renderers and device domains alive.
 pub fn liveObjects() u32 {

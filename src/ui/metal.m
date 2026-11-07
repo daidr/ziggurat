@@ -49,6 +49,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include "brushes.h"
+#include "gpu_sweep.h"
 #include "image_resource.h"
 #include "coverage_resource.h"
 #include "macos_font.h"
@@ -267,7 +268,7 @@ typedef struct ZmBatch {uint32_t first,count;int bind,replace;__unsafe_unretaine
    group's filter (its kernel among the words, through temp), or nothing. */
 enum {RUN_EFFECT,RUN_GROUP,RUN_GAUSSIAN,RUN_TRANSFORM};
 typedef struct ZmRun {uint32_t kind,slot,word_offset,word_count,has_pass,region[4],out[4];float origin[2];ZmEffectParams params;__unsafe_unretained id<MTLTexture> source,output,temp,extra[3];uint32_t levels,level_offset;} ZmRun;
-typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes,layers,filter_passes,partial_frames,cached_pipelines,backdrops,indicators,offscreen_targets,device_losses;} ZmStats;
+typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes,layers,filter_passes,partial_frames,cached_pipelines,backdrops,indicators,offscreen_targets,device_losses,sweeps;} ZmStats;
 typedef struct ZmGlyph {float x,y,width,height,left,top;uint32_t color;} ZmGlyph;
 #define ZM_CLIPS 33
 #define ZM_ATLAS 2048
@@ -331,6 +332,9 @@ static void domain_lose(ZigMetalDomain *domain);
     /* Capture textures of this frame, and those no frame the GPU draws
        still uses, for later frames' captures of the same size. */
     NSMutableArray<id<MTLTexture>> *frame_captures,*free_captures;
+    /* The frame of the last sweep, and the pooled captures and instance
+       buffers it found, which go at the next unless a frame took them. */
+    uint64_t swept;NSMutableSet *idle_pooled;
     float clips[ZM_CLIPS][4];uint32_t clip_depth;
     /* The opacity drawings draw at now (Command.push_opacity), and those
        the opacities open saved. */
@@ -477,7 +481,7 @@ static ZigMetalRenderer *new_renderer(id<MTLDevice> device,int *error){
     s->device=device;s->queue=[device newCommandQueue];
     if(!s->queue||!create_pipeline(s)){*error=2;return nil;}
     s->free_buffers=[NSMutableArray array];s->frame_textures=[NSMutableArray array];
-    s->frame_captures=[NSMutableArray array];s->free_captures=[NSMutableArray array];
+    s->frame_captures=[NSMutableArray array];s->free_captures=[NSMutableArray array];s->idle_pooled=[NSMutableSet set];
     s->glyphs=[NSMutableDictionary dictionary];s->fonts=[NSMutableArray array];s->font_sources=[NSMutableArray array];s->font_scales=[NSMutableArray array];
     s->slots=[NSMutableArray array];s->prepared_keys=[NSMutableArray array];s->prepared_textures=[NSMutableArray array];
     s->hidden=1;s->stats.device_creations=1;*error=0;
@@ -707,6 +711,25 @@ static void narrow_clip(ZigMetalRenderer *s,double x,double y,double width,doubl
 static void restore_clip(ZigMetalRenderer *s,const float *saved){memcpy(s->clips[s->clip_depth],saved,4*sizeof(float));}
 
 /* Glyphs. */
+/* Once ZG_SWEEP_EVERY frames went by since the last sweep, the capture
+   textures and instance buffers pooled for later frames that no frame took
+   since the sweep before go (gpu_sweep.h): an animation's frames of one
+   size and then another leave none behind. */
+static void sweep_if_due(ZigMetalRenderer *s){
+    if(!zg_sweep_due(s->stats.frames,&s->swept))return;
+    NSMutableSet *seen=[NSMutableSet set];
+    @synchronized(s->free_captures){
+        NSMutableArray *kept=[NSMutableArray array];
+        for(id texture in s->free_captures)if(![s->idle_pooled containsObject:texture]){[kept addObject:texture];[seen addObject:texture];}
+        [s->free_captures setArray:kept];
+    }
+    @synchronized(s->free_buffers){
+        NSMutableArray *kept=[NSMutableArray array];
+        for(id buffer in s->free_buffers)if(![s->idle_pooled containsObject:buffer]){[kept addObject:buffer];[seen addObject:buffer];}
+        [s->free_buffers setArray:kept];
+    }
+    s->idle_pooled=seen;s->stats.sweeps++;
+}
 static int new_atlas(ZigMetalRenderer *s){
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:ZM_ATLAS height:ZM_ATLAS mipmapped:NO];
     d.usage=MTLTextureUsageShaderRead;d.storageMode=MTLStorageModeShared;
@@ -1461,6 +1484,7 @@ done:
     }];
     if(failed)return 2;
     s->stats.frames++;s->stats.instances+=s->instance_len;s->stats.batches+=s->batch_len;
+    sweep_if_due(s);
     return 0;
 }
 static void set_hidden(ZigMetalRenderer *s,int hidden){

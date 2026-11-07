@@ -82,6 +82,23 @@ pub const Span = struct {
     /// Paints none of the span while its words keep their room in the
     /// line, as CSS's `visibility: hidden`.
     invisible: bool = false,
+    /// Pads the background, as CSS pads an inline box: `padding_x` takes
+    /// room in the line on either side of each line's piece of the span,
+    /// which lines break to fit, and widens its background, in place of
+    /// the little a `radius` widens it by; `padding_y` only paints, over
+    /// the lines above and below. Each line's piece of a wrapped span gets
+    /// its own padding and corners, as CSS's `box-decoration-break: clone`.
+    padding_x: f32 = 0,
+    padding_y: f32 = 0,
+    /// The shadow the span's text casts, as `view.Style.text_shadow`: its
+    /// glyphs offset and blurred, under every span's text. Null casts that
+    /// of the text around it (`Options.shadow`); a transparent one casts
+    /// none. The blur needs `Options.effects`; without it the shadow is
+    /// sharp.
+    shadow: ?view.TextShadow = null,
+    /// The span's language, a BCP 47 tag; "" is the text's
+    /// (`Options.lang`). Korean keeps its words whole across lines.
+    lang: []const u8 = "",
 
     /// How opaque the span paints, from 0 (nothing) to 1.
     pub fn alpha(self: Span) f32 {
@@ -103,6 +120,23 @@ fn closeFade(target: anytype, opened: bool) void {
     const Target = @TypeOf(target.*);
     if (comptime !@hasDecl(Target, "popOpacity")) return;
     if (opened) target.popOpacity() catch {};
+}
+
+/// Opens a blur of `blur` DIP (CSS's radius, twice the deviation) around
+/// `box` on a `ui.Frame` with a library of effects, true when it opened
+/// one to close.
+fn blurOpen(target: anytype, library: ?*const ui.effects.Library, box: Rect, blur: f32) bool {
+    if (comptime @TypeOf(target) != *ui.Frame) return false;
+    const effects = library orelse return false;
+    if (!(blur > 0) or !std.math.isFinite(blur)) return false;
+    var values: ui.shader.Values = undefined;
+    const effect = (effects.blur(&values, blur / 2) catch return false) orelse return false;
+    target.beginEffect(box, effect, .{}) catch return false;
+    return true;
+}
+fn blurClose(target: anytype, opened: bool) void {
+    if (comptime @TypeOf(target) != *ui.Frame) return;
+    if (opened) target.endEffect() catch {};
 }
 
 pub const Options = struct {
@@ -137,6 +171,17 @@ pub const Options = struct {
     /// Draws the spans that are inline objects; without it they draw
     /// nothing and keep their room.
     objects: ?ObjectPainter = null,
+    /// The language of the text, a BCP 47 tag, which spans that set none
+    /// take: Korean ("ko", "ko-KR") breaks lines between words, at spaces
+    /// and after punctuation, rather than between any two syllables, as
+    /// CSS's `word-break: keep-all`; a word wider than the width still
+    /// breaks within it. Give it the view's (`view.View.languageOf`).
+    lang: []const u8 = "",
+    /// The shadow the text casts where its spans set none.
+    shadow: ?view.TextShadow = null,
+    /// Blurs shadows (`Span.shadow`) on a `ui.Frame`; the view host's
+    /// library, kept alive while the text paints.
+    effects: ?*const ui.effects.Library = null,
 };
 
 /// A wrapped piece of one span on one line, in DIP from the text's top
@@ -336,7 +381,7 @@ pub const RichText = struct {
                     break;
                 }
                 const length = sequenceLength(text[at]);
-                if (breaksAround(decode(text[at..@min(text.len, at + length)]))) {
+                if (self.breaksAroundIn(index, decode(text[at..@min(text.len, at + length)]))) {
                     if (at == start) at += length;
                     break;
                 }
@@ -360,6 +405,29 @@ pub const RichText = struct {
         }
     }
 
+    /// Whether lines break around `codepoint` in span `index`: as in CJK
+    /// text, but between the letters of a language that keeps its words
+    /// whole (`Options.lang`).
+    fn breaksAroundIn(self: *const RichText, index: u32, codepoint: u21) bool {
+        if (!breaksAround(codepoint)) return false;
+        const lang = self.spans[index].lang;
+        if (!view.line_breaks.keepsWords(if (lang.len != 0) lang else self.options.lang)) return true;
+        return !view.line_breaks.wordInside(codepoint);
+    }
+    /// The room a span's padding takes on either side of each of its
+    /// pieces in a line.
+    fn padX(self: *const RichText, span: u32) f32 {
+        const value = self.spans[span].padding_x;
+        return if (std.math.isFinite(value) and value > 0 and self.spans[span].object == null) value else 0;
+    }
+    /// The padding after the last run of the line holding runs
+    /// `line_runs..`.
+    fn tailPad(self: *const RichText, line_runs: usize) f32 {
+        const runs = self.runs.items;
+        if (runs.len <= line_runs) return 0;
+        return self.padX(runs[runs.len - 1].span);
+    }
+
     /// Mark words a span boundary cuts and total the clusters they form.
     fn glue(self: *RichText) void {
         const words = self.words.items;
@@ -371,7 +439,7 @@ pub const RichText = struct {
             if (next.span == word.span or next_text.len == 0) continue;
             if (self.spans[word.span].object != null or self.spans[next.span].object != null) continue;
             const last = lastCodepoint(text);
-            word.glued = !isSpace(text[text.len - 1]) and !breaksAround(last) and !isSpace(next_text[0]) and !breaksAround(decode(next_text[0..@min(next_text.len, sequenceLength(next_text[0]))]));
+            word.glued = !isSpace(text[text.len - 1]) and !self.breaksAroundIn(word.span, last) and !isSpace(next_text[0]) and !self.breaksAroundIn(next.span, decode(next_text[0..@min(next_text.len, sequenceLength(next_text[0]))]));
         }
         self.widest = 0;
         var index = words.len;
@@ -418,9 +486,14 @@ pub const RichText = struct {
         var from: u32 = 0;
         for (words, 0..) |word, index| {
             const starts_cluster = index == 0 or !words[index - 1].glued;
-            if (width > 0 and starts_cluster and x > left and x + word.cluster > width) {
+            // Padding opens a piece of a span, after the one before closes.
+            const runs_now = self.runs.items;
+            const opens = runs_now.len <= line_runs or runs_now[runs_now.len - 1].span != word.span;
+            const before: f32 = if (opens) self.padX(word.span) + (if (runs_now.len > line_runs) self.padX(runs_now[runs_now.len - 1].span) else 0) else 0;
+            const after: f32 = if (index + 1 == words.len or words[index + 1].span != word.span) self.padX(word.span) else 0;
+            if (width > 0 and starts_cluster and x > left and x + before + word.cluster + after > width) {
                 const previous = words[index - 1];
-                self.finishLine(&line_runs, x - trailing, &widest, .{ .start = from, .end = self.offset(previous, previous.end), .hyphen = previous.hyphen, .justify = self.options.justify, .x = left });
+                self.finishLine(&line_runs, x - trailing, &widest, .{ .pad = self.tailPad(line_runs), .start = from, .end = self.offset(previous, previous.end), .hyphen = previous.hyphen, .justify = self.options.justify, .x = left });
                 from = self.offset(word, word.start);
                 left = 0;
                 x = 0;
@@ -428,6 +501,13 @@ pub const RichText = struct {
             }
             if (word.end > word.start) {
                 const runs = self.runs.items;
+                // The padding of the piece the line breaks before is the
+                // new line's own.
+                const piece = runs.len <= line_runs or runs[runs.len - 1].span != word.span;
+                if (piece) {
+                    if (runs.len > line_runs) x += self.padX(runs[runs.len - 1].span);
+                    x += self.padX(word.span);
+                }
                 // Justified lines move each word; a soft hyphen ends a run,
                 // which shows its hyphen when the line breaks there.
                 const joins = !self.options.justify and index > 0 and words[index - 1].hyphen == 0;
@@ -439,7 +519,7 @@ pub const RichText = struct {
                 trailing = word.width - word.visible;
             }
             if (word.hard_break) {
-                self.finishLine(&line_runs, x - trailing, &widest, .{ .start = from, .end = self.offset(word, word.end), .x = left });
+                self.finishLine(&line_runs, x - trailing, &widest, .{ .pad = self.tailPad(line_runs), .start = from, .end = self.offset(word, word.end), .x = left });
                 from = self.offset(word, word.end + 1);
                 left = 0;
                 x = 0;
@@ -448,7 +528,7 @@ pub const RichText = struct {
         }
         if (self.lines.items.len == 0 or self.runs.items.len > line_runs or x > left) {
             const end = if (words.len > 0) self.offset(words[words.len - 1], words[words.len - 1].end) else 0;
-            self.finishLine(&line_runs, x - trailing, &widest, .{ .start = from, .end = @max(from, end), .x = left });
+            self.finishLine(&line_runs, x - trailing, &widest, .{ .pad = self.tailPad(line_runs), .start = from, .end = @max(from, end), .x = left });
         }
         const last = self.lines.items[self.lines.items.len - 1];
         self.size = .{ .width = widest, .height = last.y + last.height };
@@ -467,6 +547,8 @@ pub const RichText = struct {
         /// The line wrapped: justified, it stretches to the width.
         justify: bool = false,
         x: f32 = 0,
+        /// The padding after the line's last piece of a span.
+        pad: f32 = 0,
     };
 
     /// Close the line holding runs `line_runs..`, its text reaching `right`.
@@ -500,6 +582,7 @@ pub const RichText = struct {
                 width += ending.hyphen;
             }
         }
+        width += ending.pad;
         const room = self.wrap_width - width;
         if (ending.justify and self.wrap_width > 0 and room > 1e-3 and runs.len > 1) {
             var opportunities: usize = 0;
@@ -551,11 +634,34 @@ pub const RichText = struct {
             defer closeFade(target, faded);
             const line = self.lines.items[run.line];
             const size = self.metrics.items[run.span].size;
+            const pad_x = self.padX(run.span);
+            const pad_y = if (std.math.isFinite(span.padding_y) and span.padding_y > 0) span.padding_y else 0;
+            const hyphen = if (run.hyphen) self.options.measurer.textSize("-", self.fontOf(span)).width else 0;
             if (span.radius > 0) {
-                const pad = @min(size * 0.22, span.radius);
+                const pad = if (pad_x > 0) pad_x else @min(size * 0.22, span.radius);
                 const baseline = origin.y + line.y + line.baseline - span.baseline_shift;
-                target.roundedRect(.{ .x = origin.x + run.x - pad, .y = baseline - size * 0.98, .width = run.width + 2 * pad, .height = size * 1.32 }, span.radius, ui.Color.rgb(color));
-            } else target.rect(.{ .x = origin.x + run.x, .y = origin.y + line.y, .width = run.width, .height = line.height }, color);
+                target.roundedRect(.{ .x = origin.x + run.x - pad, .y = baseline - size * 0.98 - pad_y, .width = run.width + hyphen + 2 * pad, .height = size * 1.32 + 2 * pad_y }, span.radius, ui.Color.rgb(color));
+            } else target.rect(.{ .x = origin.x + run.x - pad_x, .y = origin.y + line.y - pad_y, .width = run.width + hyphen + 2 * pad_x, .height = line.height + 2 * pad_y }, color);
+        }
+        // Shadows, under every span's text.
+        for (self.runs.items) |run| {
+            const span = self.spans[run.span];
+            if (span.object != null) continue;
+            const shadow = span.shadow orelse self.options.shadow orelse continue;
+            if (shadow.color.a == 0 or !std.math.isFinite(shadow.x) or !std.math.isFinite(shadow.y)) continue;
+            const alpha = span.alpha();
+            if (alpha <= 0) continue;
+            const text = visibleText(span.text[run.start..run.end]);
+            if (text.len == 0) continue;
+            const line = self.lines.items[run.line];
+            const m = self.metrics.items[run.span];
+            const top = origin.y + line.y + line.baseline - span.baseline_shift - m.ascent;
+            const box: Rect = .{ .x = origin.x + run.x + shadow.x, .y = top + shadow.y, .width = run.width + m.size, .height = m.height };
+            const blurred = blurOpen(target, self.options.effects, box, shadow.blur);
+            const faded = openFade(target, alpha * @as(f32, @floatFromInt(shadow.color.a)) / 255);
+            target.labelFont(box, text, shadow.color.hex(), self.fontOf(span));
+            closeFade(target, faded);
+            blurClose(target, blurred);
         }
         for (self.runs.items) |run| {
             const span = self.spans[run.span];

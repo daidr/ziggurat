@@ -3319,6 +3319,9 @@ pub fn build(b: *std.Build) void {
     ui.addImport("ziggurat_fonts", fonts);
     text_layout.addImport("ziggurat_fonts", fonts);
     text_measure.addImport("ziggurat_fonts", fonts);
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) addSmoke(b, "smoke-text-measure", "tests/text_measure_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_text_measure", .module = text_measure },
+    });
     rich_text_editor.addImport("ziggurat_fonts", fonts);
     const fonts_tests = addTest(b, .{ .root_module = fonts });
     const run_fonts_tests = b.addRunArtifact(fonts_tests);

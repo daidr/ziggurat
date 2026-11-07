@@ -78,6 +78,7 @@
 #include "image_resource.h"
 #include "coverage_resource.h"
 #include "layer_resource.h"
+#include "gpu_sweep.h"
 
 typedef struct ZlInstance {float rect[4],clip[4],color[4],params[4],uv[4];} ZlInstance;
 typedef struct ZlBrush {float head[4],ab[4],offsets[16],colors[16][4];} ZlBrush;
@@ -145,7 +146,7 @@ typedef struct ZlImage {GLuint texture;uint32_t width,height,levels;int coverage
 /* A text drawn once, by what it draws (its bytes, font, color, box and
    where within a device pixel it starts). */
 typedef struct ZlText {uint64_t hash,used;char *bytes;uint32_t len,rgb,width,height;float size,box[2],offset[2],scale;uint16_t weight;int italic,monospace;char family[64];GLuint texture;} ZlText;
-typedef struct ZlStats {uint32_t device_creations,context_creations,resizes,presents,memory_presents,busy_presents,text_rasters,text_entries;uint64_t frames,instances,batches,layers,filter_passes,partial_frames,text_hits,offscreen_targets,device_losses,damage_submissions,effect_passes,backdrops,indicators;} ZlStats;
+typedef struct ZlStats {uint32_t device_creations,context_creations,resizes,presents,memory_presents,busy_presents,text_rasters,text_entries;uint64_t frames,instances,batches,layers,filter_passes,partial_frames,text_hits,offscreen_targets,device_losses,damage_submissions,effect_passes,backdrops,indicators,sweeps;} ZlStats;
 
 typedef struct ZlRenderer ZlRenderer;
 /* A device domain: one surfaceless EGL context that its renderers draw
@@ -198,10 +199,10 @@ struct ZlRenderer {
     float faded,fades[ZL_CLIPS];uint32_t fade_depth;
     /* Capture targets of this frame and those free for later frames. */
     ZlTarget frame_targets[160];uint32_t frame_target_len;
-    ZlTarget free_targets[ZL_FREE_TARGETS];uint32_t free_target_len;
+    ZlTarget free_targets[ZL_FREE_TARGETS];uint32_t free_target_len;uint64_t free_target_frames[ZL_FREE_TARGETS];
     ZlImage *slots;uint32_t slot_len;ZlImage candidate;
     void *prepared_keys[ZL_PREPARED];GLuint prepared_textures[ZL_PREPARED];uint32_t prepared_len;
-    ZlText texts[ZL_TEXT_ENTRIES];uint32_t text_len;size_t text_bytes;uint64_t frame_serial;
+    ZlText texts[ZL_TEXT_ENTRIES];uint32_t text_len;size_t text_bytes;uint64_t frame_serial,swept;
     PangoLayout *layout;PangoFontDescription *font;float layout_scale;
     /* The toplevel whose draw signal adds GTK's repaint to the Wayland
        surface's damage. */
@@ -854,11 +855,25 @@ static void reset_frame(ZlRenderer *s){
        masks evicted during it go, capture targets wait for later frames. */
     for(uint32_t k=0;k<s->frame_target_len;k++){
         ZlTarget *t=&s->frame_targets[k];
-        if(t->framebuffer&&s->free_target_len<ZL_FREE_TARGETS)s->free_targets[s->free_target_len++]=*t;
+        if(t->framebuffer&&s->free_target_len<ZL_FREE_TARGETS){s->free_target_frames[s->free_target_len]=s->frame_serial;s->free_targets[s->free_target_len++]=*t;}
         else if(t->framebuffer)drop_target(t);
         else if(t->texture)glDeleteTextures(1,&t->texture);
     }
     s->frame_target_len=0;
+    /* Once ZG_SWEEP_EVERY frames went by since the last sweep: the textures
+       of texts no frame drew for a while, and pooled targets no frame took
+       since the sweep before, go (gpu_sweep.h). */
+    if(zg_sweep_due(s->frame_serial,&s->swept)){
+        for(uint32_t k=0;k<s->text_len;){
+            if(zg_sweep_idle(s->frame_serial,s->texts[k].used,ZG_SWEEP_IDLE)){drop_text(s,&s->texts[k]);s->texts[k]=s->texts[--s->text_len];memset(&s->texts[s->text_len],0,sizeof(ZlText));}
+            else k++;
+        }
+        for(uint32_t k=0;k<s->free_target_len;){
+            if(zg_sweep_idle(s->frame_serial,s->free_target_frames[k],ZG_SWEEP_EVERY-1)){drop_target(&s->free_targets[k]);s->free_target_len--;s->free_targets[k]=s->free_targets[s->free_target_len];s->free_target_frames[k]=s->free_target_frames[s->free_target_len];}
+            else k++;
+        }
+        s->stats.sweeps++;s->stats.text_entries=s->text_len;
+    }
 }
 #ifdef __wasm__
 static void layout_for(ZlRenderer *s){(void)s;}
@@ -875,6 +890,20 @@ static void layout_for(ZlRenderer *s){
     cairo_scale(cr,s->scale,s->scale);
     s->layout=pango_cairo_create_layout(cr);
     cairo_destroy(cr);cairo_surface_destroy(scratch);
+    /* Text draws into transparent textures in grayscale, as glyph coverage
+       the frame tints: where the desktop's settings leave antialiasing to
+       fontconfig, its rgba setting would have cairo draw subpixel coverage,
+       colored where it should be gray. A desktop that turns antialiasing
+       off keeps it off, as do fonts fontconfig draws without it. */
+    const cairo_font_options_t *screen=gdk_screen_get_default()?gdk_screen_get_font_options(gdk_screen_get_default()):NULL;
+    if(!screen||cairo_font_options_get_antialias(screen)!=CAIRO_ANTIALIAS_NONE){
+        cairo_font_options_t *options=cairo_font_options_create();
+        if(cairo_font_options_status(options)==CAIRO_STATUS_SUCCESS){
+            cairo_font_options_set_antialias(options,CAIRO_ANTIALIAS_GRAY);
+            pango_cairo_context_set_font_options(pango_layout_get_context(s->layout),options);pango_layout_context_changed(s->layout);
+        }
+        cairo_font_options_destroy(options);
+    }
     pango_layout_set_font_description(s->layout,s->font);
     pango_layout_set_single_paragraph_mode(s->layout,TRUE);pango_layout_set_ellipsize(s->layout,PANGO_ELLIPSIZE_END);
     pango_layout_set_height(s->layout,-1);
@@ -1329,7 +1358,7 @@ static ZlRun *new_run(ZlRenderer *s,uint32_t *index){
 static int frame_target(ZlRenderer *s,uint32_t width,uint32_t height,ZlTarget *out){
     if(s->frame_target_len==sizeof(s->frame_targets)/sizeof(s->frame_targets[0]))return 0;
     for(uint32_t k=0;k<s->free_target_len;k++)if(s->free_targets[k].width==width&&s->free_targets[k].height==height&&s->free_targets[k].framebuffer){
-        *out=s->free_targets[k];s->free_targets[k]=s->free_targets[--s->free_target_len];
+        *out=s->free_targets[k];s->free_target_len--;s->free_targets[k]=s->free_targets[s->free_target_len];s->free_target_frames[k]=s->free_target_frames[s->free_target_len];
         s->frame_targets[s->frame_target_len++]=*out;return 1;
     }
     if(!make_target(out,width,height))return 0;

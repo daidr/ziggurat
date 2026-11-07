@@ -9,6 +9,8 @@ const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
 pub const matched = @import("matched.zig");
 pub const posed = @import("posed.zig");
+/// Line breaking for wrapping text, which rich text shares.
+pub const line_breaks = @import("wrap.zig");
 pub const morph = @import("morph.zig");
 pub const Match = matched.Match;
 
@@ -160,6 +162,15 @@ pub const Style = struct {
     /// Font for text nodes, such as `.heading1` or `.code`; null is the
     /// 16 DIP label font that widgets use.
     font: ?Font = null,
+    /// The language of a text, or of the texts inside a container that
+    /// set none, as a BCP 47 tag such as "ko" or "en-US"; "" takes that of
+    /// the containers around it, and the window's (`Options.language`)
+    /// around them all. Korean ("ko", "ko-KR") breaks a wrapping text's
+    /// lines between words, at spaces and after punctuation, as Korean is
+    /// written and as CSS's `word-break: keep-all` has it, rather than
+    /// between any two syllables; a word wider than a line still breaks
+    /// within it. Borrowed until the pass is painted.
+    lang: []const u8 = "",
     /// False disables the node; on a container it also disables every
     /// descendant.
     enabled: bool = true,
@@ -201,6 +212,16 @@ pub const Style = struct {
     /// fades. See `posed.zig`; needs `Host.prepareShaderEffects`, like
     /// `pose`.
     pose_motion: ?animation.Motion = null,
+    /// Hide the node and what is built inside it while its `pose` turns
+    /// its back to the viewer, as CSS's `backface-visibility: hidden`: it
+    /// keeps its room but draws nothing, takes neither the pointer nor the
+    /// focus and is not exposed to assistive technology, so the two faces
+    /// of a card turning over, the back turned 180 degrees more than the
+    /// front, show one at a time. The test is that of the node's own pose,
+    /// perspective included (`ui.effects.Pose.facesAway`); while
+    /// `pose_motion` moves it, the pose shown each frame decides whether
+    /// it draws.
+    backface_hidden: bool = false,
     /// An identity the node shares with another, as a photo's thumbnail
     /// and the photo in its detail view: appearing where another node with
     /// the same key showed in the frame before, it comes from there; see
@@ -388,12 +409,13 @@ pub const Style = struct {
     /// spare, as one long word, stays as it is; so does a text `max_lines`
     /// cuts. `balance` balances all the lines instead. Needs `wrap`.
     pretty: bool = false,
-    /// Keep the spaces a single-line text ends with, and a text of only
+    /// Keep the spaces a text ends its lines with, and a text of only
     /// spaces, with their advance, as CSS's `white-space: break-spaces`
     /// does: a gap made of spaces between two texts in a row, or the
-    /// padding a monospaced column is aligned with. Without it the spaces
-    /// ending a text take no room, as with `white-space: normal`, and a
-    /// wrapping text's lines leave out the spaces they end with either way.
+    /// padding a monospaced column is aligned with. A wrapping text may
+    /// then break after any space, and the spaces before a break stay on
+    /// the line they end, taking room there. Without it the spaces ending a
+    /// text or a wrapped line take no room, as with `white-space: normal`.
     preserve_spaces: bool = false,
     /// Put the tab stops of a text every this many spaces from the start
     /// of each line, as CSS's `tab-size`: a tab advances to the next of
@@ -1026,6 +1048,12 @@ pub const Measurer = struct {
     /// `measure` is scaled by the font size, and fixed-pitch text counts
     /// 0.6 em per character.
     measure_font: ?*const fn (?*anyopaque, []const u8, Font) Size = if (browser) browserMeasureFont else null,
+    /// Width of `whole[start..end]` taken from `whole` shaped once, for
+    /// wrapping a paragraph at many widths without shaping each line
+    /// again; null where the measurer does not know it that way, and the
+    /// part is then measured on its own. Wrapping asks it only for parts
+    /// that start a line and end before a space or at the end.
+    measure_part: ?*const fn (?*anyopaque, whole: []const u8, start: usize, end: usize, ?Font) ?f32 = null,
 
     pub const line_height: f32 = 24;
     /// Extent of `text` in `font`, or in the label font when null.
@@ -1041,6 +1069,11 @@ pub const Measurer = struct {
         const base = self.measure(self.context, text);
         const emphasis: f32 = if (value.weight == .regular) 1 else 1.05;
         return .{ .width = @ceil(base.width * scale * emphasis), .height = height };
+    }
+    /// Width of `whole[start..end]`, from `measure_part` where it knows it.
+    pub fn partWidth(self: Measurer, whole: []const u8, start: usize, end: usize, font: ?Font) f32 {
+        if (self.measure_part) |callback| if (callback(self.context, whole, start, end, font)) |width| return width;
+        return self.textSize(whole[start..end], font).width;
     }
     const browser = @import("builtin").cpu.arch == .wasm32;
     extern "ziggurat" fn zw_measure_text(text: [*]const u8, length: u32, size: f32, weight: u32, italic: u32, monospace: u32) f64;
@@ -1479,6 +1512,9 @@ pub const Node = struct {
     /// Laid out in its place but not drawn, nor its descendants, which
     /// take no input either: content waiting to come in.
     unseen: bool = false,
+    /// Its pose turns its back to the viewer and it hides it
+    /// (`Style.backface_hidden`): it draws nothing.
+    turned_away: bool = false,
     /// The node or one around it is `Style.access_hidden`, or it floats
     /// from an anchor that is: it paints, but assistive technology does not
     /// see it.
@@ -2152,6 +2188,9 @@ pub const View = struct {
     flow_count: usize = 0,
     /// Direction of the root, unless its style gives one; see `Options`.
     layout_direction: Direction = .ltr,
+    /// The window's language (`Options.language`), which texts take where
+    /// no node around them sets `Style.lang`.
+    language: []const u8 = "",
     /// Draws icon nodes; see `Options.icons`.
     icons: ?IconPainter = null,
     /// Which router takes the history keys in this pass.
@@ -2295,7 +2334,7 @@ pub const View = struct {
     pub fn visible(self: *const View, node: *const Node) ?Rect {
         const all = self.nodes();
         var rect = node.bounds;
-        if (node.hidden()) return null;
+        if (node.hidden() or node.turned_away) return null;
         // What an inset hides takes no clicks, the node's own too.
         if (node.style.clip_inset) |inset_clip| rect = intersect(rect, inset_clip.rect(node.bounds)) orelse return null;
         // Popups and toasts are drawn over the flow, so the clips of their
@@ -2303,7 +2342,7 @@ pub const View = struct {
         var parent = if (node.floats()) none else node.parent;
         while (parent < all.len) : (parent = all[parent].parent) {
             const ancestor = &all[parent];
-            if (ancestor.hidden()) return null;
+            if (ancestor.hidden() or ancestor.turned_away) return null;
             if (ancestor.clips()) rect = intersect(rect, ancestor.bounds) orelse return null;
             if (ancestor.style.clip_inset) |inset_clip| rect = intersect(rect, inset_clip.rect(ancestor.bounds)) orelse return null;
             if (ancestor.floats()) break;
@@ -2395,6 +2434,15 @@ pub const View = struct {
             else => if (parent.style.role != null and parent.isContainer()) parent.id else parent.semantic_parent,
         }, .access_disabled = style.access_disabled or parent.access_disabled, .in_role = parent.in_role or (parent.style.role != null and parent.isContainer()), .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .access_hidden = style.access_hidden or parent.access_hidden, .theme = style.theme orelse parent.theme };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
+        // Its back turned to the viewer, it keeps its room and nothing else.
+        if (style.backface_hidden and style.pose_motion == null) if (style.pose) |pose| if (pose.facesAway()) {
+            const node = &self.buffers.nodes[index];
+            node.style.ignore_input = true;
+            node.style.access_hidden = true;
+            node.passthrough = true;
+            node.access_hidden = true;
+            node.turned_away = true;
+        };
         if (style.z_index != 0 or style.sticky != null) parent.z_order = true;
         parent.last_child = index;
         parent.child_count += 1;
@@ -5573,6 +5621,10 @@ pub const View = struct {
         self.poses.frame_interval = self.refresh_interval orelse posed.default_frame_interval;
         self.matches.frame_interval = self.refresh_interval orelse matched.default_frame_interval;
         if (self.poses.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
+        // A pose on its way draws its face only while it faces the viewer.
+        for (all) |*node| if (node.style.backface_hidden and node.style.pose_motion != null) {
+            node.turned_away = if (node.style.pose) |pose| pose.facesAway() else false;
+        };
         if (self.matches.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
         self.matches.keepCopies(all, theme, copyTextColor);
     }
@@ -5630,13 +5682,14 @@ pub const View = struct {
     }
     fn measureWrap(self: *const View, node: *const Node, measurer: Measurer) layout.Measurement {
         const font = node.style.font;
-        const full = wrap_text.measure(node.text, std.math.inf(f32), font, measurer, node.style.max_lines);
-        const narrowest = @min(full.width, wrap_text.longestWord(node.text, font, measurer));
+        const keep = self.keepOf(node);
+        const full = wrap_text.measure(node.text, std.math.inf(f32), font, measurer, keep, node.style.max_lines);
+        const narrowest = @min(full.width, wrap_text.longestWord(node.text, font, measurer, keep));
         const width = self.wrapWidth(node) orelse return .{ .minimum = .{ .width = narrowest, .height = full.height }, .preferred = full };
         if (width + 0.5 >= full.width) return .{ .minimum = .{ .width = narrowest, .height = full.height }, .preferred = full };
         var at = @max(width, narrowest);
-        if (node.style.balance) at = wrap_text.balanced(node.text, at, font, measurer, node.style.max_lines);
-        const wrapped = wrap_text.measure(node.text, at, font, measurer, node.style.max_lines);
+        if (node.style.balance) at = wrap_text.balanced(node.text, at, font, measurer, keep, node.style.max_lines);
+        const wrapped = wrap_text.measure(node.text, at, font, measurer, keep, node.style.max_lines);
         return .{ .minimum = .{ .width = narrowest, .height = wrapped.height }, .preferred = .{ .width = @max(wrapped.width, narrowest), .height = wrapped.height } };
     }
     /// True when a wrapping text got less width than its single line needs,
@@ -5647,7 +5700,7 @@ pub const View = struct {
             const width = self.wrapWidth(node) orelse continue;
             // A narrow text's preferred width is its longest word: what one
             // line of it needs tells.
-            const needed = if (node.narrow) wrap_text.measure(node.text, std.math.inf(f32), node.style.font, self.measurer, node.style.max_lines).width else node.measured.preferred.width;
+            const needed = if (node.narrow) wrap_text.measure(node.text, std.math.inf(f32), node.style.font, self.measurer, self.keepOf(node), node.style.max_lines).width else node.measured.preferred.width;
             if (width + 0.5 < needed) return true;
         }
         return false;
@@ -6341,13 +6394,32 @@ pub const View = struct {
         };
         const lines: Lines = .{ .target = target, .view = self, .node = node, .bounds = bounds, .color = color, .height = wrap_text.lineHeight(self.measurer, node.style.font) };
         // Balanced lines wrap narrower, each placed in the box as before.
-        const width = if (node.style.balance) wrap_text.balanced(node.text, bounds.width, node.style.font, self.measurer, node.style.max_lines) else bounds.width;
-        wrap_text.eachWith(node.text, width, node.style.font, self.measurer, node.style.max_lines, node.style.pretty and !node.style.balance, &lines, Lines.draw);
+        const keep = self.keepOf(node);
+        const width = if (node.style.balance) wrap_text.balanced(node.text, bounds.width, node.style.font, self.measurer, keep, node.style.max_lines) else bounds.width;
+        wrap_text.eachWith(node.text, width, node.style.font, self.measurer, keep, node.style.max_lines, node.style.pretty and !node.style.balance, &lines, Lines.draw);
     }
 
     /// Draw the text of a text node in `rect`, wrapped or on one line.
     fn drawTextAt(self: *const View, target: anytype, node: *const Node, rect: Rect, color: u32) void {
         if (node.style.wrap) self.paintWrapped(target, node, rect, color) else target.labelFont(if (node.rtl) trailing(rect, node.measured.preferred.width) else rect, node.text, color, node.style.font orelse .{});
+    }
+    /// The language of the node at `index`: its own `Style.lang`, that of
+    /// the nearest container around it that sets one, or the window's.
+    pub fn languageOf(self: *const View, index: usize) []const u8 {
+        const all = self.buffers.nodes[0..self.len];
+        var at: u32 = @intCast(index);
+        while (at != none and at < all.len) : (at = all[at].parent) {
+            if (all[at].style.lang.len != 0) return all[at].style.lang;
+            if (at == 0) break;
+        }
+        return self.language;
+    }
+    /// What the lines of the text node `node` keep whole (`Style.lang`).
+    fn keepOf(self: *const View, node: *const Node) wrap_text.Keep {
+        const base = @intFromPtr(self.buffers.nodes.ptr);
+        const at = @intFromPtr(node);
+        const lang = if (at >= base and at < base + self.len * @sizeOf(Node)) self.languageOf((at - base) / @sizeOf(Node)) else if (node.style.lang.len != 0) node.style.lang else self.language;
+        return .{ .words = wrap_text.keepsWords(lang), .spaces = node.style.preserve_spaces };
     }
     /// The text shadow and stroke the text node at `index` paints with:
     /// its own, or those of the nearest container around it that sets
@@ -6800,7 +6872,7 @@ pub const View = struct {
             }
             const node = &all[at];
             const theme = if (node.theme) |inner| inner.* else window_theme;
-            if (node.concealed or node.unseen) {
+            if (node.concealed or node.unseen or node.turned_away) {
                 at = node.end;
                 continue;
             }
@@ -7898,6 +7970,10 @@ pub const Options = struct {
     /// The direction the window reads in, usually the locale's:
     /// `.direction = view.Direction.of(locale.direction())`.
     direction: Direction = .ltr,
+    /// The language the window's text is in, the application's, as a BCP
+    /// 47 tag: what `Style.lang` takes where no node around a text sets
+    /// one. Borrowed while the Host lives; `Host.setLanguage` changes it.
+    language: []const u8 = "",
     /// Draws `View.icon` nodes, such as `ziggurat_view_graphics.Icons`.
     icons: ?IconPainter = null,
     /// Keys that reach the application after the view: presses that no
@@ -8024,6 +8100,7 @@ pub const Host = struct {
         var view = View.init(buffers);
         view.tooltip_delay = options.tooltip_delay;
         view.layout_direction = options.direction;
+        view.language = options.language;
         view.icons = options.icons;
         return .{
             .context = ui.Context.init(undefined, draw, onAction),
@@ -8076,6 +8153,14 @@ pub const Host = struct {
     pub fn setDirection(self: *Host, value: Direction) void {
         self.options.direction = value;
         self.view.layout_direction = value;
+        self.invalidate();
+    }
+    /// Take `value`, a BCP 47 tag, as the window's language from the next
+    /// pass, as after the application's language changed (see
+    /// `Options.language`), and repaint. Borrowed while the Host lives.
+    pub fn setLanguage(self: *Host, value: []const u8) void {
+        self.options.language = value;
+        self.view.language = value;
         self.invalidate();
     }
     /// Allocate the workspace that shader effects run in (see
