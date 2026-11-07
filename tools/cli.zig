@@ -1197,7 +1197,7 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         if (executable != null and try runZig(allocator, build_args.items) == 0) {
             // On macOS the development app runs from a signed bundle of its
             // own, which permissions and the Keychain know it by.
-            const program = if (builtin.os.tag == .macos) devBundle(allocator, cwd, identity, executable.?) catch |err| blk: {
+            const program: ?[]const u8 = if (builtin.os.tag == .macos) devBundle(allocator, cwd, identity, executable.?) catch |err| blk: {
                 if (err == error.ProvisioningProfileNeedsIdentity)
                     std.debug.print("ziggurat: macos.provisioningProfile needs a signing identity, not ad-hoc signing: pass --sign, or leave the profile out for dev\n", .{})
                 else
