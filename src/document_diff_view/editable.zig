@@ -562,9 +562,13 @@ pub const View = opaque {
     /// Each segment's header in a band across both sides over its first
     /// row, in `Colors.header` with the text in the line numbers' color and
     /// size, as the read-only View shows it.
-    fn drawBands(frame: *ui.Frame, snapshot: *const Snapshot, colors: Colors) !void {
+    fn drawBands(frame: *ui.Frame, snapshot: *const Snapshot, mode: Mode, colors: Colors) !void {
         const bounds = snapshot.bounds;
         const size = snapshot.parameters.font.size * 0.85;
+        // A split view's header keeps to the old side, ending with an
+        // ellipsis at the line between the sides; a unified one has the
+        // whole width.
+        const text_width = if (mode == .split) headerWidth(bounds, snapshot.columns[0]) else bounds.width - 16;
         for (snapshot.rows[0..snapshot.count]) |row| {
             if (row.band <= 0) continue;
             const top = snapshot.columns[0].y + row.y;
@@ -576,8 +580,13 @@ pub const View = opaque {
             defer frame.popClip() catch |err| {
                 frame.failure = frame.failure orelse err;
             };
-            frame.labelFont(.{ .x = bounds.x + 8, .y = top + (row.band - size * 1.5) / 2, .width = bounds.width - 16, .height = size * 1.5 }, row.header, colors.line_number, .{ .size = size, .monospace = true });
+            frame.labelFont(.{ .x = bounds.x + 8, .y = top + (row.band - size * 1.5) / 2, .width = text_width, .height = size * 1.5 }, row.header, colors.line_number, .{ .size = size, .monospace = true });
         }
+    }
+    /// The room of a split view's header text: from its start to the line
+    /// between the sides, its padding short of it.
+    pub fn headerWidth(bounds: ui.Rect, old_side: ui.Rect) f32 {
+        return @max(0, old_side.x + old_side.width - (bounds.x + 8) - 8);
     }
     fn drawBody(frame: *ui.Frame, bounds: ui.Rect, colors: Colors, value: *State) anyerror!void {
         const snapshot = try value.current(bounds, frame.size.scale);
@@ -600,7 +609,7 @@ pub const View = opaque {
         };
         for (value.marks.storage[0..value.marks.count]) |mark| frame.rect(mark.rect, if (mark.side == .a) colors.deleted_detail else colors.added_detail);
         if (snapshot.projected) {
-            try drawBands(frame, snapshot, colors);
+            try drawBands(frame, snapshot, value.mode, colors);
             try drawNumbers(frame, snapshot, value.mode, colors);
         }
         if (value.mode == .unified) {
@@ -2267,4 +2276,12 @@ test "source anchors preserve insertion gaps, trailing padding and EOF caret row
     var empty = try ix.Index.create(std.testing.allocator, &empty_result, 100, 10000, 20);
     defer empty.close();
     try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 0 }, try sourceAnchor(&empty, 0, 1, .{}, &.{}, &.{}));
+}
+
+test "a split view's header stops at the line between the sides" {
+    const bounds: ui.Rect = .{ .x = 10, .y = 0, .width = 400, .height = 300 };
+    const old_side: ui.Rect = .{ .x = 50, .y = 0, .width = 150, .height = 300 };
+    try std.testing.expectEqual(@as(f32, 200 - 18 - 8), View.headerWidth(bounds, old_side));
+    // Dragged to its floor, the old side leaves the header no room.
+    try std.testing.expectEqual(@as(f32, 0), View.headerWidth(bounds, .{ .x = 10, .y = 0, .width = 4, .height = 300 }));
 }

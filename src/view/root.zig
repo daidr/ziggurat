@@ -3,6 +3,7 @@
 //! flex layout and records the resulting frame. Widgets bind directly to
 //! application values and report activation as ordinary return values.
 const std = @import("std");
+const builtin = @import("builtin");
 const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -1475,6 +1476,9 @@ pub const Node = struct {
     graphic: ?Graphic = null,
     /// A pointer area repaints as the pointer moves over it.
     track: bool = false,
+    /// A pointer area that reports the pointer without taking presses
+    /// (`AreaOptions.observe`).
+    observe: bool = false,
     /// A container that observes the input inside it (`observeInput`).
     observes: bool = false,
     /// The node or one around it is `Style.hidden`, or it floats from an
@@ -1891,7 +1895,7 @@ pub const Overlay = struct {
     /// in build order.
     cursors: [max_cursor_regions]CursorRegion = undefined,
     cursor_count: usize = 0,
-    pub const Area = struct { id: u64, index: u32, bounds: Rect, rect: Rect, track: bool };
+    pub const Area = struct { id: u64, index: u32, bounds: Rect, rect: Rect, track: bool, observe: bool = false };
     pub const CursorRegion = struct {
         index: u32,
         bounds: Rect,
@@ -2083,6 +2087,9 @@ pub const View = struct {
     tools: ?*const Inspector = null,
     /// The pointer area a button went down on, until it comes up.
     area_press: ?pointer_controls.Press = null,
+    /// The control the primary button went down on, until it comes up, for
+    /// the areas observing it to show its press.
+    control_press: ?u64 = null,
     /// The device and pressure of the latest pointer event, which Host
     /// takes from the window as each comes (`z.Window.pointerSample`).
     pointer_sample: z.PointerSample = .{},
@@ -2631,6 +2638,12 @@ pub const View = struct {
     pub const areaRelease = pointer_controls.release;
     pub const areaCancel = pointer_controls.cancel;
     pub const pressedAt = pointer_controls.pressedAt;
+    pub const controlPressed = pointer_controls.controlPressed;
+    /// True when the node `id` is an open container of what is built now.
+    pub fn withinOpen(self: *const View, id: u64) bool {
+        for (self.stack[0..self.depth]) |index| if (self.buffers.nodes[index].id == id) return true;
+        return false;
+    }
     pub const pointerMoved = pointer_controls.moved;
     pub const cursorAt = pointer_controls.cursorAt;
 
@@ -4909,6 +4922,82 @@ pub const View = struct {
         return null;
     }
 
+    /// A key that scrolls the innermost scroll container around the focus,
+    /// or under the pointer when the focus is in none, as a web page's do:
+    /// Up and Down a line, Page Up and Page Down a page less a line (at
+    /// least half the view), Space and Shift+Space a page down and up,
+    /// Home and End to the ends (and Cmd+Up and Cmd+Down on macOS). A
+    /// container already at the end the key goes toward leaves it to the
+    /// one around it. Space and Shift+Space type a space where the focus
+    /// takes text (`focusTakesText`), which leaves the view where it is.
+    /// Null when no container moves; the Host and Harness ask after the
+    /// controls and the application's own keys leave the key alone.
+    pub fn scrollKey(self: *View, input: z.KeyInput) ?Event {
+        const line: f32 = 40;
+        const far: f32 = 1e9;
+        const mods = input.modifiers;
+        const plain = !mods.control and !mods.alt and !mods.super and !mods.shift;
+        const command = mods.super and !mods.control and !mods.alt and !mods.shift;
+        const mac = comptime builtin.os.tag == .macos;
+        var dy: f32 = 0;
+        var page: f32 = 0;
+        if (plain and input.key == .down) dy = line else if (plain and input.key == .up) dy = -line else if (plain and (input.key == .page_down or input.key == .space)) {
+            page = 1;
+        } else if ((plain and input.key == .page_up) or (input.key == .space and mods.shift and !mods.control and !mods.alt and !mods.super)) {
+            page = -1;
+        } else if ((plain or command) and input.key == .home or (mac and command and input.key == .up)) {
+            dy = -far;
+        } else if ((plain or command) and input.key == .end or (mac and command and input.key == .down)) {
+            dy = far;
+        } else return null;
+        // Space types where the focus takes text, rather than paging.
+        if (input.key == .space and self.focus_text) return null;
+        const all = self.buffers.nodes[0..self.len];
+        var chain: [max_focus_chain]u32 = undefined;
+        var chain_len: usize = 0;
+        if (self.focus) |focused| if (self.indexOf(focused)) |start| {
+            var index: u32 = start;
+            while (index < all.len and chain_len < chain.len) : (index = all[index].parent) {
+                if (all[index].kind == .scroll) {
+                    chain[chain_len] = index;
+                    chain_len += 1;
+                }
+                if (index == 0) break;
+            }
+        };
+        if (chain_len == 0) if (self.pointer) |point| {
+            // Under the pointer, innermost first.
+            var region = self.overlay.scroll_count;
+            while (region > 0 and chain_len < chain.len) {
+                region -= 1;
+                const entry = self.overlay.scrolls[region];
+                if (!contains(entry.rect, point)) continue;
+                if (self.indexOf(entry.id)) |index| {
+                    chain[chain_len] = index;
+                    chain_len += 1;
+                }
+            }
+        };
+        for (chain[0..chain_len]) |index| {
+            const node = &all[index];
+            const model = node.scroll orelse continue;
+            const shown = for (self.overlay.scrolls[0..self.overlay.scroll_count]) |entry| {
+                if (entry.id == node.id) break true;
+            } else false;
+            if (!shown or node.concealed) continue;
+            const height = model.viewport.height;
+            const step = if (page != 0) page * @max(height - line, height / 2) else dy;
+            const most = model.maxOffset().y;
+            if ((step > 0 and model.offset.y >= most - 0.5) or (step < 0 and model.offset.y <= 0.5)) continue;
+            return .{ .scroll = .{ .id = node.id, .delta = .{ .x = 0, .y = step } } };
+        }
+        return null;
+    }
+    fn indexOf(self: *const View, id: u64) ?u32 {
+        for (self.buffers.nodes[0..self.len], 0..) |*node, i| if (node.id == id) return @intCast(i);
+        return null;
+    }
+
     /// A scroll of the container `id` toward the pointer near or past its
     /// top or bottom edge, faster nearer and past it.
     fn edgeScroll(self: *const View, id: ?u64, point: Point) ?Event {
@@ -5764,7 +5853,7 @@ pub const View = struct {
             if (node.kind == .menu or node.kind == .menu_item) menu_controls.record(self, node);
             switch (node.kind) {
                 .pointer_area => if (node.style.enabled and overlay.area_count < max_pointer_areas) if (self.visible(node)) |rect| {
-                    overlay.areas[overlay.area_count] = .{ .id = node.id, .index = @intCast(index), .bounds = node.bounds, .rect = rect, .track = node.track };
+                    overlay.areas[overlay.area_count] = .{ .id = node.id, .index = @intCast(index), .bounds = node.bounds, .rect = rect, .track = node.track, .observe = node.observe };
                     overlay.area_count += 1;
                 },
                 .embed => if (node.embed.?.input != null and node.style.enabled and overlay.embed_count < max_interactive_embeds) if (self.visible(node)) |rect| {
@@ -8530,6 +8619,7 @@ pub const Host = struct {
                     },
                 }
                 const hit = self.context.input_state.hit(.{ .x = point.x, .y = point.y });
+                if (self.view.controlPressed(hit)) self.invalidate();
                 const adjusting = if (hit) |id| if (self.context.input_state.get(id)) |item| item.options.range != null else false else false;
                 const pressed = self.view.pointerPress(point, press.modifiers, self.time(), adjusting);
                 if (pressed.consumed) return self.apply(pressed);
@@ -8551,12 +8641,14 @@ pub const Host = struct {
                 const area = self.deliverArea(self.view.areaRelease(point, button));
                 if (area) self.updateCursor();
                 if (release.button != .primary) return area;
+                if (self.view.controlPressed(null)) self.invalidate();
                 const result = self.view.captureRelease(point);
                 const taken = self.apply(result);
                 self.updateCursor();
                 return taken or area;
             },
             .cancel_input => {
+                if (self.view.controlPressed(null)) self.invalidate();
                 _ = self.deliverArea(self.view.areaCancel());
                 _ = self.apply(self.view.captureCancel());
                 return false;
@@ -8569,6 +8661,7 @@ pub const Host = struct {
                 if (!focused) {
                     // Keys let go of elsewhere never come back up here.
                     _ = self.view.releaseKeys();
+                    _ = self.view.controlPressed(null);
                     _ = self.deliverArea(self.view.areaCancel());
                     _ = self.apply(self.view.captureCancel());
                     const hover = self.view.hoverAt(null);
@@ -8674,7 +8767,14 @@ pub const Host = struct {
     /// A press the view and the controls left alone goes to the application.
     fn onUnhandledKey(ptr: *anyopaque, _: *ui.Context, input: z.KeyInput) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
-        if (self.building or !self.applicationKey(input, false)) return false;
+        if (self.building) return false;
+        if (!self.applicationKey(input, false)) {
+            // Then the scroll container around the focus or the pointer.
+            const event = self.view.scrollKey(input) orelse return false;
+            self.deliver(event);
+            self.invalidate();
+            return true;
+        }
         self.settleEmbed(null);
         return true;
     }

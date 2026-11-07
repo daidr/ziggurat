@@ -49,6 +49,13 @@ pub const Options = struct {
     /// it; without it the area repaints only as the pointer enters and
     /// leaves.
     track: bool = false,
+    /// Report the pointer over the area without taking presses from the
+    /// control around it, as content of a list's row drawing the row's
+    /// hover and press, or a ripple where the pointer went down: the row
+    /// stays the one control the press chooses, and a test's click on its
+    /// label reaches it. `pressed` is the press of that control while the
+    /// pointer is over the area, and the area clicks nothing itself.
+    observe: bool = false,
 };
 
 /// The pointer over an area, as of this pass.
@@ -137,7 +144,7 @@ fn hovering(v: *const View, area: *const Area) bool {
 fn areaAt(v: *const View, point: Point) ?*const Area {
     var best: ?*const Area = null;
     for (v.overlay.areas[0..v.overlay.area_count]) |*area| {
-        if (!contains(area.rect, point) or !reaches(v, area.rect, point)) continue;
+        if (area.observe or !contains(area.rect, point) or !reaches(v, area.rect, point)) continue;
         if (best == null or area.index > best.?.index) best = area;
     }
     return best;
@@ -149,6 +156,7 @@ fn areaAt(v: *const View, point: Point) ?*const Area {
 pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
     const node = try v.openNode(.pointer_area, style);
     node.track = options.track;
+    node.observe = options.observe;
     var result: PointerArea = .{ .id = node.id };
     const known = entry(v, node.id);
     if (known) |area| result.bounds = area.bounds;
@@ -158,6 +166,15 @@ pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
         result.hovered = true;
         result.position = local(area.bounds, v.pointer.?);
     };
+    if (options.observe) {
+        // The press of the control around it, as the pointer stays over it.
+        if (v.control_press) |id| if (result.hovered and v.withinOpen(id)) {
+            result.pressed = true;
+            result.pressed_button = .primary;
+            result.pointer = v.pointer_sample;
+        };
+        return result;
+    }
     if (v.area_press) |held| if (held.id == node.id) {
         result.pressed = held.button == .primary and result.hovered;
         result.pressed_button = held.button;
@@ -248,6 +265,15 @@ pub fn cancel(v: *View) ?view.Event {
 
 /// The pointer moved to `point`, or left the window with null. True when an
 /// area it enters or leaves, or a tracking area under it, should repaint.
+/// The primary button went down on the control `id`, or came up with
+/// null: true when an area observing it should repaint.
+pub fn controlPressed(v: *View, id: ?u64) bool {
+    if (std.meta.eql(v.control_press, id)) return false;
+    v.control_press = id;
+    for (v.overlay.areas[0..v.overlay.area_count]) |*area| if (area.observe and hovering(v, area)) return true;
+    return false;
+}
+
 pub fn moved(v: *View, point: ?Point) bool {
     v.pointer = point;
     var hasher = std.hash.Wyhash.init(0);

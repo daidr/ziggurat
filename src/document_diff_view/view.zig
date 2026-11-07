@@ -526,7 +526,10 @@ pub const View = struct {
                         frame.failure = frame.failure orelse err;
                     };
                     const size = snapshot.number_size;
-                    frame.labelFont(.{ .x = bounds.x + 8, .y = top + row.y + (row.band - size * 1.5) / 2, .width = bounds.width - 16, .height = size * 1.5 }, row.header, colors.line_number, .{ .size = size, .monospace = true });
+                    // It keeps to the old side, ending with an ellipsis at
+                    // the line between the sides.
+                    const width = @max(0, snapshot.columns[0].x + snapshot.columns[0].width - (bounds.x + 8) - 8);
+                    frame.labelFont(.{ .x = bounds.x + 8, .y = top + row.y + (row.band - size * 1.5) / 2, .width = width, .height = size * 1.5 }, row.header, colors.line_number, .{ .size = size, .monospace = true });
                 }
             }
             for ([_]Side{ .a, .b }) |side| {

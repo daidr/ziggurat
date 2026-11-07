@@ -231,7 +231,11 @@ pub const Harness = struct {
     /// A press nothing in the view handled goes to the application, as
     /// Host routes it after the controls.
     fn unhandled(self: *Harness, input: z.KeyInput) anyerror!bool {
-        if (!self.applicationKey(input, false)) return false;
+        if (!self.applicationKey(input, false)) {
+            const event = self.view.scrollKey(input) orelse return false;
+            try self.deliver(event);
+            return true;
+        }
         try self.settleEmbed(null);
         return true;
     }
@@ -806,6 +810,7 @@ pub const Harness = struct {
             if (self.view.areaPress(.{ .x = x, .y = y }, .primary, modifiers, self.clock)) |event| return self.deliver(event);
             return self.render();
         };
+        _ = self.view.controlPressed(node.id);
         if (isRow(node.kind)) {
             try self.check(node);
             if (self.view.rowPress(.{ .x = x, .y = y }, modifiers, node.id, self.config.theme)) |event| return self.deliver(event);
@@ -837,6 +842,7 @@ pub const Harness = struct {
     /// it. Renders.
     pub fn release(self: *Harness, x: f32, y: f32) anyerror!void {
         self.view.pointer_sample.pressure = 0;
+        _ = self.view.controlPressed(null);
         try self.observe(.{ .pointer_up = .{ .position = .{ .x = x, .y = y }, .button = .primary } });
         if (self.config.options.tools()) |tools| if (tools.pointerUp(.{ .x = x, .y = y })) return self.render();
         if (self.view.areaRelease(.{ .x = x, .y = y }, .primary)) |event| {
@@ -858,6 +864,7 @@ pub const Harness = struct {
     /// Lose the press, as focus loss or a cancelled capture does. Renders.
     pub fn cancelPointer(self: *Harness) anyerror!void {
         self.pressed = null;
+        _ = self.view.controlPressed(null);
         if (self.view.areaCancel()) |event| try self.run(event);
         return self.apply(self.view.captureCancel());
     }

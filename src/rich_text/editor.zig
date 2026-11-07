@@ -411,6 +411,8 @@ pub const Editor = struct {
     drag_unit: u8 = 1,
     drag_start: [2]u32 = .{ 0, 0 },
     press_link: std.ArrayList(u8) = .empty,
+    /// Where the press that may open `press_link` went down.
+    press_point: z.Point = .{ .x = 0, .y = 0 },
     /// The primary button drags the scroll bar's thumb, held `thumb_grab`
     /// DIPs below its top; `hovered` that the pointer is over the editor,
     /// which shows the bar.
@@ -1561,7 +1563,7 @@ pub const Editor = struct {
             },
             .pointer_down => |down| return self.press(down),
             .pointer_move => |point| return self.move(point),
-            .pointer_up => return self.release(),
+            .pointer_up => |up| return self.release(up.position),
             .wheel => |w| {
                 const before = self.scroll;
                 const total = self.heights.top(self.paras.items.len);
@@ -2419,7 +2421,8 @@ pub const Editor = struct {
             return true;
         };
         const at = try self.positionAt(c.x, c.y);
-        if (clicks == 1 and !p.modifiers.shift and at.i < self.textLen()) try self.press_link.appendSlice(self.allocator, self.text().attributesAt(at.i).link);
+        self.press_point = p.position;
+        if (clicks == 1 and !p.modifiers.shift) try self.press_link.appendSlice(self.allocator, try self.linkAt(c.x, c.y));
         self.dragging = true;
         self.desired_x = null;
         self.drag_unit = @min(clicks, 3);
@@ -2446,8 +2449,7 @@ pub const Editor = struct {
         if ((try self.taskBox(c.x, c.y)) != null or self.overScrollbar(point)) {
             cursor = .arrow;
         } else {
-            const at = try self.positionAt(c.x, c.y);
-            if (at.i < self.textLen() and self.text().attributesAt(at.i).link.len > 0) cursor = .pointer;
+            if ((try self.linkAt(c.x, c.y)).len > 0) cursor = .pointer;
         }
         self.cursor = cursor;
     }
@@ -2485,20 +2487,49 @@ pub const Editor = struct {
                 self.publish();
             },
         }
-        if (at.i != self.drag_start[0] or self.drag_unit != 1) self.press_link.clearRetainingCapacity();
+        if (at.i != self.drag_start[0] or self.drag_unit != 1 or farFrom(self.press_point, point)) self.press_link.clearRetainingCapacity();
         self.reveal = true;
         return true;
     }
 
+    /// The link at (x, y) of the content: an attachment's over the whole box
+    /// it is drawn in, though it holds one rune, and a text's at the rune
+    /// nearest. Hit testing for the caret stays nearest-caret.
+    fn linkAt(self: *Editor, x: f32, y: f64) ![]const u8 {
+        if (self.paras.items.len == 0) return "";
+        const at = try self.layoutPositionAt(x, y);
+        const pv = try self.paraLayout(at.p);
+        const o = self.origin(at.p);
+        const local_x = x - o.x;
+        const local_y: f32 = @floatCast(y - o.y);
+        for (pv.layout.pieces.items) |piece| {
+            const r = pv.layout.objectRect(piece) orelse continue;
+            if (!(local_x >= r.x and local_y >= r.y and local_x < r.x + r.width and local_y < r.y + r.height)) continue;
+            // An attachment being composed over opens nothing.
+            if (self.compose.items.len > 0 and self.paraAt(self.sel_caret) == at.p) {
+                const c = self.sel_caret - pv.start;
+                if (piece.rune >= c and piece.rune < c + self.compose_runes) return "";
+            }
+            return self.text().attributesAt(self.global(at.p, piece.rune)).link;
+        }
+        const i = self.global(at.p, at.l);
+        if (i >= self.textLen()) return "";
+        const attributes = self.text().attributesAt(i);
+        // An attachment the point is beside, not on, is not its link.
+        return if (attributes.attachment == null) attributes.link else "";
+    }
+
     /// Ends a drag, and opens the link a click began on.
-    fn release(self: *Editor) !bool {
+    fn release(self: *Editor, point: z.Point) !bool {
         if (self.thumb) {
             self.thumb = false;
             return true;
         }
         if (!self.dragging) return false;
         self.dragging = false;
-        if (self.press_link.items.len > 0 and self.sel_caret == self.sel_anchor) {
+        // The release opens the link the press began on, still under it.
+        const c = self.contentPoint(point);
+        if (self.press_link.items.len > 0 and self.sel_caret == self.sel_anchor and !farFrom(self.press_point, point) and std.mem.eql(u8, try self.linkAt(c.x, c.y), self.press_link.items)) {
             const link = self.press_link.items;
             if (self.options.on_link) |opener| {
                 opener.call(opener.context, link);
@@ -2506,6 +2537,13 @@ pub const Editor = struct {
         }
         self.press_link.clearRetainingCapacity();
         return true;
+    }
+
+    /// A pointer 4 DIP or more from where it went down moved, as a drag.
+    fn farFrom(a: z.Point, b: z.Point) bool {
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        return dx * dx + dy * dy >= 16;
     }
 
     /// The paragraph whose task's check box (x, y) of the content is on.

@@ -343,3 +343,47 @@ test "whether the focus takes text" {
     try h.render();
     try testing.expect(!app.takes);
 }
+
+const Page = struct {
+    model: view.ScrollModel = .{},
+    fn build(self: *Page, v: *View) anyerror!void {
+        try v.scroll(&self.model, .{ .height = 200, .self_align = .stretch });
+        try v.column(.{ .gap = 10 });
+        for (0..60) |i| try v.textf("Line {d}", .{i}, .{ .key = i + 10 });
+        try v.end();
+        try v.end();
+    }
+};
+
+test "keys scroll the scroll view under the pointer, and Space types where the focus takes text" {
+    var storage: Storage = .{};
+    var app: Page = .{};
+    var h = Harness.init(&app, Page.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.render();
+    const area = try h.boundsOf(.{ .kind = .scroll });
+    try h.hoverAt(area.x + 10, area.y + 10);
+    try testing.expectEqual(@as(f32, 0), app.model.offset.y);
+    // A page less a line.
+    try testing.expect(try h.key(.{ .key = .page_down }));
+    try testing.expectEqual(@as(f32, 160), app.model.offset.y);
+    try testing.expect(try h.key(.{ .key = .page_up }));
+    try testing.expectEqual(@as(f32, 0), app.model.offset.y);
+    try testing.expect(try h.key(.{ .key = .space }));
+    try testing.expectEqual(@as(f32, 160), app.model.offset.y);
+    try testing.expect(try h.key(.{ .key = .space, .modifiers = .{ .shift = true } }));
+    try testing.expectEqual(@as(f32, 0), app.model.offset.y);
+    try testing.expect(try h.key(.{ .key = .down }));
+    try testing.expectEqual(@as(f32, 40), app.model.offset.y);
+    // At the top, Page Up goes nowhere and is left alone.
+    try testing.expect(try h.key(.{ .key = .up }));
+    try testing.expect(!try h.key(.{ .key = .page_up }));
+    // Where the focus takes text, Space types rather than paging; keys
+    // that type nothing still scroll.
+    h.view.focus_text = true;
+    try testing.expect(h.view.scrollKey(.{ .key = .space }) == null);
+    try testing.expect(h.view.scrollKey(.{ .key = .space, .modifiers = .{ .shift = true } }) == null);
+    try testing.expect(h.view.scrollKey(.{ .key = .page_down }) != null);
+}
