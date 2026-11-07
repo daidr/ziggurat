@@ -13,7 +13,9 @@
 //! music.play();
 //! ```
 //!
-//! WAV, FLAC, Ogg Vorbis and MP3 decode out of the box; other formats join through
+//! WAV, FLAC, Ogg Vorbis, MP3, AAC (.aac, and in MP4) and MP4 (.m4a,
+//! .mp4, fragmented .m4s: AAC-LC, Apple Lossless and FLAC) decode out of
+//! the box; other formats join through
 //! `Options.formats`. The output opens when something first plays and
 //! closes a few seconds after everything stopped. Where no output opens,
 //! players still play on time, unheard, and `Engine.outputError` says why.
@@ -26,6 +28,9 @@ pub const decoder = @import("decoder.zig");
 pub const wav = @import("wav.zig");
 pub const flac = @import("flac.zig");
 pub const compressed = @import("compressed.zig");
+pub const mp4 = @import("mp4.zig");
+pub const aac = @import("aac.zig");
+pub const alac = @import("alac.zig");
 const engine = @import("engine.zig");
 const output = @import("output.zig");
 
@@ -63,7 +68,11 @@ test {
     _ = wav;
     _ = flac;
     _ = compressed;
+    _ = mp4;
+    _ = aac;
+    _ = alac;
     _ = @import("sound.zig");
     _ = output;
     _ = @import("tests.zig");
+    _ = @import("mp4_tests.zig");
 }

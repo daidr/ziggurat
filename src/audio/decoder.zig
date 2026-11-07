@@ -202,13 +202,27 @@ pub fn matches(magic: []const u8, head: []const u8) bool {
 pub const Opened = struct { decoder: Decoder, format: []const u8 };
 
 /// Opens a decoder of the first format matching the input's first bytes.
+/// A file that starts with an ID3 tag, as MP3s do and some FLAC and AAC
+/// files too, is of the format its bytes after the tag match, whose decoder
+/// reads it from the tag.
 pub fn open(allocator: std.mem.Allocator, input: Input, formats: []const Format) Error!Opened {
     try input.seekTo(0);
     var head: [16]u8 = undefined;
     const count = try input.readAll(&head);
+    var after: [16]u8 = undefined;
+    var after_count: usize = 0;
+    if (count >= 10 and std.mem.eql(u8, head[0..3], "ID3")) {
+        const size = @as(u64, head[6] & 0x7f) << 21 | @as(u64, head[7] & 0x7f) << 14 | @as(u64, head[8] & 0x7f) << 7 | head[9] & 0x7f;
+        if (input.seekTo(10 + size)) {
+            after_count = try input.readAll(&after);
+        } else |_| {}
+    }
     try input.seekTo(0);
-    for (formats) |format| {
-        if (matches(format.magic, head[0..count])) return .{ .decoder = try format.open(allocator, input), .format = format.name };
+    for ([_][]const u8{ after[0..after_count], head[0..count] }) |bytes| {
+        if (bytes.len == 0) continue;
+        for (formats) |format| {
+            if (matches(format.magic, bytes)) return .{ .decoder = try format.open(allocator, input), .format = format.name };
+        }
     }
     return error.UnknownFormat;
 }

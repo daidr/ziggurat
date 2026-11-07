@@ -512,10 +512,13 @@ const Flac = struct {
     const vtable: Decoder.VTable = .{ .read = read, .setPosition = setPosition, .deinit = deinit };
 };
 
+/// A .flac file, after an ID3 tag if one is first.
 pub fn open(allocator: std.mem.Allocator, input: Input) Error!Decoder {
+    var offset = try @import("aac.zig").skipId3(input);
+    input.seekTo(offset) catch return error.InvalidData;
     var head: [4]u8 = undefined;
     if (try input.readAll(&head) != 4 or !std.mem.eql(u8, &head, "fLaC")) return error.InvalidData;
-    var offset: u64 = 4;
+    offset += 4;
     var info: ?[34]u8 = null;
     while (true) {
         var block_header: [4]u8 = undefined;
@@ -534,7 +537,13 @@ pub fn open(allocator: std.mem.Allocator, input: Input) Error!Decoder {
         input.seekTo(offset) catch return error.InvalidData;
         if (last) break;
     }
-    const bytes = info orelse return error.InvalidData;
+    const self = try create(allocator, input, offset, &(info orelse return error.InvalidData));
+    return .{ .context = self, .vtable = &Flac.vtable, .sample_rate = self.sample_rate, .channels = self.channels, .frames = self.total };
+}
+
+/// A decoder of the frames at `offset` on, of the stream STREAMINFO
+/// `info` describes.
+fn create(allocator: std.mem.Allocator, input: Input, offset: u64, bytes: *const [34]u8) Error!*Flac {
     const max_block = std.mem.readInt(u16, bytes[2..4], .big);
     const packed_format = std.mem.readInt(u64, bytes[10..18], .big);
     const rate: u32 = @intCast(packed_format >> 44);
@@ -557,7 +566,55 @@ pub fn open(allocator: std.mem.Allocator, input: Input) Error!Decoder {
         .block = block,
         .scale = 1.0 / @as(f32, @floatFromInt(@as(u64, 1) << (bits - 1))),
     };
-    return .{ .context = self, .vtable = &Flac.vtable, .sample_rate = rate, .channels = channels, .frames = self.total };
+    return self;
+}
+
+const mp4 = @import("mp4.zig");
+
+/// FLAC frames as packets, as an MP4 holds them, one a packet.
+const Packets = struct {
+    flac: *Flac,
+    bytes: decoding.BytesInput = .{ .bytes = &.{} },
+
+    fn decode(context: *anyopaque, packet: []const u8, out: []f32) Error!usize {
+        const self: *Packets = @ptrCast(@alignCast(context));
+        const flac = self.flac;
+        self.bytes = .{ .bytes = packet };
+        flac.reader.input = self.bytes.input();
+        flac.reader.reset(0) catch return error.InvalidData;
+        const header = (flac.decodeFrame() catch |err| switch (err) {
+            error.EndOfStream => return error.InvalidData,
+            else => |other| return other,
+        }) orelse return error.InvalidData;
+        for (0..header.block_size) |frame| {
+            for (0..flac.channels) |channel| {
+                out[frame * flac.channels + channel] = @as(f32, @floatFromInt(flac.block[channel * flac.max_block + frame])) * flac.scale;
+            }
+        }
+        return header.block_size;
+    }
+
+    fn reset(_: *anyopaque) void {}
+
+    fn deinit(context: *anyopaque) void {
+        const self: *Packets = @ptrCast(@alignCast(context));
+        const allocator = self.flac.allocator;
+        Flac.deinit(self.flac);
+        allocator.destroy(self);
+    }
+
+    const vtable: mp4.Codec.VTable = .{ .decode = decode, .reset = reset, .deinit = deinit };
+};
+
+/// The codec of FLAC frames configured by `config`, the metadata blocks of
+/// an MP4's dfLa box, STREAMINFO first.
+pub fn openPacketCodec(allocator: std.mem.Allocator, config: []const u8) Error!mp4.Codec {
+    if (config.len < 4 + 34 or config[0] & 0x7f != 0 or std.mem.readInt(u24, config[1..4], .big) != 34) return error.InvalidData;
+    const self = try allocator.create(Packets);
+    errdefer allocator.destroy(self);
+    self.* = .{ .flac = undefined };
+    self.flac = try create(allocator, self.bytes.input(), 0, config[4..38]);
+    return .{ .context = self, .vtable = &Packets.vtable, .sample_rate = self.flac.sample_rate, .channels = self.flac.channels, .max_frames = self.flac.max_block };
 }
 
 /// The integer signal the test files were encoded from: silence, a

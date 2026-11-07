@@ -14,7 +14,7 @@ const Stretcher = @import("stretch.zig").Stretcher;
 const compressed = @import("compressed.zig");
 
 /// WAV, FLAC, Ogg Vorbis and MP3, detected by their first bytes.
-pub const default_formats = [_]decoding.Format{ @import("wav.zig").format, @import("flac.zig").format, compressed.vorbis_format } ++ compressed.mp3_formats;
+pub const default_formats = [_]decoding.Format{ @import("wav.zig").format, @import("flac.zig").format, compressed.vorbis_format, @import("mp4.zig").format } ++ compressed.mp3_formats ++ @import("aac.zig").adts_formats;
 
 /// Main thread, once each time a player plays to its end.
 pub const EndedCallback = struct {
