@@ -61,7 +61,8 @@ const Files = struct {
 集合自己滚动：滚轮和触控板纵向滚动（横向滚动列），到达边界时不消费，交给外层滚动容器；右侧与底部画不可交互的指示条，右侧条可以拖动。
 
 - 行变化时集合保持顶部的项目不动：顶部那一行的键在原位置附近 `anchor_search`（4096）行内找到后，偏移随之调整，例如在上方加载旧消息时。`keep_offset` 改为保持偏移（适合随数据重新排序的行），选择仍跟随项目。
-- `follow_end` 从末尾开始，内容增长时保持末尾可见，直到用户滚离；滚回末尾后继续跟随。`scrollToEnd()` 也重新开始跟随。
+- `follow_end` 从末尾开始，内容增长时保持末尾可见，直到用户滚离；滚回末尾后继续跟随。`scrollToEnd()` 也重新开始跟随。`follow_end` 在每次构建时读取，可以随时开关；`holdPlace()` 让表格或大纲在内容增长时停在原处、不再跟随末尾（例如用户正在读中间的一条消息），直到再次滚回末尾或调用 `scrollToEnd()`。
+- `TableOptions.cells_style`（`CellsStyle{ cell, cell_text, row, stripe }`）调整单元格块选择的画法：`cell` 与 `cell_text` 是块的填充与文字颜色（默认强调色与强调色上的文字色），`row` 填充块选择所在的行，`stripe` 填充其余的奇数行；光标单元格的边框在块内用块的文字色，块外用 `cell` 色。
 - `scrollTo(row, .start/.center/.end/.nearest)`、`scrollIntoView(row)`、`scrollToEnd()`、`setScrollOffset(f64)`；`visible()` 返回上一次绘制时可见的首末行，`atEnd()` 表示末尾是否可见，用于接近末尾时加载更多。在第一次绘制之前请求的滚动会在知道尺寸后应用。
 
 偏移以 f64 DIP 保存。

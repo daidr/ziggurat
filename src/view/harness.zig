@@ -208,6 +208,15 @@ pub const Harness = struct {
         try self.render();
     }
 
+    /// Send an editing command as an Edit menu item does (copy as
+    /// Control+C, paste as Control+V and so on): the `observeInput`
+    /// containers around the focus see it, then a render.
+    pub fn editCommand(self: *Harness, edit: z.EditKey) anyerror!void {
+        if (self.input == null) return error.NoInput;
+        try self.observe(.{ .edit = edit });
+        try self.render();
+    }
+
     /// Replay a key release to the focused embedded leaf, then render if it
     /// took it, as Host does. True when it took it.
     pub fn keyUp(self: *Harness, input: z.KeyInput) anyerror!bool {
@@ -231,7 +240,11 @@ pub const Harness = struct {
     /// A press nothing in the view handled goes to the application, as
     /// Host routes it after the controls.
     fn unhandled(self: *Harness, input: z.KeyInput) anyerror!bool {
-        if (!self.applicationKey(input, false)) return false;
+        if (!self.applicationKey(input, false)) {
+            const event = self.view.scrollKey(input) orelse return false;
+            try self.deliver(event);
+            return true;
+        }
         try self.settleEmbed(null);
         return true;
     }
@@ -301,6 +314,27 @@ pub const Harness = struct {
             const tree = &context.semantic_tree;
             const entry = tree.find(id) orelse return error.NotFound;
             return .{ .entry = entry.*, .tree = tree };
+        } else return error.SkipZigTest;
+    }
+
+    /// Every semantic node of the last render but the window root, in the
+    /// order the view recorded them (paint order, parents before their
+    /// children), written to `out`; returns the part of `out` filled.
+    /// `error.NoSpaceLeft` when the tree has more nodes than `out` holds.
+    pub fn accessibleAll(self: *const Harness, out: []Accessible) anyerror![]Accessible {
+        const context = self.input orelse return error.NoInput;
+        if (!self.semantics) return error.NoSemantics;
+        if (comptime ui.capabilities.accessibility) {
+            const tree = &context.semantic_tree;
+            const entries = tree.entries[0..tree.len];
+            var written: usize = 0;
+            for (entries) |entry| {
+                if (entry.parent == null) continue;
+                if (written == out.len) return error.NoSpaceLeft;
+                out[written] = .{ .entry = entry, .tree = tree };
+                written += 1;
+            }
+            return out[0..written];
         } else return error.SkipZigTest;
     }
 
@@ -667,7 +701,22 @@ pub const Harness = struct {
         if (interactive(node.kind)) {
             if (hit == null or hit.? != node) return error.Covered;
         } else if (node.embed == null and hit != null) return error.Covered;
-        if (button == .secondary and self.menuAnchorAt(point) != self.menuAnchorOf(node)) return error.Covered;
+        if (button == .secondary) {
+            const opened = self.menuAnchorAt(point);
+            const own = self.menuAnchorOf(node);
+            if (opened != own and !self.opensInnerMenu(node, own, opened)) return error.Covered;
+        }
+    }
+    /// True when a secondary press on `node`, which has no menu of its own
+    /// (`own` is around it, or none), opens the menu of content inside it,
+    /// as a list's row whose content has the row's menu: nothing between
+    /// them takes the press, as `at` found, and the menu is that content's.
+    fn opensInnerMenu(self: *const Harness, node: *const Node, own: ?u32, opened: ?u32) bool {
+        const all = self.view.nodes();
+        const index: u32 = @intCast(node - all.ptr);
+        const inner = opened orelse return false;
+        if (own != null and own.? == index) return false;
+        return inner > index and inner < node.end;
     }
     fn within(self: *const Harness, node: *const Node, layer: *const Node) bool {
         const all = self.view.nodes();
@@ -806,6 +855,7 @@ pub const Harness = struct {
             if (self.view.areaPress(.{ .x = x, .y = y }, .primary, modifiers, self.clock)) |event| return self.deliver(event);
             return self.render();
         };
+        _ = self.view.controlPressed(node.id);
         if (isRow(node.kind)) {
             try self.check(node);
             if (self.view.rowPress(.{ .x = x, .y = y }, modifiers, node.id, self.config.theme)) |event| return self.deliver(event);
@@ -837,6 +887,7 @@ pub const Harness = struct {
     /// it. Renders.
     pub fn release(self: *Harness, x: f32, y: f32) anyerror!void {
         self.view.pointer_sample.pressure = 0;
+        _ = self.view.controlPressed(null);
         try self.observe(.{ .pointer_up = .{ .position = .{ .x = x, .y = y }, .button = .primary } });
         if (self.config.options.tools()) |tools| if (tools.pointerUp(.{ .x = x, .y = y })) return self.render();
         if (self.view.areaRelease(.{ .x = x, .y = y }, .primary)) |event| {
@@ -858,6 +909,7 @@ pub const Harness = struct {
     /// Lose the press, as focus loss or a cancelled capture does. Renders.
     pub fn cancelPointer(self: *Harness) anyerror!void {
         self.pressed = null;
+        _ = self.view.controlPressed(null);
         if (self.view.areaCancel()) |event| try self.run(event);
         return self.apply(self.view.captureCancel());
     }

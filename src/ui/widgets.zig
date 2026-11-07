@@ -4,6 +4,8 @@ const access = @import("accessibility.zig");
 const input = @import("input.zig");
 const drawing = @import("ziggurat_drawing_resources");
 const commands = @import("commands.zig");
+const theme_module = @import("theme.zig");
+const Font = commands.Font;
 pub const Range = input.Range;
 pub const ValueChange = input.ValueChange;
 pub const Chord = input.Chord;
@@ -656,9 +658,49 @@ pub const MenuItemOptions = struct {
     /// Room kept between the mark and the label, as for an icon its caller
     /// draws there.
     lead: f32 = 0,
+    /// A second, smaller line under the label, in the shortcut's color;
+    /// read as the item's description.
+    subtitle: []const u8 = "",
+    /// A value shown at the end of the item before its shortcut, in the
+    /// shortcut's color, as a file's size; read in the description.
+    trailing: []const u8 = "",
+    trailing_width: f32 = 0,
+    /// An item that deletes or discards, its label and mark in the theme's
+    /// `danger` color; on the highlight in it where legible there, else in
+    /// the accent's text.
+    danger: bool = false,
+    /// Leave the label and subtitle undrawn, for content its caller lays
+    /// out in their place; the label still names the item.
+    content: bool = false,
 };
 /// Room a menu item keeps for its mark, and for its submenu arrow.
 pub const menu_mark_width: f32 = 20;
+/// The font of a menu item's subtitle line.
+pub const menu_subtitle_font: Font = .{ .size = 13 };
+
+/// The color a danger item's label takes: `danger`, or on the highlight
+/// the accent's text where `danger` is not legible on the accent (WCAG's
+/// 3:1 for large text and marks).
+pub fn menuDangerColor(colors: theme_module.Palette, lit: bool) u32 {
+    if (!lit) return colors.danger;
+    return if (contrastRatio(colors.danger, colors.accent) >= 3) colors.danger else colors.on_accent;
+}
+/// WCAG's contrast ratio of two opaque 0xRRGGBB colors, from 1 to 21.
+pub fn contrastRatio(a: u32, b: u32) f32 {
+    const la = relativeLuminance(a);
+    const lb = relativeLuminance(b);
+    return (@max(la, lb) + 0.05) / (@min(la, lb) + 0.05);
+}
+fn relativeLuminance(rgb: u32) f32 {
+    var sum: f32 = 0;
+    const weights = [_]f32{ 0.2126, 0.7152, 0.0722 };
+    inline for (0..3) |i| {
+        const channel: f32 = @as(f32, @floatFromInt((rgb >> @intCast(16 - 8 * i)) & 0xff)) / 255;
+        const linear = if (channel <= 0.04045) channel / 12.92 else std.math.pow(f32, (channel + 0.055) / 1.055, 2.4);
+        sum += weights[i] * linear;
+    }
+    return sum;
+}
 
 /// One item of a menu drawn in the window: a mark when checked, its label,
 /// the shortcut at its end and an arrow when it opens a submenu. A
@@ -674,6 +716,18 @@ pub fn emitMenuItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const
     try frame.addControl(id, bounds, .{ .enabled = control.enabled, .shortcut = control.shortcut });
     const visible = visibleBounds(frame, bounds);
     const focused = control.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id;
+    // The subtitle, the trailing value, and the tooltip or the shortcut.
+    var description_buffer: [512]u8 = undefined;
+    var description_len: usize = 0;
+    for ([_][]const u8{ options.subtitle, options.trailing, if (control.description.len > 0) control.description else options.shortcut }) |part| {
+        if (part.len == 0) continue;
+        const separator = if (description_len > 0) ", " else "";
+        if (description_len + separator.len + part.len > description_buffer.len) break;
+        @memcpy(description_buffer[description_len..][0..separator.len], separator);
+        description_len += separator.len;
+        @memcpy(description_buffer[description_len..][0..part.len], part);
+        description_len += part.len;
+    }
     try frame.semantic(.{
         .id = id,
         .parent = control.semantic_parent,
@@ -683,7 +737,7 @@ pub fn emitMenuItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const
             .radio => .menu_item_radio,
         },
         .name = label,
-        .description = if (control.description.len > 0) control.description else options.shortcut,
+        .description = description_buffer[0..description_len],
         .bounds = bounds,
         .enabled = control.enabled,
         .focused = focused,
@@ -697,7 +751,7 @@ pub fn emitMenuItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const
     const metrics = style.metrics;
     const lit = options.highlighted and control.enabled;
     if (lit) try fill(frame, bounds, colors.accent);
-    const foreground: u32 = if (!control.enabled) colors.disabled_text else if (lit) colors.on_accent else colors.text;
+    const foreground: u32 = if (!control.enabled) colors.disabled_text else if (options.danger) menuDangerColor(colors, lit) else if (lit) colors.on_accent else colors.text;
     const muted: u32 = if (lit) colors.on_accent else colors.disabled_text;
     const pad = metrics.content_inset;
     const height = bounds.height;
@@ -712,15 +766,31 @@ pub fn emitMenuItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const
         },
     };
     const arrow_room: f32 = if (options.expanded != null) menu_mark_width else 0;
-    const trailing = arrow_room + (if (options.shortcut.len > 0) options.shortcut_width + metrics.label_gap else 0);
+    const shortcut_room: f32 = if (options.shortcut.len > 0) options.shortcut_width + metrics.label_gap else 0;
+    const trailing_room: f32 = if (options.trailing.len > 0) options.trailing_width + metrics.label_gap else 0;
+    const trailing = arrow_room + shortcut_room;
     const lead = @max(0, options.lead);
-    const label_width = @max(0, bounds.width - 2 * pad - menu_mark_width - lead - metrics.label_gap / 2 - trailing);
+    // A trailing value too long for the room left gives up its room first
+    // to no one: the label and it share what remains, the label first.
+    const label_width = @max(0, bounds.width - 2 * pad - menu_mark_width - lead - metrics.label_gap / 2 - trailing - trailing_room);
     const label_x = if (options.rtl) mark.x - lead - metrics.label_gap / 2 - label_width else mark.x + menu_mark_width + lead + metrics.label_gap / 2;
-    try frame.context.command_buffer.text(absolute(frame, .{ .x = label_x, .y = bounds.y, .width = label_width, .height = height }), label, foreground);
+    if (!options.content) {
+        if (options.subtitle.len > 0) {
+            // The label over the subtitle, the two centered together.
+            const half = height / 2;
+            try frame.context.command_buffer.text(absolute(frame, .{ .x = label_x, .y = bounds.y + 2, .width = label_width, .height = half - 2 }), label, foreground);
+            try frame.context.command_buffer.textFont(absolute(frame, .{ .x = label_x, .y = bounds.y + half, .width = label_width, .height = half - 2 }), options.subtitle, muted, menu_subtitle_font);
+        } else try frame.context.command_buffer.text(absolute(frame, .{ .x = label_x, .y = bounds.y, .width = label_width, .height = height }), label, foreground);
+    }
     const end_edge = if (options.rtl) bounds.x + pad else bounds.x + bounds.width - pad;
     if (options.shortcut.len > 0) {
         const x = if (options.rtl) end_edge + arrow_room else end_edge - arrow_room - options.shortcut_width;
         try frame.context.command_buffer.text(absolute(frame, .{ .x = x, .y = bounds.y, .width = options.shortcut_width + 1, .height = height }), options.shortcut, muted);
+    }
+    if (options.trailing.len > 0) {
+        const room = @max(0, @min(options.trailing_width, bounds.width - 2 * pad - menu_mark_width - lead - trailing - metrics.label_gap));
+        const x = if (options.rtl) end_edge + trailing else end_edge - trailing - room;
+        try frame.context.command_buffer.text(absolute(frame, .{ .x = x, .y = bounds.y, .width = room + 1, .height = height }), options.trailing, muted);
     }
     if (options.expanded != null) {
         const side = @min(menu_mark_width, height) * 0.45;

@@ -319,3 +319,47 @@ test "keys the view leaves alone reach the application, and so do releases" {
 test {
     _ = @import("wrap.zig");
 }
+
+const Chats = struct {
+    chosen: usize = 0,
+    hovered: [3]bool = @splat(false),
+    pressed: [3]bool = @splat(false),
+    fn build(self: *Chats, v: *View) anyerror!void {
+        try v.listBox(.{ .name = "Chats", .width = 240 });
+        for (0..3) |i| {
+            _ = try v.listItemBase(usize, &self.chosen, i, .{ .key = i + 1 });
+            const row = try v.pointerArea(.{ .observe = true }, .{ .padding = view.Insets.all(8), .self_align = .stretch });
+            try v.textf("Chat {d}", .{i}, .{});
+            try v.end();
+            try v.end();
+            self.hovered[i] = row.hovered;
+            self.pressed[i] = row.pressed;
+        }
+        try v.end();
+    }
+};
+
+test "content of a row observing the pointer shows the row's hover and press, and the row still chooses" {
+    var storage: Storage = .{};
+    var app: Chats = .{};
+    var h = Harness.init(&app, Chats.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const second = try h.boundsOf(.{ .text = "Chat 1" });
+    const x = second.x + 2;
+    const y = second.y + second.height / 2;
+    try h.hoverAt(x, y);
+    try testing.expect(app.hovered[1] and !app.hovered[0]);
+    try testing.expect(!app.pressed[1]);
+    try h.press(x, y, .{});
+    try testing.expect(app.pressed[1]);
+    try h.release(x, y);
+    try testing.expect(!app.pressed[1]);
+    // The row took the click and chose itself.
+    try testing.expectEqual(@as(usize, 1), app.chosen);
+    // A test's click by the row's text reaches the row.
+    const third = try h.boundsOf(.{ .text = "Chat 2" });
+    try h.clickAt(third.x + 2, third.y + third.height / 2);
+    try testing.expectEqual(@as(usize, 2), app.chosen);
+}

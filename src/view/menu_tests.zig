@@ -403,3 +403,156 @@ test "a menu opens at the pointer on an anchor scrolled partly out of view" {
     try testing.expectApproxEqAbs(x, panel.x, 0.01);
     try testing.expectApproxEqAbs(y, panel.y, 0.01);
 }
+
+const Rich = struct {
+    open: bool = false,
+    preview: ?usize = null,
+    chosen: ?usize = null,
+    deleted: usize = 0,
+    narrow: bool = false,
+    fn build(self: *Rich, v: *View) anyerror!void {
+        try v.row(.{ .gap = 8, .self_align = .stretch });
+        try v.spacer(.{});
+        const options: view.MenuButtonOptions = .{ .placement = .{ .alignment = .end, .gap = 0 }, .open = &self.open, .max_width = if (self.narrow) 200 else std.math.inf(f32) };
+        if (try v.popoverMenuButtonWith("More", options, .{})) {
+            self.preview = null;
+            for ([_][]const u8{ "Light", "Dark" }, 0..) |label, i| {
+                const state = try v.menuItemState(label, .{}, .{ .key = i + 1 });
+                if (state.highlighted) self.preview = i;
+                if (state.clicked) self.chosen = i;
+            }
+            _ = try v.menuItem("Back Up Now", .{ .subtitle = "Last backup: 3 minutes ago" }, .{});
+            _ = try v.menuItem("A very long file name that goes on and on.png", .{ .trailing = "2.4 MB" }, .{});
+            try v.menuSeparator();
+            if (try v.menuItem("Delete…", .{ .danger = true }, .{})) self.deleted += 1;
+        }
+        try v.end();
+        try v.end();
+    }
+};
+
+test "a menu button tells it opens a menu; the app's own popup wins" {
+    var storage: Storage = .{};
+    var app: Toolbar = .{};
+    var h = Harness.init(&app, Toolbar.build, storage.buffers(), .{});
+    try h.render();
+    const button = try h.find(.{ .text = "More" });
+    try testing.expectEqual(ui.accessibility.Popup.menu, button.style.popup.?);
+    const Own = struct {
+        fn build(_: *Toolbar, v: *View) anyerror!void {
+            try v.menuButtonBase(.{ .name = "Account", .popup = .dialog });
+            try v.text("Me", .{});
+            try v.end();
+            if (try v.popoverMenuBase(.{})) {}
+            try v.end();
+        }
+    };
+    var other = Harness.init(&app, Own.build, storage.buffers(), .{});
+    try other.render();
+    try testing.expectEqual(ui.accessibility.Popup.dialog, (try other.find(.{ .kind = .popup_button })).style.popup.?);
+}
+
+test "a menu button's menu goes where its options say, and the app holds whether it shows" {
+    var storage: Storage = .{};
+    var app: Rich = .{};
+    var h = Harness.init(&app, Rich.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.click(.{ .text = "More" });
+    try testing.expect(app.open);
+    const button = try h.boundsOf(.{ .text = "More" });
+    const panel = try h.boundsOf(.{ .kind = .menu });
+    // Lined up with the button's end, below it.
+    try testing.expectApproxEqAbs(button.x + button.width, panel.x + panel.width, 0.01);
+    try testing.expectApproxEqAbs(button.y + button.height, panel.y, 0.01);
+    // The first item is highlighted as the button opens it: the build sees it.
+    try testing.expectEqual(@as(?usize, 0), app.preview);
+    try testing.expect(try h.key(.{ .key = .down }));
+    try h.render();
+    try testing.expectEqual(@as(?usize, 1), app.preview);
+    // Escape closes it, which the app learns.
+    try testing.expect(try h.key(.{ .key = .escape }));
+    try h.render();
+    try testing.expect(!app.open);
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Light" }));
+    // The app opens it: focus goes to the menu, and it shows.
+    app.open = true;
+    try h.render();
+    try h.render();
+    try testing.expectEqual(@as(usize, 1), h.count(.{ .text = "Light" }));
+    try testing.expectEqualStrings("Light", h.focused().?.text);
+    // And closes it, focus going back.
+    app.open = false;
+    try h.render();
+    try h.render();
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Light" }));
+    try testing.expect(!app.open);
+}
+
+test "drawn menu items show a subtitle, a trailing value and a danger look, and a menu keeps to its most width" {
+    var storage: Storage = .{};
+    var app: Rich = .{ .open = true };
+    var h = Harness.init(&app, Rich.build, storage.buffers(), .{});
+    try h.render();
+    try h.render();
+    const plain = try h.boundsOf(.{ .text = "Light" });
+    const subtitled = try h.boundsOf(.{ .text = "Back Up Now" });
+    try testing.expect(subtitled.height > plain.height);
+    const delete = try h.find(.{ .text = "Delete…" });
+    try testing.expect(delete.danger);
+    const wide = try h.boundsOf(.{ .kind = .menu });
+    try testing.expect(wide.width > 200);
+    app.narrow = true;
+    try h.render();
+    try h.render();
+    const narrow = try h.boundsOf(.{ .kind = .menu });
+    try testing.expectApproxEqAbs(@as(f32, 200), narrow.width, 0.01);
+    // The items keep to the panel; their labels end with an ellipsis.
+    const long = try h.boundsOf(.{ .text = "A very long file name that goes on and on.png" });
+    try testing.expect(long.x + long.width <= narrow.x + narrow.width + 0.01);
+}
+
+const Download = struct {
+    started: usize = 0,
+    highlighted: bool = false,
+    fn build(self: *Download, v: *View) anyerror!void {
+        try v.column(.{ .height = 200, .self_align = .stretch });
+        try v.text("Area", .{});
+        try v.end();
+        if (try v.popoverMenu(.{ .name = "Files" })) {
+            _ = try v.menuItem("Open", .{}, .{});
+            const state = try v.menuItemContent("Download", .{ .trailing = "40%" }, .{});
+            try v.text("Downloading report.pdf", .{});
+            try v.progress(0.4, .{ .self_align = .stretch });
+            try v.end();
+            self.highlighted = state.highlighted;
+            if (state.clicked) self.started += 1;
+        }
+        try v.end();
+    }
+};
+
+test "a menu item shows content of the application's own and is chosen by a press on it" {
+    var storage: Storage = .{};
+    var app: Download = .{};
+    var h = Harness.init(&app, Download.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const area = try h.boundsOf(.{ .text = "Area" });
+    try testing.expect(try h.clickButtonAt(area.x + 4, area.y + 4, .secondary, .{}));
+    const item = try h.boundsOf(.{ .text = "Download" });
+    const text = try h.boundsOf(.{ .text = "Downloading report.pdf" });
+    // The content sits inside the item, after the mark's room.
+    try testing.expect(text.x >= item.x + ui.widgets.menu_mark_width);
+    try testing.expect(text.y >= item.y and text.y + text.height <= item.y + item.height);
+    try testing.expect(try h.key(.{ .key = .down }));
+    try h.render();
+    try testing.expect(try h.key(.{ .key = .down }));
+    try h.render();
+    try testing.expect(app.highlighted);
+    try h.clickAt(text.x + 2, text.y + text.height / 2);
+    try testing.expectEqual(@as(usize, 1), app.started);
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Download" }));
+}

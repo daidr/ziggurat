@@ -232,6 +232,24 @@ pub const Cells = struct {
     cursor: usize = 0,
     all: bool = false,
 };
+/// Colors of their own for the block of cells a table chooses
+/// (`TableOptions.cell_select`) and its rows, rather than the accent, as a
+/// spreadsheet's: the chosen cells stand out over the rest of their rows,
+/// and the rows alternate. A null color paints none, leaving the table's
+/// background, except `cell`: without it the block shows in the accent,
+/// as chosen rows do.
+pub const CellsStyle = struct {
+    /// The background of the block's cells, and the cursor's border where
+    /// the cursor is out of the block.
+    cell: ?ui.Color = null,
+    /// The text of the block's cells and the cursor's border in the block,
+    /// as the accent's text is of chosen rows.
+    cell_text: ?u32 = null,
+    /// The background of the rest of the rows chosen.
+    row: ?ui.Color = null,
+    /// The background of every other row, from the second.
+    stripe: ?ui.Color = null,
+};
 /// What a table cell shows. Text is copied while the cell paints, so it may
 /// live in the scratch buffer the cell function is given.
 pub const Cell = struct {
@@ -1011,6 +1029,9 @@ pub const TableOptions = struct {
     header: bool = true,
     /// Choose blocks of cells, with `cells`; needs a multiple `Selection`.
     cell_select: bool = false,
+    /// Colors of the block `cell_select` chooses, its rows and stripes;
+    /// the default keeps the accent.
+    cells_style: CellsStyle = .{},
     /// A drag from a row chooses the rows it crosses, scrolling near the
     /// edges; needs a multiple `Selection`. Not with `reorder`.
     drag_select: bool = false,
@@ -1050,6 +1071,7 @@ pub const TableState = struct {
     sort_by: ?*SortKeys = null,
     /// The chosen block of cells, with `TableOptions.cell_select`.
     cells: ?*Cells = null,
+    cells_style: CellsStyle = .{},
     // The columns' place and width by id, in the order shown.
     ids: [max_columns]u64 = undefined,
     widths: [max_columns]f32 = undefined,
@@ -1094,6 +1116,15 @@ pub const TableState = struct {
         self.core.scroll_y = std.math.floatMax(f64);
         self.core.clampScroll();
         self.core.at_end = true;
+    }
+    /// Keep the rows where they are in the next layout rather than
+    /// following the end, as a click opening a fold in the last row of a
+    /// log does, so that the line clicked stays under the pointer.
+    /// `follow_end` stays as it is: the table follows the end again once it
+    /// shows it, as when the user scrolls back to it. Call it in the pass
+    /// that changes the rows, before building the table.
+    pub fn holdPlace(self: *TableState) void {
+        self.core.at_end = false;
     }
     /// The first and the last rows in view, as of the last paint.
     pub fn visible(self: *const TableState) struct { first: usize, last: usize } {
@@ -1597,11 +1628,19 @@ pub const TableState = struct {
         if (is_section) {
             try self.paintHeaderRow(frame, row, rect, buffer, palette);
         } else {
+            const look = self.cells_style;
             if (chosen and !block) {
                 frame.roundedRect(rect, radius, ui.Color.rgb(accent));
             } else if (core.hover != null and core.hover.? == row and core.enabled) {
                 frame.roundedRect(rect, radius, ui.Color.rgb(palette.control));
+            } else if (block and chosen and look.row != null) {
+                frame.roundedRect(rect, radius, look.row.?);
+            } else if (block and !chosen and look.stripe != null and row % 2 == 1) {
+                frame.roundedRect(rect, radius, look.stripe.?);
             }
+            // The block's own colors, the accent and its text without them.
+            const block_fill: ui.Color = if (core.enabled) (look.cell orelse ui.Color.rgb(accent)) else ui.Color.rgb(accent);
+            const block_text: u32 = if (core.enabled) (look.cell_text orelse palette.on_accent) else palette.on_accent;
             const outline_state = self.outline;
             for (0..self.column_count) |position| {
                 const column = self.order[position];
@@ -1618,11 +1657,11 @@ pub const TableState = struct {
                 if (position < g.frozen) frame.rect(cell_rect, if (spec.row_header) palette.control else palette.inset);
                 const in_block = block and chosen and self.cellSelected(row, column);
                 const whole = block and chosen and spec.row_header and self.cells.?.all;
-                if (in_block or whole) frame.rect(cell_rect, accent);
+                if (in_block or whole) frame.roundedRect(cell_rect, 0, block_fill);
                 var content = cell_rect;
                 content.x += cell_padding;
                 content.width = @max(0, content.width - 2 * cell_padding);
-                const foreground_default = if (!core.enabled) palette.disabled_text else if ((chosen and !block) or in_block or whole) palette.on_accent else palette.text;
+                const foreground_default = if (!core.enabled) palette.disabled_text else if (chosen and !block) palette.on_accent else if (in_block or whole) block_text else palette.text;
                 if (outline_state) |state| if (column == 0) {
                     const indent = state.indentOf(row);
                     const entry = state.rows_buffer[row];
@@ -1640,9 +1679,14 @@ pub const TableState = struct {
                     content.x += side + 6;
                     content.width = @max(0, content.width - side - 6);
                 }
-                const color = if ((chosen and !block) or in_block or whole) palette.on_accent else cell.color orelse foreground_default;
+                const color = if (chosen and !block) palette.on_accent else if (in_block or whole) block_text else cell.color orelse foreground_default;
                 frame.labelFont(self.aligned(content, cell.text, cell.font, spec.alignment), cell.text, color, cell.font orelse .{});
-                if (block and at_cursor and focused and core.cursorColumn() == column) ring(frame, cell_rect, theme.metrics.border, palette.focus);
+                // The cursor's border takes the text's color on the
+                // block's own, and the block's color out of it.
+                if (block and at_cursor and focused and core.cursorColumn() == column) {
+                    const border: u32 = if (in_block) block_text else if (look.cell) |value| value.hex() else accent;
+                    ring(frame, cell_rect, theme.metrics.border, border);
+                }
             }
             if (focused and at_cursor and !block) ring(frame, rect, theme.metrics.border, if (chosen) palette.on_accent else palette.focus);
         }
@@ -1965,6 +2009,7 @@ fn buildTable(v: *View, state: *TableState, rows: Rows, options: TableOptions) E
     if (!std.math.isFinite(options.row_height) or options.row_height <= 0) return error.InvalidValue;
     if (options.cell_select and state.cells == null) return error.InvalidValue;
     if (!options.cell_select) state.cells = null;
+    state.cells_style = options.cells_style;
     core.rows = rows;
     core.selection = state.selection;
     core.row_height = options.row_height;
@@ -2081,6 +2126,10 @@ pub const OutlineState = struct {
     }
     pub fn scrollTo(self: *OutlineState, row: usize, alignment: ScrollAlign) void {
         self.table.scrollTo(row, alignment);
+    }
+    /// Keep the rows in place in the next layout, as `TableState.holdPlace`.
+    pub fn holdPlace(self: *OutlineState) void {
+        self.table.holdPlace();
     }
 
     fn indentOf(self: *const OutlineState, row: usize) f32 {

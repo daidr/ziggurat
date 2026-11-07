@@ -381,6 +381,39 @@ test "a table that follows its end keeps new rows in view" {
     try testing.expect(app.state.atEnd());
 }
 
+test "a table holding its place leaves the end and follows it again once shown" {
+    var app: Files = .{};
+    app.init(.single);
+    app.count = 100;
+    app.options.follow_end = true;
+    var f: Fixture = .{};
+    try f.start(&app);
+    try f.h.render();
+    try testing.expect(app.state.atEnd());
+    const offset = app.state.scrollOffset();
+    // The last row grows as a fold opens in it: the rows stay put.
+    app.state.holdPlace();
+    app.count = 110;
+    try f.h.render();
+    try testing.expectEqual(offset, app.state.scrollOffset());
+    try testing.expect(!app.state.atEnd());
+    // follow_end read as it is at each pass: off, the table stays.
+    app.options.follow_end = false;
+    app.state.scrollToEnd();
+    try f.h.render();
+    app.count = 120;
+    try f.h.render();
+    try testing.expect(!app.state.atEnd());
+    // On again and at the end, it follows.
+    app.options.follow_end = true;
+    app.state.scrollToEnd();
+    try f.h.render();
+    app.count = 130;
+    try f.h.render();
+    try testing.expect(app.state.atEnd());
+    try testing.expectEqual(@as(usize, 129), app.state.visible().last);
+}
+
 test "scroll requests show a row at the start, center, end or nearest" {
     var app: Files = .{};
     app.init(.single);
@@ -515,6 +548,61 @@ test "a table chooses blocks of cells" {
     try testing.expectEqual(@as(f32, 26), app.state.core.scroll_x);
     try f.click(20, Fixture.rowY(0), .{});
     try testing.expect(app.cells.all);
+}
+
+/// The commands the table records painted again into the fixture's
+/// context; they stay until the next call.
+fn paintAgain(f: *Fixture) ![]const ui.commands.Command {
+    const context = &f.context;
+    context.command_buffer.reset();
+    context.input_state.beginFrame();
+    var frame: ui.Frame = .{ .context = context, .size = .{ .width = 640, .height = 480, .scale = 1 } };
+    try f.h.view.paint(&frame);
+    if (frame.failure) |err| return err;
+    context.input_state.commitFrame();
+    return context.command_buffer.commands();
+}
+fn hasShape(commands: []const ui.commands.Command, color: ui.Color) bool {
+    for (commands) |command| if (command == .shape and std.meta.eql(command.shape.color, color)) return true;
+    return false;
+}
+fn hasText(commands: []const ui.commands.Command, color: u32) bool {
+    for (commands) |command| if (command == .text and command.text.color == color) return true;
+    return false;
+}
+
+test "a cells style paints the block, its rows and stripes in colors of its own" {
+    var app: Files = .{};
+    app.init(.multiple);
+    app.use_columns = &sheet_columns;
+    app.options.cell_select = true;
+    app.count = 50;
+    var f: Fixture = .{};
+    try f.start(&app);
+    try f.click(60, Fixture.rowY(1), .{});
+    const palette = (ui.theme.Theme{}).palette;
+    // The zero style shows the block in the accent, its text on it.
+    var commands = try paintAgain(&f);
+    try testing.expect(hasShape(commands, ui.Color.rgb(palette.accent)));
+    try testing.expect(hasText(commands, palette.on_accent));
+    const cell = ui.Color.rgb(0x2255aa);
+    const row = ui.Color.rgb(0xdde6f5);
+    const stripe = ui.Color.rgb(0x101010).withAlpha(0.04);
+    app.options.cells_style = .{ .cell = cell, .cell_text = 0xfefefe, .row = row, .stripe = stripe };
+    try f.h.render();
+    commands = try paintAgain(&f);
+    try testing.expect(hasShape(commands, cell));
+    try testing.expect(hasShape(commands, row));
+    try testing.expect(hasShape(commands, stripe));
+    try testing.expect(hasText(commands, 0xfefefe));
+    try testing.expect(!hasShape(commands, ui.Color.rgb(palette.accent)));
+    // A partial style paints only what its colors name.
+    app.options.cells_style = .{ .stripe = stripe };
+    try f.h.render();
+    commands = try paintAgain(&f);
+    try testing.expect(hasShape(commands, stripe));
+    try testing.expect(!hasShape(commands, row));
+    try testing.expect(hasShape(commands, ui.Color.rgb(palette.accent)));
 }
 
 // ---------------------------------------------------------------- outline

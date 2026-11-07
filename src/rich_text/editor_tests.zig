@@ -694,3 +694,38 @@ test "body paragraphs indent their first lines and take room between them" {
     try testing.expect(boxes[3].top > boxes[2].top + boxes[2].height);
     try testing.expectEqual(e.pad_y, boxes[0].top);
 }
+
+test "an attachment's link opens from anywhere on its box, and a drag opens none" {
+    const image: rt.Attachment = .{ .width = 80, .height = 40, .name = "chart" };
+    var doc = Document.init(gpa, try Text.of(gpa, &.{
+        .{ .runs = &.{ .{ .text = rt.object_replacement_utf8, .attributes = .{ .attachment = &image, .link = "https://example.com/chart" } }, .{ .text = " after" } } },
+    }));
+    defer doc.deinit();
+    var opened: Opened = .{};
+    var e = try tester(&doc, .{ .open_url = .{ .context = &opened, .call = Opened.call } });
+    defer e.deinit();
+    // Find the box: the pointer shows over all of it.
+    var left: ?[2]f32 = null;
+    var right: ?[2]f32 = null;
+    var y: f32 = 2;
+    while (y < 80) : (y += 2) {
+        var x: f32 = 0;
+        while (x < 200) : (x += 2) if (hoverAt(&e, x, y) == .pointer) {
+            if (left == null) left = .{ x, y };
+            right = .{ x, y };
+        };
+    }
+    try testing.expect(left != null and right != null);
+    // Its right half, nearer the caret after it, opens the link too.
+    try testing.expect(right.?[0] - left.?[0] > 60);
+    click(&e, right.?[0], right.?[1]);
+    try testing.expectEqual(@as(usize, 1), opened.n);
+    try testing.expectEqualStrings("https://example.com/chart", opened.urls[0][0..opened.lens[0]]);
+    click(&e, left.?[0], left.?[1]);
+    try testing.expectEqual(@as(usize, 2), opened.n);
+    // A press that moves away before its release opens nothing.
+    _ = e.handle(.{ .pointer_down = .{ .position = .{ .x = left.?[0], .y = left.?[1] } } });
+    _ = e.handle(.{ .pointer_move = .{ .x = left.?[0] + 6, .y = left.?[1] } });
+    _ = e.handle(.{ .pointer_up = .{ .position = .{ .x = left.?[0] + 6, .y = left.?[1] } } });
+    try testing.expectEqual(@as(usize, 2), opened.n);
+}
