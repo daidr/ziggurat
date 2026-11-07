@@ -10,6 +10,7 @@ extern fn zlm_test_paint(*anyopaque) void;
 extern fn zlm_test_material(*anyopaque, *c_int, *f64) c_int;
 extern fn zlm_test_container_radius(*anyopaque) f64;
 extern fn zlm_test_window_opaque(*anyopaque) c_int;
+extern fn zlm_test_tint(*anyopaque) f64;
 extern fn zlm_test_buttons_hidden(*anyopaque) c_int;
 extern fn zlm_test_titled(*anyopaque) c_int;
 extern fn zlm_test_press(*anyopaque, f64, f64, c_int) void;
@@ -183,6 +184,31 @@ pub fn main() !void {
     framed.window = try app.createWindow(.{ .title = "framed", .width = 200, .height = 120, .corner_radius = 12 });
     try std.testing.expect(zlm_test_buttons_hidden(framed.native()) == 0);
     try std.testing.expect(zlm_test_window_opaque(framed.native()) != 0);
+    // An opaque window shows what is behind it through the glass, made
+    // clear while it shows it: the glass draws what is under it in the
+    // window. Another material, or none, gives the window back its color.
+    if (glass) {
+        try framed.window.setVibrancy(.glass);
+        try std.testing.expect(zlm_test_window_opaque(framed.native()) == 0);
+        try framed.window.setVibrancy(.sidebar);
+        try std.testing.expect(zlm_test_window_opaque(framed.native()) != 0);
+        try framed.window.setVibrancy(.glass_clear);
+        try std.testing.expect(zlm_test_window_opaque(framed.native()) == 0);
+        try framed.window.setVibrancy(.none);
+        try std.testing.expect(zlm_test_window_opaque(framed.native()) != 0);
+        // The glass takes a tint, kept while another material shows.
+        try framed.window.setVibrancyTint(.{ .r = 255, .g = 0, .b = 0, .a = 128 });
+        try std.testing.expectEqual(@as(f64, -1), zlm_test_tint(framed.native()));
+        try framed.window.setVibrancy(.glass);
+        try std.testing.expectApproxEqAbs(@as(f64, 128.0 / 255.0), zlm_test_tint(framed.native()), 0.01);
+        try framed.window.setVibrancyTint(null);
+        try std.testing.expectEqual(@as(f64, -1), zlm_test_tint(framed.native()));
+        try framed.window.setVibrancy(.none);
+        // A rounded window stays clear after the glass goes.
+        try plain.window.setVibrancy(.glass);
+        try plain.window.setVibrancy(.none);
+        try std.testing.expect(zlm_test_window_opaque(plain.native()) == 0);
+    }
     try std.testing.expectError(error.InvalidGeometry, app.createWindow(.{ .corner_radius = -1 }));
 
     _ = try probe.window.destroy();
