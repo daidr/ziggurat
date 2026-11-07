@@ -1015,6 +1015,19 @@ pub const Column = struct {
 };
 /// The column a table is sorted by.
 pub const Sort = struct { column: usize, direction: SortDirection = .ascending };
+/// Builds into a table's header cells (`TableOptions.header_cell`).
+pub const HeaderCell = struct {
+    context: ?*anyopaque = null,
+    /// Called as the table builds the header cell of the column at `column`
+    /// (an index into the columns given to the table): what it builds goes
+    /// in the cell after the title and the sort arrow, as a mark, in a row
+    /// with the title, and it may give the cell a tooltip of its own.
+    call: *const fn (?*anyopaque, *View, usize) Error!void,
+};
+/// More of a table (`View.tableWith`).
+pub const TableOptions = struct {
+    header_cell: ?HeaderCell = null,
+};
 
 /// What a text input embedded in a combo box or token field reports to the
 /// view, so keys the input needs are not taken by the list or the tokens.
@@ -1528,6 +1541,9 @@ pub const Node = struct {
     /// Laid out in its place but not drawn, nor its descendants, which
     /// take no input either: content waiting to come in.
     unseen: bool = false,
+    /// A popover leaving (`View.popoverPresent`): shown, but neither the
+    /// window's open popover nor reachable by input.
+    leaving: bool = false,
     /// Its pose turns its back to the viewer and it hides it
     /// (`Style.backface_hidden`): it draws nothing.
     turned_away: bool = false,
@@ -2915,7 +2931,7 @@ pub const View = struct {
                 self.restore = self.buffers.nodes[at].id;
             };
         };
-        if (node.kind == .popover and node.checked) {
+        if (node.kind == .popover and node.checked and !node.leaving) {
             if (self.popover_opened) |id| if (id == node.id) {
                 self.popover_opened = null;
                 // Focus moves into a popover as it opens, unless its
@@ -3428,6 +3444,11 @@ pub const View = struct {
     /// expansion. `Style.gap` is the column gap (8 DIP when 0). True when
     /// `sort` changed. Close it with `end`.
     pub fn table(self: *View, columns: []const Column, sort: *?Sort, selection: *Selection, style: Style) Error!bool {
+        return self.tableWith(columns, sort, selection, style, .{});
+    }
+    /// `table` with more: `more.header_cell` builds into each column's
+    /// header cell, after its title and sort arrow. Close it with `end`.
+    pub fn tableWith(self: *View, columns: []const Column, sort: *?Sort, selection: *Selection, style: Style, more: TableOptions) Error!bool {
         if (columns.len == 0 or columns.len > ui.grid.max_tracks) return error.InvalidValue;
         if (sort.*) |current| if (current.column >= columns.len) return error.InvalidValue;
         if (self.tracks.len - self.track_len < columns.len) return error.TooManyItems;
@@ -3449,13 +3470,20 @@ pub const View = struct {
         const header_index = self.stack[self.depth - 1];
         var changed = false;
         for (columns, 0..) |entry, index| {
-            const cell = try self.append(.column_header, .{ .key = index });
+            // With marks of the application's own, the cell is a row of the
+            // title, then what the application builds.
+            if (more.header_cell != null) _ = try self.open(.row, .{ .key = index, .gap = 4, .alignment = .center, .enabled = style.enabled });
+            const cell = try self.append(.column_header, if (more.header_cell != null) .{ .grow = 1 } else .{ .key = index });
             cell.text = try self.copy(entry.title);
             cell.checked = entry.sortable;
             if (self.take(cell.id) != null and entry.sortable) {
                 const current = sort.*;
                 sort.* = if (current != null and current.?.column == index) .{ .column = index, .direction = if (current.?.direction == .ascending) .descending else .ascending } else .{ .column = index };
                 changed = true;
+            }
+            if (more.header_cell) |hook| {
+                try hook.call(hook.context, self, index);
+                try self.end();
             }
         }
         var child = self.buffers.nodes[header_index].first_child;
@@ -3465,7 +3493,8 @@ pub const View = struct {
             index += 1;
         }) {
             const current = sort.*;
-            self.buffers.nodes[child].sort = if (current != null and current.?.column == index) current.?.direction else null;
+            const title = if (self.buffers.nodes[child].kind == .row) self.buffers.nodes[child].first_child else child;
+            self.buffers.nodes[title].sort = if (current != null and current.?.column == index) current.?.direction else null;
         }
         try self.end();
         return changed;
@@ -3854,6 +3883,41 @@ pub const View = struct {
             self.popover_within = false;
         }
         return is_open.*;
+    }
+    /// `popover` that enters as it opens and exits as it closes, moving
+    /// between `transition.hidden` and `style`, as `presentColumn` does:
+    /// after `is_open` clears, the panel stays, still built, until its exit
+    /// ends, taking neither the pointer nor the keys nor the focus, and
+    /// unseen by assistive technology. Build its content while this returns
+    /// true, and close it with `end` either way. Under reduced motion it
+    /// appears and goes at once.
+    pub fn popoverPresent(self: *View, is_open: *bool, presence: *Presence, transition: Transition, placement: Placement, style: Style) Error!bool {
+        if (!transition.away().valid()) return error.InvalidValue;
+        if (transition.exit_to) |away| if (!away.valid()) return error.InvalidValue;
+        const showing = try self.popover(is_open, placement, style);
+        const node = &self.buffers.nodes[self.stack[self.depth - 1]];
+        const amount = presence.update(self.now, showing, transition, self.preferences.reduce_motion) catch return error.InvalidValue;
+        if (!showing and !presence.moving()) {
+            presence.leaving = null;
+            return false;
+        }
+        const away = presence.leaving orelse transition.away();
+        const t: f32 = @floatCast(amount);
+        node.style.opacity = std.math.clamp(node.style.opacity * (away.opacity + (1 - away.opacity) * t), 0, 1);
+        const pose = ui.effects.Pose.mix(away.pose, node.style.pose orelse .{}, t);
+        node.style.pose = if (pose.isIdentity()) null else pose;
+        const blur = away.blur * std.math.clamp(1 - t, 0, 1);
+        if (blur > 0) node.style.blur = @sqrt(node.style.blur * node.style.blur + blur * blur);
+        if (!showing) {
+            node.checked = true;
+            node.leaving = true;
+            node.passthrough = true;
+            node.access_hidden = true;
+            node.style.ignore_input = true;
+            node.style.access_hidden = true;
+        }
+        if (presence.moving()) if (presence.channel.?.nextWake(self.now, self.frameStep()) catch null) |deadline| self.wakeAt(deadline);
+        return true;
     }
     /// The first control within the container at `index` that can take
     /// focus, in build order.
@@ -4890,7 +4954,7 @@ pub const View = struct {
             } else result.push(.{ .drag_missed = .{ .id = rows.list, .payload = rows.payload, .position = point } }),
             .leaf => |leaf| if (self.dropTargetAt(point, .{ .value = leaf.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = leaf.payload }, .position = point } });
-            },
+            } else result.push(.{ .drag_missed = .{ .id = leaf.id, .payload = leaf.payload, .position = point } }),
             .reorder => |value| {
                 const list = self.reorderList(value.list) orelse return result;
                 const to = self.reorderSlot(list, point);
@@ -5283,6 +5347,14 @@ pub const View = struct {
     pub fn embed(self: *View, content: Embed, style: Style) Error!void {
         const node = try self.append(.embed, style);
         node.embed = content;
+    }
+    /// What a drag out of the embedded leaf `id` (`Embed.drag`) carried,
+    /// let go over no target that takes it, in the pass after the release,
+    /// at a window point that may be outside the window, as to tear a row
+    /// out into a window of its own. Null in other passes.
+    pub fn embedDragMissed(self: *View, id: u64) ?DragMiss {
+        if (self.take(id)) |event| if (event == .drag_missed) return .{ .payload = event.drag_missed.payload, .position = event.drag_missed.position };
+        return null;
     }
 
     /// Starts an area the pointer drags, laid out as a column. A primary
@@ -5974,7 +6046,7 @@ pub const View = struct {
                 },
                 else => {},
             }
-            if (node.kind == .popover and node.checked) {
+            if (node.kind == .popover and node.checked and !node.leaving) {
                 const anchor = &all[node.anchor];
                 overlay.popover = .{ .id = node.id, .anchor = anchor.id, .rect = node.bounds, .anchor_rect = self.visible(anchor) orelse anchor.bounds };
             }

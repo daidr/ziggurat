@@ -37,6 +37,13 @@ pub const Options = struct {
     /// `colors.caret_style`, or the platform's one-pixel caret. Paint only:
     /// layout, input method placement and blinking are unchanged.
     caret_width: ?f32 = null,
+    /// Keep the user from making the text longer than this many UTF-16
+    /// code units, as HTML's `maxlength`: what is typed, pasted or
+    /// committed by an input method is cut to what fits at the caret, and
+    /// a keystroke that does not fit changes nothing. Text the application
+    /// sets is not cut; 0 sets no limit. Null leaves the Field's own
+    /// `max_length`.
+    max_length: ?usize = null,
 };
 
 pub const Callback = struct { context: ?*anyopaque = null, call: *const fn (?*anyopaque, *TextField) void };
@@ -63,7 +70,15 @@ pub const TextField = struct {
     annotation: view.Annotation = .{},
 
     pub fn init(field: *editing.Field, host: *view.Host, parameters: editing.Parameters, options: Options) TextField {
+        if (options.max_length) |limit| field.options.max_length = limit;
         return .{ .field = field, .host = host, .parameters = parameters, .options = options };
+    }
+
+    /// Change how many UTF-16 code units the user may make the text
+    /// (`Options.max_length`); 0 sets no limit. Text already longer stays.
+    pub fn setMaxLength(self: *TextField, limit: usize) void {
+        self.options.max_length = limit;
+        self.field.options.max_length = limit;
     }
 
     /// The leaf to emit from a build function with `View.embed`. Give it a

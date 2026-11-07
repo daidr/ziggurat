@@ -128,6 +128,18 @@ pub const Hooks = struct {
     /// `./a.go`, `src/app.go:12:3`, `main.go:250`). Hyperlinks and addresses
     /// it leaves go to `Notice.open`; paths it leaves open nothing.
     open_link: ?*const fn (?*anyopaque, []const u8, bool) bool = null,
+    /// A paste of the clipboard (the paste binding, the context menu's
+    /// Paste, a secondary click that pastes) before the program gets it,
+    /// with the clipboard's text. Taken, nothing is sent, as when an app
+    /// uploads what was copied for a program on another machine, then
+    /// pastes what stands for it there with `pasteText`.
+    paste: ?*const fn (?*anyopaque, []const u8) bool = null,
+    /// Files dropped on the terminal (`dropFiles`), before their paths are
+    /// pasted, escaped for a shell: absolute UTF-8 paths separated by a NUL
+    /// byte, as `view.Dropped.files` gives them. Taken, nothing is sent,
+    /// as when an app uploads the files for a program on another machine,
+    /// then pastes their paths there with `pasteText`.
+    drop: ?*const fn (?*anyopaque, []const u8) bool = null,
 };
 
 pub const Font = struct {
@@ -563,8 +575,39 @@ pub const TerminalView = struct {
         if (n > buffer.len) return error.PasteTooLarge;
         if (n == 0) return false;
         if (!std.unicode.utf8ValidateSlice(buffer[0..n])) return error.InvalidUtf8;
+        if (self.options.hooks.paste) |hook| if (hook(self.options.hooks.context, buffer[0..n])) return true;
         try self.pasteText(buffer[0..n]);
         return true;
+    }
+
+    /// Paste the paths of files dropped on the terminal, as `view.Dropped`
+    /// gives them (NUL separated): each escaped for a shell, spaces between
+    /// them, so that a shell takes them as arguments and a program as files
+    /// it attaches. `Hooks.drop` sees them first and may take the drop.
+    /// Emit the terminal's leaf inside a `View.dropTarget` that accepts
+    /// files and call this with what drops on it.
+    pub fn dropFiles(self: *TerminalView, files: []const u8) !void {
+        if (files.len == 0) return;
+        if (self.options.hooks.drop) |hook| if (hook(self.options.hooks.context, files)) return;
+        const quoting: Quoting = if (builtin.os.tag == .windows) .powershell else .posix;
+        var size: usize = 0;
+        var paths = std.mem.splitScalar(u8, files, 0);
+        while (paths.next()) |path| if (path.len > 0) {
+            size += @intFromBool(size > 0) + quotedSize(path, quoting);
+        };
+        if (size == 0) return;
+        const text = try self.allocator.alloc(u8, size);
+        defer self.allocator.free(text);
+        var len: usize = 0;
+        paths = std.mem.splitScalar(u8, files, 0);
+        while (paths.next()) |path| if (path.len > 0) {
+            if (len > 0) {
+                text[len] = ' ';
+                len += 1;
+            }
+            len += quote(path, quoting, text[len..]).len;
+        };
+        try self.pasteText(text[0..len]);
     }
 
     /// The selected text, allocated, or null without a selection.
@@ -2134,6 +2177,99 @@ fn keepsColor(cp: u21) bool {
 /// `fg` with at least the WCAG contrast ratio with `bg`: itself when it
 /// has it, else mixed toward black or white, whichever contrasts more
 /// with `bg`, as little as reaches it.
+/// How a shell takes a path as one argument, whatever it holds.
+pub const Quoting = enum {
+    /// A backslash before each character a POSIX shell, or fish, would
+    /// read otherwise; a path with control characters, as a newline, which
+    /// would end the command, is quoted as $'…', where they are escapes.
+    posix,
+    /// Single quotes, in which PowerShell expands nothing, each single
+    /// quote in the path doubled. A POSIX shell takes them too.
+    powershell,
+};
+
+fn posixSpecial(byte: u8) bool {
+    return switch (byte) {
+        ' ', '\\', '\'', '"', '`', '$', '!', '&', '|', ';', '<', '>', '(', ')', '[', ']', '{', '}', '*', '?', '#', '~', '=', '%', '^', ',' => true,
+        else => false,
+    };
+}
+fn hasControl(path: []const u8) bool {
+    for (path) |byte| if (byte < 0x20 or byte == 0x7f) return true;
+    return false;
+}
+
+/// The bytes `quote` writes for `path`.
+pub fn quotedSize(path: []const u8, quoting: Quoting) usize {
+    var size: usize = 0;
+    switch (quoting) {
+        .powershell => {
+            size = 2;
+            for (path) |byte| size += if (byte == '\'') 2 else 1;
+        },
+        .posix => if (hasControl(path)) {
+            size = 3;
+            for (path) |byte| size += if (byte < 0x20 or byte == 0x7f) 4 else if (byte == '\'' or byte == '\\') 2 else 1;
+        } else {
+            for (path) |byte| size += if (posixSpecial(byte)) 2 else 1;
+        },
+    }
+    return size;
+}
+
+/// Write `path` quoted for a shell into `out`, at least `quotedSize`
+/// bytes, and return what was written.
+pub fn quote(path: []const u8, quoting: Quoting, out: []u8) []const u8 {
+    var len: usize = 0;
+    const put = struct {
+        fn byte(buffer: []u8, at: *usize, value: u8) void {
+            buffer[at.*] = value;
+            at.* += 1;
+        }
+    }.byte;
+    switch (quoting) {
+        .powershell => {
+            put(out, &len, '\'');
+            for (path) |byte| {
+                if (byte == '\'') put(out, &len, '\'');
+                put(out, &len, byte);
+            }
+            put(out, &len, '\'');
+        },
+        .posix => if (hasControl(path)) {
+            put(out, &len, '$');
+            put(out, &len, '\'');
+            for (path) |byte| {
+                if (byte < 0x20 or byte == 0x7f) {
+                    const digits = "0123456789abcdef";
+                    put(out, &len, '\\');
+                    put(out, &len, 'x');
+                    put(out, &len, digits[byte >> 4]);
+                    put(out, &len, digits[byte & 15]);
+                    continue;
+                }
+                if (byte == '\'' or byte == '\\') put(out, &len, '\\');
+                put(out, &len, byte);
+            }
+            put(out, &len, '\'');
+        } else for (path) |byte| {
+            if (posixSpecial(byte)) put(out, &len, '\\');
+            put(out, &len, byte);
+        },
+    }
+    return out[0..len];
+}
+
+test "dropped paths are quoted for a shell" {
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/tmp/a\\ b\\(1\\).png", quote("/tmp/a b(1).png", .posix, &buffer));
+    try std.testing.expectEqual(quotedSize("/tmp/a b(1).png", .posix), quote("/tmp/a b(1).png", .posix, &buffer).len);
+    try std.testing.expectEqualStrings("$'/tmp/a\\x0ab\\'c'", quote("/tmp/a\nb'c", .posix, &buffer));
+    try std.testing.expectEqual(quotedSize("/tmp/a\nb'c", .posix), quote("/tmp/a\nb'c", .posix, &buffer).len);
+    try std.testing.expectEqualStrings("'C:\\it''s $x'", quote("C:\\it's $x", .powershell, &buffer));
+    try std.testing.expectEqual(quotedSize("C:\\it's $x", .powershell), quote("C:\\it's $x", .powershell, &buffer).len);
+}
+
 pub fn contrasted(fg: u24, bg: u24, ratio: f32) u24 {
     const lb = luminance(bg);
     if (contrast(luminance(fg), lb) >= ratio) return fg;
@@ -2294,6 +2430,53 @@ test "keys, text, pastes and replies reach the program" {
     try std.testing.expectEqual(@as(usize, 2), tv.preedit_len);
     try std.testing.expect(tv.handle(.text_preedit_cancel));
     try std.testing.expectEqual(@as(usize, 0), tv.preedit_len);
+}
+
+test "an app sees pastes and dropped files first and may take them" {
+    var state: u8 = 0;
+    var storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, storage.buffers(), .{});
+    var terminal = try term.Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 4 } });
+    defer terminal.deinit();
+    var sent: Sent = .{};
+    var board: Board = .{};
+    const Taker = struct {
+        take: bool = true,
+        pasted: [32]u8 = undefined,
+        pasted_len: usize = 0,
+        dropped: [32]u8 = undefined,
+        dropped_len: usize = 0,
+        fn paste(context: ?*anyopaque, text: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            @memcpy(self.pasted[0..text.len], text);
+            self.pasted_len = text.len;
+            return self.take;
+        }
+        fn drop(context: ?*anyopaque, files: []const u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            @memcpy(self.dropped[0..files.len], files);
+            self.dropped_len = files.len;
+            return self.take;
+        }
+    };
+    var seen: Taker = .{};
+    var tv = testView(&host, &terminal, &sent, &board, .{ .hooks = .{ .context = &seen, .paste = Taker.paste, .drop = Taker.drop } });
+    defer tv.deinit();
+    tv.bind();
+    board.len = 2;
+    @memcpy(board.text[0..2], "hi");
+    try std.testing.expect(try tv.paste());
+    try std.testing.expectEqualStrings("hi", seen.pasted[0..seen.pasted_len]);
+    try tv.dropFiles("/tmp/shot.png");
+    try std.testing.expectEqualStrings("/tmp/shot.png", seen.dropped[0..seen.dropped_len]);
+    // Taken, nothing reaches the program.
+    try std.testing.expectEqualStrings("", sent.text());
+    seen.take = false;
+    try tv.dropFiles("/tmp/a b.txt\x00/tmp/c");
+    try std.testing.expectEqualStrings(if (builtin.os.tag == .windows) "'/tmp/a b.txt' '/tmp/c'" else "/tmp/a\\ b.txt /tmp/c", sent.text());
+    sent.len = 0;
+    try std.testing.expect(try tv.paste());
+    try std.testing.expectEqualStrings("hi", sent.text());
 }
 
 test "Alt+click on the command at a marked prompt moves the shell's cursor there" {
