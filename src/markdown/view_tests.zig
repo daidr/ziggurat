@@ -394,3 +394,44 @@ test "alerts show their title, and resolved mentions and references are links" {
     try equalStrings("/issues/12", doc.last.?.link);
     _ = try h.find(.{ .kind = .text, .text = "@nobody" });
 }
+
+const Streamed = struct {
+    source: []const u8 = "",
+    done: bool = false,
+    state: mv.RevealState = .{},
+    revealed: bool = false,
+    fn build(self: *Streamed, v: *view.View) anyerror!void {
+        const shown = mv.show(v, &self.state, self.source, !self.done, .{});
+        const tree = try md.parse(shown, parsed.buffers());
+        _ = try mv.build(v, tree, .{ .reveal = &self.state }, .{});
+        self.revealed = self.done and self.state.revealed();
+    }
+};
+
+test "a stream reveals its words, fading in, and tells when all shows" {
+    var doc: Streamed = .{};
+    var h = view.Harness.init(&doc, Streamed.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 800, .height = 2000 } });
+    try h.render();
+    doc.source = "Hello brave new world of streamed replies.\n\n```\ncode\n```";
+    try h.advance(16 * std.time.ns_per_ms);
+    // Only some words show at first, and they fade in.
+    try expect(h.count(.{ .kind = .text, .text = "code" }) == 0);
+    var faint = false;
+    for (h.nodes()) |node| if (node.kind == .text and node.style.opacity < 1) {
+        faint = true;
+    };
+    try expect(faint);
+    // Pass after pass it asks for frames until everything shows.
+    try expect(h.deadline() != null);
+    doc.done = true;
+    var passes: usize = 0;
+    while (!doc.revealed and passes < 200) : (passes += 1) try h.advance(16 * std.time.ns_per_ms);
+    try expect(doc.revealed);
+    _ = try h.find(.{ .kind = .text, .text = "code" });
+    for (h.nodes()) |node| try expect(node.style.opacity == 1);
+    // More text makes it unrevealed again.
+    doc.done = false;
+    doc.source = "Hello brave new world of streamed replies.\n\n```\ncode\n```\n\nAnd then some more words arrive here.";
+    try h.advance(16 * std.time.ns_per_ms);
+    try expect(!doc.state.revealed());
+}
