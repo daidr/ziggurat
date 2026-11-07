@@ -114,6 +114,11 @@ pub const Harness = struct {
     /// What presses, set with `usePointer`.
     pointer_device: z.PointerDevice = .mouse,
     pointer_pressure: ?f32 = null,
+    /// The clipboard `clipboard` gives: the text last written, and the
+    /// error `failClipboard` set.
+    board: [4096]u8 = undefined,
+    board_len: usize = 0,
+    board_error: ?anyerror = null,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: view.Buffers, config: Config) Harness {
         var built = View.init(buffers);
@@ -122,6 +127,43 @@ pub const Harness = struct {
         built.icons = config.options.icons;
         built.preferences = config.preferences;
         return .{ .view = built, .build = view.Build.bind(state, build), .config = config };
+    }
+
+    /// A clipboard of the harness's own, for the controls a test builds to
+    /// copy to and paste from in place of the system's (a text field's
+    /// `clipboard`, an inspector's, a terminal's): what they write stays
+    /// in the harness, `clipboardText` reads it and `setClipboardText`
+    /// gives what they paste. The harness must stay at its address while
+    /// they hold it.
+    pub fn clipboard(self: *Harness) ui.editor.Clipboard {
+        return .{ .context = self, .write = boardWrite, .read = boardRead };
+    }
+    /// Make writes to `clipboard` from now on fail with `err`, copying
+    /// nothing, as a system refuses them; null lets them through again.
+    /// Reads keep giving what the clipboard holds.
+    pub fn failClipboard(self: *Harness, err: ?anyerror) void {
+        self.board_error = err;
+    }
+    /// The text last written to `clipboard`.
+    pub fn clipboardText(self: *const Harness) []const u8 {
+        return self.board[0..self.board_len];
+    }
+    /// Put `text` on `clipboard`, as another application copying it.
+    pub fn setClipboardText(self: *Harness, text: []const u8) error{ClipboardTooLarge}!void {
+        if (text.len > self.board.len) return error.ClipboardTooLarge;
+        @memcpy(self.board[0..text.len], text);
+        self.board_len = text.len;
+    }
+    fn boardWrite(ptr: *anyopaque, text: []const u8) anyerror!void {
+        const self: *Harness = @ptrCast(@alignCast(ptr));
+        if (self.board_error) |err| return err;
+        try self.setClipboardText(text);
+    }
+    fn boardRead(ptr: *anyopaque, out: []u8) anyerror!usize {
+        const self: *Harness = @ptrCast(@alignCast(ptr));
+        if (self.board_len > out.len) return error.NoSpaceLeft;
+        @memcpy(out[0..self.board_len], self.board[0..self.board_len]);
+        return self.board_len;
     }
 
     fn run(self: *Harness, event: ?Event) anyerror!void {
@@ -693,6 +735,8 @@ pub const Harness = struct {
         // takes the press on its panel, where a control is or not.
         for (self.view.nodes()) |*layer| {
             if (layer.kind != .popup and layer.kind != .popover and layer.kind != .dialog and layer.kind != .menu) continue;
+            // One leaving, as a popover's exit, lets presses through.
+            if (layer.passthrough) continue;
             const rect = self.visible(layer) orelse continue;
             if (contains(rect, point.x, point.y) and !self.within(node, layer)) return error.Covered;
         }
@@ -2356,6 +2400,10 @@ const Inventory = struct {
     selection: view.Selection = undefined,
     scroll: view.ScrollModel = .{},
     sorts: usize = 0,
+    marks: bool = false,
+    fn mark(_: ?*anyopaque, v: *View, column: usize) view.Error!void {
+        try v.textf("mark {d}", .{column}, .{});
+    }
     fn lessName(_: void, a: Item, b: Item) bool {
         return std.mem.lessThan(u8, a.name, b.name);
     }
@@ -2364,7 +2412,7 @@ const Inventory = struct {
     }
     fn build(self: *Inventory, v: *View) anyerror!void {
         const columns = [_]view.Column{ .{ .title = "Name", .track = view.Track.fraction(2) }, .{ .title = "Count" }, .{ .title = "Note", .sortable = false } };
-        if (try v.table(&columns, &self.sort, &self.selection, .{ .name = "Parts", .self_align = .stretch })) {
+        if (try v.tableWith(&columns, &self.sort, &self.selection, .{ .name = "Parts", .self_align = .stretch }, .{ .header_cell = if (self.marks) .{ .call = mark } else null })) {
             self.sorts += 1;
             const current = self.sort.?;
             if (current.column == 0) std.mem.sort(Item, &self.items, {}, lessName) else std.mem.sort(Item, &self.items, {}, lessCount);
@@ -2382,6 +2430,46 @@ const Inventory = struct {
         try v.end();
     }
 };
+
+test "the harness's clipboard takes writes, gives reads and fails on demand" {
+    var storage: view.Storage(8, 64) = .{};
+    var state: u8 = 0;
+    const Empty = struct {
+        fn build(_: *u8, _: *View) anyerror!void {}
+    };
+    var h = Harness.init(&state, Empty.build, storage.buffers(), .{});
+    const board = h.clipboard();
+    try board.write(board.context, "copied");
+    try std.testing.expectEqualStrings("copied", h.clipboardText());
+    var out: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), try board.read(board.context, &out));
+    h.failClipboard(error.AccessDenied);
+    try std.testing.expectError(error.AccessDenied, board.write(board.context, "other"));
+    try std.testing.expectEqualStrings("copied", h.clipboardText());
+    h.failClipboard(null);
+    try board.write(board.context, "again");
+    try std.testing.expectEqualStrings("again", h.clipboardText());
+}
+
+test "an application builds into a table's header cells after their titles" {
+    var storage: view.Storage(64, 1024) = .{};
+    var state: Inventory = .{ .marks = true };
+    state.selection = .init(.multiple, &state.storage);
+    var h = Harness.init(&state, Inventory.build, storage.buffers(), .{});
+    try h.render();
+    const name = try h.find(.{ .text = "Name", .kind = .column_header });
+    const mark = try h.find(.{ .text = "mark 0" });
+    try std.testing.expect(mark.bounds.x >= name.bounds.x + name.bounds.width);
+    try std.testing.expect(mark.bounds.y < name.bounds.y + name.bounds.height);
+    _ = try h.find(.{ .text = "mark 2" });
+    // The header cells still line up with the row cells and sort.
+    const header = try h.find(.{ .text = "Count", .kind = .column_header });
+    const cell = try h.find(.{ .text = "40" });
+    try std.testing.expectApproxEqAbs(header.bounds.x, cell.bounds.x, 0.01);
+    try h.click(.{ .text = "Count", .kind = .column_header });
+    try std.testing.expectEqual(@as(?view.Sort, .{ .column = 1 }), state.sort);
+    try std.testing.expectEqual(SortDirection.ascending, (try h.find(.{ .text = "Count", .kind = .column_header })).sort.?);
+}
 
 test "tables sort from headers and select several rows by stable id" {
     var storage: view.Storage(64, 1024) = .{};

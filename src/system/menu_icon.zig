@@ -16,6 +16,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const icon = @import("png_header.zig");
+const png_encode = @import("png_encode.zig");
 
 const os = builtin.os.tag;
 const native_supported = !builtin.is_test and (os == .windows or os == .linux or os == .macos);
@@ -78,6 +79,17 @@ pub const MenuIcon = struct {
         errdefer app.allocator.free(result.pixels);
         try decodeWindows(png, result.width, result.height, result.pixels);
         return result;
+    }
+    /// Makes an icon of top-down premultiplied BGRA8 pixels, as drawing
+    /// images and prepared SVG images hold them (`stride` bytes a row),
+    /// encoding them as a PNG for `fromPng`. An SVG icon comes through it:
+    /// prepare the SVG at 64 pixels on its longer side (as
+    /// `SvgImage.raster` does), make the icon, then release the pixels.
+    pub fn fromPixels(app: anytype, bgra: []const u8, width: u32, height: u32, stride: usize, options: Options) !MenuIcon {
+        app.assertOwner();
+        const png = try png_encode.encodePremultipliedBgra(app.allocator, bgra, width, height, stride);
+        defer app.allocator.free(png);
+        return fromPng(app, png, options);
     }
     /// Release only once no menu shows the icon.
     pub fn deinit(self: *MenuIcon) void {

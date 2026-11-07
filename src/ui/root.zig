@@ -4390,6 +4390,15 @@ pub const Frame = struct {
         }
     }
 
+    /// How many more semantic nodes the window's tree takes in this frame,
+    /// 0 while assistive technology is not attached: content that would
+    /// expose many parts, as a table's cells, exposes them only while
+    /// there is room, leaving some for what follows.
+    pub fn semanticRoom(self: *const Frame) usize {
+        if (!build_options.accessibility or !self.context.attached_semantics_enabled or self.access_hidden != 0) return 0;
+        return accessibility.max_nodes -| self.context.semantic_tree.len;
+    }
+
     /// Tells the window the opaque color this content fills it with, or
     /// null when it is not opaque, so the window shows that color where it
     /// grows before the frame of its new size presents.

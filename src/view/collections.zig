@@ -66,7 +66,13 @@ const column_part: u64 = 0x636f_6c75_6d6e_0000;
 /// The keys of the chosen items of a collection, kept sorted in storage the
 /// application provides; its length is the most that can be chosen at once.
 /// Keys of items gone from the collection stay until the application takes
-/// them out.
+/// them out, except a single choice in a table or a grid whose rows have
+/// keys (`Rows.key`): when its item is no longer among the rows it is
+/// dropped as the collection builds, in the same pass, so what the
+/// application builds after the collection (a panel showing the chosen
+/// row) must take an empty selection as none. To show another set of rows
+/// in the same collection, clear the selection and start its state afresh
+/// so that it forgets the item chosen before and the place it scrolled to.
 pub const Selection = struct {
     pub const Mode = enum { single, multiple };
     mode: Mode = .single,
@@ -310,6 +316,9 @@ pub const Result = struct {
     toggled: bool = false,
     /// A drag is choosing rows while the pointer holds it.
     drag_selecting: bool = false,
+    /// Rows dragged out (`drag_rows`) were let go over no target that
+    /// takes them, at this window point, which may be outside the window.
+    drag_missed: ?view.DragMiss = null,
 
     fn merge(self: *Result, other: Result) void {
         self.changed = self.changed or other.changed;
@@ -442,6 +451,19 @@ const Core = struct {
     fn selected(self: *const Core, index: usize) bool {
         const selection = self.selection orelse return false;
         return selection.contains(self.keyAt(index));
+    }
+    /// A single choice whose item, known by the application's key, is no
+    /// longer among the rows is dropped as the collection builds, so what
+    /// the application builds after it in the same pass reads none.
+    /// Without keys, a choice stays at its index.
+    fn dropGoneChoice(self: *Core) void {
+        if (self.rows.key == null) return;
+        const selection = self.selection orelse return;
+        if (selection.mode != .single or selection.len != 1) return;
+        if (self.indexOf(selection.storage[0], self.cursor_hint) != null) return;
+        selection.clear();
+        selection.anchor = null;
+        selection.cursor = null;
     }
     fn multiple(self: *const Core) bool {
         return if (self.selection) |selection| selection.mode == .multiple else false;
@@ -1712,7 +1734,55 @@ pub const TableState = struct {
             });
             core.exposed[core.exposed_len] = key;
             core.exposed_len += 1;
+            if (!tree_look and !is_section) try self.cellSemantics(frame, part, row, rect, g, block, buffer);
         }
+    }
+
+    /// Room in the window's semantic tree kept for what follows a table's
+    /// cells.
+    const cell_room_reserve = 32;
+    /// The cells of a row in view, as assistive technology reads a grid's:
+    /// each with its text and its place, while the window's semantic tree
+    /// has room for every cell of the row and more after it.
+    fn cellSemantics(self: *TableState, frame: *ui.Frame, part: u64, row: usize, rect: Rect, g: *const Geometry, block: bool, buffer: []u8) !void {
+        const core = &self.core;
+        var shown: usize = 0;
+        for (0..self.column_count) |position| {
+            if (self.visibleCell(rect, g, position) != null) shown += 1;
+        }
+        if (shown == 0 or frame.semanticRoom() < shown + cell_room_reserve) return;
+        const chosen = core.selected(row);
+        for (0..self.column_count) |position| {
+            const cell_rect = self.visibleCell(rect, g, position) orelse continue;
+            const column = self.order[position];
+            const cell = self.cellText(row, column, buffer);
+            try frame.semantic(.{
+                .id = partId(part, column_part ^ self.ids[column]),
+                .parent = part,
+                .role = if (self.columns[column].row_header) .row_header else .cell,
+                .name = cell.text,
+                .bounds = cell_rect,
+                .enabled = core.enabled,
+                .read_only = true,
+                .selected = if (block) chosen and self.cellSelected(row, column) else null,
+                .row_index = semanticCount(row + 1 + @intFromBool(core.header_height > 0)),
+                .column_index = semanticCount(position + 1),
+            });
+        }
+    }
+    /// Where the cell at `position` of a row at `rect` shows, past the
+    /// frozen columns over it, or null when none of it does.
+    fn visibleCell(self: *const TableState, rect: Rect, g: *const Geometry, position: usize) ?Rect {
+        const left = self.screenX(g, position);
+        if (position >= g.frozen and left + g.width[position] <= g.frozen_width) return null;
+        var cell_rect: Rect = .{ .x = rect.x + left, .y = rect.y, .width = g.width[position], .height = rect.height };
+        if (position >= g.frozen and left < g.frozen_width) {
+            const cut = g.frozen_width - left;
+            cell_rect.x += cut;
+            cell_rect.width -= cut;
+        }
+        if (cell_rect.x > rect.x + rect.width or cell_rect.x + cell_rect.width < rect.x or cell_rect.width <= 0) return null;
+        return cell_rect;
     }
 
     fn input(ptr: *anyopaque, _: u64, event: view.EmbedInput) bool {
@@ -2012,6 +2082,7 @@ fn buildTable(v: *View, state: *TableState, rows: Rows, options: TableOptions) E
     state.cells_style = options.cells_style;
     core.rows = rows;
     core.selection = state.selection;
+    if (state.outline == null) core.dropGoneChoice();
     core.row_height = options.row_height;
     core.header_height = if (options.header and state.column_count > 0) options.row_height else 0;
     core.measurer = options.measurer;
@@ -2030,6 +2101,7 @@ fn buildTable(v: *View, state: *TableState, rows: Rows, options: TableOptions) E
     try v.embed(state.embed(), options.style);
     const leaf = lastNode(v);
     core.id = leaf.id;
+    result.drag_missed = v.embedDragMissed(leaf.id);
     core.enabled = leaf.style.enabled;
     core.buildSemantics(v);
     // Assistive technology sorts by invoking a column header.
@@ -2585,6 +2657,7 @@ pub fn gridView(v: *View, state: *GridState, items: Rows, item: ItemSource, opti
     if (!std.math.isFinite(options.min_item_width) or options.min_item_width <= 0 or !std.math.isFinite(options.item_height) or options.item_height <= 0 or !std.math.isFinite(options.gap) or options.gap < 0) return error.InvalidValue;
     core.rows = items;
     core.selection = state.selection;
+    core.dropGoneChoice();
     state.item_source = item;
     core.item_width = options.min_item_width;
     core.item_height = options.item_height;
@@ -2602,6 +2675,7 @@ pub fn gridView(v: *View, state: *GridState, items: Rows, item: ItemSource, opti
     try v.embed(state.embed(), options.style);
     const leaf = lastNode(v);
     core.id = leaf.id;
+    result.drag_missed = v.embedDragMissed(leaf.id);
     core.enabled = leaf.style.enabled;
     core.buildSemantics(v);
     result.merge(core.pending);
