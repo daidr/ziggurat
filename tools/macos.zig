@@ -498,10 +498,13 @@ pub fn universalArchs(allocator: std.mem.Allocator, bytes: []const u8) ![]Arch {
 
 /// The arguments of codesign that sign `path`. Real identities get the
 /// hardened runtime and a secure timestamp, which notarization requires.
-pub fn codesignArgs(allocator: std.mem.Allocator, path: []const u8, identity: []const u8, entitlements: ?[]const u8) ![]const []const u8 {
+/// The codesign arguments that sign `path`. A `production` build, unless
+/// signed ad hoc, takes the hardened runtime and a secure timestamp, which
+/// notarization asks for; a development one signs without them, offline.
+pub fn codesignArgs(allocator: std.mem.Allocator, path: []const u8, identity: []const u8, entitlements: ?[]const u8, production: bool) ![]const []const u8 {
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(allocator, &.{ "codesign", "--force", "--deep", "--sign", identity });
-    if (!std.mem.eql(u8, identity, "-")) try args.appendSlice(allocator, &.{ "--options", "runtime", "--timestamp" });
+    if (production and !std.mem.eql(u8, identity, "-")) try args.appendSlice(allocator, &.{ "--options", "runtime", "--timestamp" });
     if (entitlements) |file| try args.appendSlice(allocator, &.{ "--entitlements", file });
     try args.append(allocator, path);
     return args.toOwnedSlice(allocator);
@@ -533,13 +536,103 @@ pub fn command(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 /// Signs a bundle (or another file). Signing needs macOS: elsewhere a
 /// warning says a real identity was not used, and arm64 executables keep the
 /// ad-hoc signature of the Zig linker.
-pub fn codesign(allocator: std.mem.Allocator, path: []const u8, identity: []const u8, entitlements: ?[]const u8, provisioning_profile: bool) !void {
+pub fn codesign(allocator: std.mem.Allocator, path: []const u8, identity: []const u8, entitlements: ?[]const u8, provisioning_profile: bool, production: bool) !void {
     if (provisioning_profile and std.mem.eql(u8, identity, "-")) return error.ProvisioningProfileNeedsIdentity;
     if (builtin.os.tag != .macos) {
         if (!std.mem.eql(u8, identity, "-")) std.debug.print("ziggurat: not signing {s}: code signing needs macOS\n", .{std.fs.path.basename(path)});
         return;
     }
-    try command(allocator, try codesignArgs(allocator, path, identity, entitlements));
+    try command(allocator, try codesignArgs(allocator, path, identity, entitlements, production));
+}
+
+/// An identity of `security find-identity -v -p codesigning`: the hash
+/// codesign takes and its name.
+pub const Identity = struct { hash: []const u8, name: []const u8 };
+
+/// The identity that signs the development app when `dev` has no
+/// `--sign`, from the output of `security find-identity -v -p
+/// codesigning`: an Apple Development identity, as Xcode signs Debug
+/// builds, or one of its old name, Mac Developer. When there are several,
+/// as for several teams, the one of `team` (that of
+/// macos.signingIdentity), else the first. Null without one.
+///
+/// Its signature, unlike an ad hoc one, is the same from build to build:
+/// the designated requirement names the identifier and the certificate,
+/// not a hash of the code. macOS keeps what the user allowed the app, such
+/// as Accessibility or Screen Recording, and "Always Allow" for its
+/// Keychain items, by that requirement, so with ad hoc signing it takes
+/// every build for another app and asks again.
+pub fn developmentIdentity(out: []const u8, team: []const u8) ?Identity {
+    var first: ?Identity = null;
+    for ([_][]const u8{ "Apple Development: ", "Mac Developer: " }) |prefix| {
+        var lines = std.mem.splitScalar(u8, out, '\n');
+        while (lines.next()) |line| {
+            const identity = identityLine(line) orelse continue;
+            if (!std.mem.startsWith(u8, identity.name, prefix)) continue;
+            if (team.len > 0 and std.mem.endsWith(u8, identity.name, ")") and identity.name.len > team.len + 1 and identity.name[identity.name.len - team.len - 2] == '(' and std.mem.eql(u8, identity.name[identity.name.len - team.len - 1 .. identity.name.len - 1], team)) return identity;
+            if (first == null) first = identity;
+        }
+    }
+    return first;
+}
+
+/// The hash and name of a line as `  1) <40 hex digits> "Name"`.
+fn identityLine(line: []const u8) ?Identity {
+    var rest = std.mem.trimStart(u8, line, " \t");
+    const paren = std.mem.indexOfScalar(u8, rest, ')') orelse return null;
+    if (paren == 0) return null;
+    for (rest[0..paren]) |c| if (!std.ascii.isDigit(c)) return null;
+    rest = rest[paren + 1 ..];
+    if (rest.len == 0 or !std.ascii.isWhitespace(rest[0])) return null;
+    rest = std.mem.trimStart(u8, rest, " \t");
+    if (rest.len < 40) return null;
+    const hash = rest[0..40];
+    for (hash) |c| if (!std.ascii.isHex(c)) return null;
+    rest = rest[40..];
+    if (rest.len == 0 or !std.ascii.isWhitespace(rest[0])) return null;
+    rest = std.mem.trimStart(u8, rest, " \t");
+    if (rest.len < 2 or rest[0] != '"') return null;
+    const close = std.mem.lastIndexOfScalar(u8, rest, '"') orelse return null;
+    if (close == 0) return null;
+    return .{ .hash = hash, .name = rest[1..close] };
+}
+
+/// The team identifier at the end of an identity's name, as TEAMID of
+/// "Developer ID Application: Jane Doe (TEAMID)", or empty.
+pub fn signingTeam(identity: []const u8) []const u8 {
+    if (!std.mem.endsWith(u8, identity, ")")) return "";
+    const open = std.mem.lastIndexOfScalar(u8, identity, '(') orelse return "";
+    return identity[open + 1 .. identity.len - 1];
+}
+
+test "the development identity of a keychain" {
+    const out =
+        \\  1) 0000000000000000000000000000000000000001 "Developer ID Application: Jane Doe (AAAA)"
+        \\  2) 0000000000000000000000000000000000000002 "Mac Developer: Jane Doe (OLD)"
+        \\  3) 0000000000000000000000000000000000000003 "Apple Development: jane@example.com (BBBB)"
+        \\  4) 0000000000000000000000000000000000000004 "Apple Development: Jane Doe (AAAA)"
+        \\     4 valid identities found
+        \\
+    ;
+    const cases = [_]struct { out: []const u8, team: []const u8, hash: []const u8, name: []const u8 }{
+        .{ .out = out, .team = "", .hash = "0000000000000000000000000000000000000003", .name = "Apple Development: jane@example.com (BBBB)" },
+        .{ .out = out, .team = "AAAA", .hash = "0000000000000000000000000000000000000004", .name = "Apple Development: Jane Doe (AAAA)" },
+        .{ .out = out, .team = "OLD", .hash = "0000000000000000000000000000000000000002", .name = "Mac Developer: Jane Doe (OLD)" },
+        .{ .out = out, .team = "CCCC", .hash = "0000000000000000000000000000000000000003", .name = "Apple Development: jane@example.com (BBBB)" },
+        .{ .out = "  1) 0000000000000000000000000000000000000002 \"Mac Developer: Jane Doe (OLD)\"", .team = "", .hash = "0000000000000000000000000000000000000002", .name = "Mac Developer: Jane Doe (OLD)" },
+        .{ .out = "  1) 0000000000000000000000000000000000000001 \"Developer ID Application: Jane Doe (AAAA)\"", .team = "AAAA", .hash = "", .name = "" },
+        .{ .out = "     0 valid identities found\n", .team = "", .hash = "", .name = "" },
+    };
+    for (cases) |case| {
+        const found = developmentIdentity(case.out, case.team);
+        try testing.expectEqualStrings(case.hash, if (found) |f| f.hash else "");
+        try testing.expectEqualStrings(case.name, if (found) |f| f.name else "");
+    }
+    try testing.expectEqualStrings("AAAA", signingTeam("Developer ID Application: Jane Doe (AAAA)"));
+    try testing.expectEqualStrings("BBBB", signingTeam("Apple Development: Jane (Work) (BBBB)"));
+    try testing.expectEqualStrings("", signingTeam("-"));
+    try testing.expectEqualStrings("", signingTeam(""));
+    try testing.expectEqualStrings("", signingTeam("0000000000000000000000000000000000000001"));
 }
 
 // ---------------------------------------------------------------- icon
@@ -951,9 +1044,10 @@ test "signing, disk image and notarization arguments" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    try testing.expectEqualDeep(@as([]const []const u8, &.{ "codesign", "--force", "--deep", "--sign", "-", "A.app" }), try codesignArgs(allocator, "A.app", "-", null));
-    try testing.expectEqualDeep(@as([]const []const u8, &.{ "codesign", "--force", "--deep", "--sign", "Developer ID Application: X (T)", "--options", "runtime", "--timestamp", "--entitlements", "e.plist", "A.app" }), try codesignArgs(allocator, "A.app", "Developer ID Application: X (T)", "e.plist"));
-    try testing.expectError(error.ProvisioningProfileNeedsIdentity, codesign(allocator, "A.app", "-", null, true));
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "codesign", "--force", "--deep", "--sign", "-", "A.app" }), try codesignArgs(allocator, "A.app", "-", null, true));
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "codesign", "--force", "--deep", "--sign", "Developer ID Application: X (T)", "--options", "runtime", "--timestamp", "--entitlements", "e.plist", "A.app" }), try codesignArgs(allocator, "A.app", "Developer ID Application: X (T)", "e.plist", true));
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "codesign", "--force", "--deep", "--sign", "Apple Development: X (T)", "A.app" }), try codesignArgs(allocator, "A.app", "Apple Development: X (T)", null, false));
+    try testing.expectError(error.ProvisioningProfileNeedsIdentity, codesign(allocator, "A.app", "-", null, true, true));
     try testing.expectEqualStrings("hello-1.2.0.0-aarch64.dmg", try dmgFileName(allocator, "hello", "1.2.0.0", .aarch64));
     try testing.expectEqualStrings("hello-1.2.0.0.dmg", try dmgFileName(allocator, "hello", "1.2.0.0", null));
     try testing.expectEqualStrings("/dev/disk4", attachedDisk("/dev/disk4          \tGUID_partition_scheme\n/dev/disk4s1\tApple_HFS\t/tmp/mnt\n").?);

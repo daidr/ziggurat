@@ -47,22 +47,26 @@ pub fn alerts(b: *Builder) void {
 }
 
 /// Splits the mentions and references out of the text below `block`, a
-/// paragraph, heading or table cell, into nodes of their own.
+/// paragraph, heading or table cell, into nodes of their own, but in raw
+/// HTML's a, code, pre, style and script elements, as GitHub does: the
+/// text of `<code>@octocat</code>` stays text.
 pub fn references(b: *Builder, block: u32) Error!void {
-    try scan(b, block);
+    var open: usize = 0;
+    try scan(b, block, &open);
 }
 
-fn scan(b: *Builder, parent: u32) Error!void {
+/// `open` counts the raw HTML elements without mentions open so far.
+fn scan(b: *Builder, parent: u32, open: *usize) Error!void {
     var at = b.nodes[parent].first_child;
     while (at != none) {
         switch (b.nodes[at].kind) {
             .link, .image => at = b.nodes[at].next,
             .text => {
                 const last = try merge(b, parent, at);
-                at = b.nodes[try split(b, parent, last, false)].next;
+                at = b.nodes[try split(b, parent, last, false, open)].next;
             },
             .emphasis, .strong, .strikethrough => {
-                try scan(b, at);
+                try scan(b, at, open);
                 at = b.nodes[at].next;
             },
             else => at = b.nodes[at].next,
@@ -76,10 +80,12 @@ fn scan(b: *Builder, parent: u32) Error!void {
 /// text node the run is now.
 fn merge(b: *Builder, parent: u32, first: u32) Error!u32 {
     var last = first;
-    var interesting = triggers(b.nodes[first].text, b.options);
+    // Raw HTML, which the parse splits at its `<`, is joined too, for the
+    // elements it opens and closes.
+    var interesting = triggers(b.nodes[first].text, b.options) or std.mem.indexOfScalar(u8, b.nodes[first].text, '<') != null;
     while (b.nodes[last].next != none and b.nodes[b.nodes[last].next].kind == .text) {
         last = b.nodes[last].next;
-        interesting = interesting or triggers(b.nodes[last].text, b.options);
+        interesting = interesting or triggers(b.nodes[last].text, b.options) or std.mem.indexOfScalar(u8, b.nodes[last].text, '<') != null;
     }
     if (last == first or !interesting) return if (last == first) first else last;
     const start = b.mark();
@@ -109,12 +115,12 @@ fn triggers(text: []const u8, options: md.ParseOptions) bool {
 
 /// Splits text node `index` at its mentions and references, which a word
 /// precedes when `word_before`, and returns the last node of the text.
-fn split(b: *Builder, parent: u32, index: u32, word_before: bool) Error!u32 {
+fn split(b: *Builder, parent: u32, index: u32, word_before: bool, open: *usize) Error!u32 {
     var at = index;
     var before = word_before;
     while (true) {
         const data = b.nodes[at].text;
-        const found = find(data, before, b.options) orelse return at;
+        const found = find(data, before, b.options, open) orelse return at;
         var mark = at;
         if (found.start == 0) {
             b.nodes[at].kind = found.kind;
@@ -141,10 +147,18 @@ fn insertAfter(b: *Builder, parent: u32, after: u32, node: md.Node) Error!u32 {
 const Found = struct { start: usize, end: usize, kind: md.Kind };
 
 /// The first mention or reference in `data`, which a word precedes when
-/// `word_before`.
-fn find(data: []const u8, word_before: bool, options: md.ParseOptions) ?Found {
+/// `word_before`, outside the raw HTML elements that hold none: `open`
+/// counts those open before `data` and is left counting those open where
+/// the scan stopped.
+fn find(data: []const u8, word_before: bool, options: md.ParseOptions, open: *usize) ?Found {
     var i: usize = 0;
     while (i < data.len) : (i += 1) {
+        if (data[i] == '<') if (htmlTag(data[i..])) |tag| {
+            if (tag.delta > 0) open.* += 1 else if (tag.delta < 0) open.* -|= 1;
+            i += tag.len - 1;
+            continue;
+        };
+        if (open.* > 0) continue;
         switch (data[i]) {
             '@' => if (options.mentions and !wordAt(data, i, word_before)) {
                 if (scanMention(data, i + 1)) |end| return .{ .start = i, .end = end, .kind = .mention };
@@ -162,6 +176,42 @@ fn find(data: []const u8, word_before: bool, options: md.ParseOptions) ?Found {
         }
     }
     return null;
+}
+
+const Tag = struct { len: usize, delta: i2 };
+
+/// The raw HTML tag at the start of `data`, as the Markdown shows it: 1
+/// for one opening an a, code, pre, style or script element, whose text
+/// GitHub finds no mentions or references in, -1 for one closing such an
+/// element, else 0; null when `data` starts no tag.
+fn htmlTag(data: []const u8) ?Tag {
+    var i: usize = 1;
+    const closing = i < data.len and data[i] == '/';
+    if (closing) i += 1;
+    const name_start = i;
+    if (i >= data.len or !std.ascii.isAlphabetic(data[i])) return null;
+    while (i < data.len and (std.ascii.isAlphanumeric(data[i]) or data[i] == '-')) i += 1;
+    const name = data[name_start..i];
+    if (i < data.len and !std.ascii.isWhitespace(data[i]) and data[i] != '>' and data[i] != '/') return null;
+    // The tag ends at its `>`, outside quoted attribute values.
+    var quote: u8 = 0;
+    while (i < data.len) : (i += 1) {
+        const c = data[i];
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+        } else if (c == '"' or c == '\'') {
+            if (closing) return null;
+            quote = c;
+        } else if (c == '<') return null else if (c == '>') break;
+    }
+    if (i >= data.len) return null;
+    const len = i + 1;
+    const skips = for ([_][]const u8{ "a", "code", "pre", "style", "script" }) |skipped| {
+        if (std.ascii.eqlIgnoreCase(name, skipped)) break true;
+    } else false;
+    if (!skips) return .{ .len = len, .delta = 0 };
+    if (closing) return .{ .len = len, .delta = -1 };
+    return .{ .len = len, .delta = if (data[i - 1] == '/') 0 else 1 };
 }
 
 fn wordAt(data: []const u8, i: usize, word_before: bool) bool {

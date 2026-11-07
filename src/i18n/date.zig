@@ -365,6 +365,137 @@ pub fn formatDateTime(writer: *std.Io.Writer, locale: *const Locale, instant: In
     }
 }
 
+const cldr_intervals = @import("cldr_intervals.zig");
+
+/// Writes `value` in the date and time styles: one of them, or both
+/// joined as `formatDateTime` joins them. At least one is given.
+fn formatStyles(writer: *std.Io.Writer, locale: *const Locale, value: Instant, date_style: ?Style, time_style: ?Style) Error!void {
+    if (date_style) |d| {
+        if (time_style) |t| return formatDateTime(writer, locale, value, d, t);
+        return formatDate(writer, locale, value, d);
+    }
+    return formatTime(writer, locale, value, time_style orelse return error.InvalidPattern);
+}
+
+/// The field two civil times first differ in, as ICU orders the fields
+/// of intervals: year, month, day, day period, hour, minute, second; null
+/// when they differ in none.
+fn firstDifference(a: Civil, b: Civil) ?usize {
+    if (a.year != b.year) return 0;
+    if (a.month != b.month) return 1;
+    if (a.day != b.day) return 2;
+    if ((a.hour < 12) != (b.hour < 12)) return 3;
+    if (a.hour != b.hour) return 4;
+    if (a.minute != b.minute) return 5;
+    if (a.second != b.second) return 6;
+    return null;
+}
+
+/// The locale's pattern of a range in the styles whose times first
+/// differ in `field`, for the most specific listed locale on its fallback
+/// chain.
+fn intervalPattern(locale: *const Locale, date_style: ?Style, time_style: ?Style, field: usize) ?cldr_intervals.Interval {
+    const d: usize = if (date_style) |style| @as(usize, @backingInt(style)) + 1 else 0;
+    // Long and full times are the medium one, without zone names.
+    const t: usize = if (time_style) |style| (if (style == .short) @as(usize, 1) else 2) else 0;
+    const chain = locale.fallbackChain();
+    for (chain.slice()) |*candidate| {
+        for (&cldr_intervals.locales) |*entry| if (std.mem.eql(u8, entry.tag, candidate.tag())) return entry.patterns[d][t][field];
+    }
+    return null;
+}
+
+/// Writes the range of times from `start` to `end`, both shown at
+/// `start`'s UTC offset, in the date and time styles, as
+/// Intl.DateTimeFormat's formatRange does with dateStyle and timeStyle:
+/// once what they share and both what they do not, `Jan 5 – 9, 2026`,
+/// `Jan 5 – Feb 9, 2026`, `10:00 – 11:30 AM`, or one time when they differ
+/// in none of the fields the styles write. A date-range picker's trigger
+/// labels its range so. At least one style is given. The patterns are
+/// CLDR's intervalFormats as ICU applies them (cldr_intervals.zig) for the
+/// locales the module has names of; others write the two times apart,
+/// `{0} – {1}`. A range keeps the spaces of the engine's patterns, which
+/// the generator read them from.
+pub fn formatRange(writer: *std.Io.Writer, locale: *const Locale, start: Instant, end: Instant, date_style: ?Style, time_style: ?Style) Error!void {
+    if (date_style == null and time_style == null) return error.InvalidPattern;
+    const later: Instant = .{ .unix_seconds = end.unix_seconds, .utc_offset_minutes = start.utc_offset_minutes };
+    const a = try civil(start);
+    const b = try civil(later);
+    const field = firstDifference(a, b) orelse return formatStyles(writer, locale, start, date_style, time_style);
+    const interval = intervalPattern(locale, date_style, time_style, field) orelse {
+        try formatStyles(writer, locale, start, date_style, time_style);
+        try writer.writeAll(" – ");
+        return formatStyles(writer, locale, later, date_style, time_style);
+    };
+    const data = dataFor(locale);
+    try formatPattern(writer, data, interval.pattern[0..interval.split], a);
+    try formatPattern(writer, data, interval.pattern[interval.split..], b);
+}
+
+test "ranges of dates write once what the times share" {
+    const locale = try Locale.parse("en");
+    var buffer: [256]u8 = undefined;
+    const jan5: Instant = .{ .unix_seconds = 1767607200 }; // 2026-01-05T10:00Z
+    const cases = [_]struct { end: i64, date: ?Style, time: ?Style, expected: []const u8 }{
+        .{ .end = 1767607200 + 4 * 86400, .date = .medium, .time = null, .expected = "Jan 5 – 9, 2026" },
+        .{ .end = 1767607200 + 35 * 86400, .date = .medium, .time = null, .expected = "Jan 5 – Feb 9, 2026" },
+        .{ .end = 1767607200 + 5400, .date = null, .time = .short, .expected = "10:00 – 11:30 AM" },
+        .{ .end = 1767607200 + 3600, .date = .medium, .time = null, .expected = "Jan 5, 2026" },
+    };
+    for (cases) |case| {
+        var writer: std.Io.Writer = .fixed(&buffer);
+        try formatRange(&writer, &locale, jan5, .{ .unix_seconds = case.end }, case.date, case.time);
+        try std.testing.expectEqualStrings(case.expected, writer.buffered());
+    }
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try std.testing.expectError(error.InvalidPattern, formatRange(&writer, &locale, jan5, jan5, null, null));
+    // A locale without patterns writes both times.
+    const root = try Locale.parse("und");
+    writer = .fixed(&buffer);
+    try formatRange(&writer, &root, jan5, .{ .unix_seconds = 1767607200 + 86400 }, .short, null);
+    try std.testing.expectEqualStrings("2026-01-05 – 2026-01-06", writer.buffered());
+}
+
+test "ranges match the engine's CLDR (testdata/intervals.json)" {
+    const parsed = try std.json.parseFromSlice([]const std.json.Value, std.testing.allocator, @embedFile("testdata/intervals.json"), .{});
+    defer parsed.deinit();
+    var compared: usize = 0;
+    var skipped: usize = 0;
+    for (parsed.value) |row| {
+        const items = row.array.items;
+        const locale = try Locale.parse(items[0].string);
+        const style = struct {
+            fn of(name: []const u8) ?Style {
+                if (name.len == 0) return null;
+                return std.meta.stringToEnum(Style, name);
+            }
+        };
+        const date_style = style.of(items[1].string);
+        const time_style = style.of(items[2].string);
+        const offset: i16 = @intCast(items[5].integer);
+        const start: Instant = .{ .unix_seconds = items[3].integer, .utc_offset_minutes = offset };
+        const end: Instant = .{ .unix_seconds = items[4].integer, .utc_offset_minutes = offset };
+        var single_buffer: [256]u8 = undefined;
+        var single: std.Io.Writer = .fixed(&single_buffer);
+        try formatStyles(&single, &locale, start, date_style, time_style);
+        // The names and patterns of single dates are the module's own, not
+        // all CLDR's: compare where they agree.
+        if (!std.mem.eql(u8, single.buffered(), items[6].string)) {
+            skipped += 1;
+            continue;
+        }
+        var buffer: [512]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        try formatRange(&writer, &locale, start, end, date_style, time_style);
+        std.testing.expectEqualStrings(items[7].string, writer.buffered()) catch |err| {
+            std.debug.print("{s} {s} {s}\n", .{ items[0].string, items[1].string, items[2].string });
+            return err;
+        };
+        compared += 1;
+    }
+    try std.testing.expect(compared > parsed.value.len / 4);
+}
+
 fn expectDate(tag: []const u8, instant: Instant, style: Style, expected: []const u8) !void {
     const locale = try Locale.parse(tag);
     var buffer: [128]u8 = undefined;

@@ -49,7 +49,7 @@ fn build(self: *Reader, v: *view.View) anyerror!void {
 - 提及：`@octocat` 与 `@github/docs` 是 `.mention` 节点，`Tree.login` 返回 `octocat` 或 `github/docs`。登录名是字母、数字与连字符（以字母或数字开头，最多 39 个），前面不能紧挨单词字符，后面不能紧跟单词或“点加单词”（所以 `me@example.com`、`@octocat.dev` 不是提及）。
 - 引用：`#123`、`GH-123`（不区分大小写）与 `octocat/hello#123` 是 `.reference` 节点，`Tree.reference` 返回仓库（本仓库为空）与编号。编号 1 到 10 位、不以 0 开头，后面不能紧跟单词。
 
-提及与引用只在代码、链接和图片之外的文本里识别，与 GitHub 一样：强调结束后紧挨的位置算作单词开头（`_a_#1`、`**b**@octocat` 会识别），实体或转义写出的 `&#64;octocat` 也会识别。原始 HTML 按字面保留，因此 `<code>@x</code>` 里的 `@x` 也会被识别，这是与 GitHub 不同之处。它们在 HTML 与 `plainText` 中按原文输出：是否存在、链接到哪里由视图决定。
+提及与引用只在代码、链接和图片之外的文本里识别，与 GitHub 一样：强调结束后紧挨的位置算作单词开头（`_a_#1`、`**b**@octocat` 会识别），实体或转义写出的 `&#64;octocat` 也会识别。原始 HTML 按字面保留，但与 GitHub 一样，原始 HTML 的 `a`、`code`、`pre`、`style`、`script` 元素里不识别（`<code>@x</code>` 的 `@x` 仍是文字；自闭合的 `<pre/>` 不算打开）。它们在 HTML 与 `plainText` 中按原文输出：是否存在、链接到哪里由视图决定。
 
 块容器（块引用、列表、列表项）最多嵌套 32 层，更深的标记作为文本保留而不是报错。行内解析每个块最多跟踪 256 个分隔符和 64 个方括号，超出的部分保持字面文本，因此病态输入的工作量随输入线性增长。
 
@@ -72,6 +72,21 @@ fn build(self: *Reader, v: *view.View) anyerror!void {
 提示块显示为左侧竖条、图标和标题都取该种类颜色的块引用，正文保持正文颜色。颜色默认是 GitHub 的配色（按 `options.theme` 背景的明暗取浅色或深色版本），可用 `options.colors.alerts` 按 note、tip、important、warning、caution 的顺序替换；图标是 `view.Icon` 的 `info`、`light_bulb`、`report`、`warning` 与 `stop`。
 
 `options.resolve`（`Resolve{ context, destination }`）把提及与引用变成链接：`destination(context, tree, index)` 返回目的地（例如应用内的路径），激活时作为 `.link` 交付，与普通链接相同；返回 null 时保持文字，如同 GitHub 对不认识的人或 issue 的处理。没有 `resolve` 时它们都是文字。提及链接以粗体显示。每次构建都会对显示的每个提及与引用调用一次，应查询手头已有的数据（例如一张表），查询结果变化时下一遍自然跟随。含有已解析链接的块不交给 `options.rich`，而用视图文字与链接构建。
+
+### 流式回复
+
+语言模型的回复是一点点到达的。`mv.show(v, &state, source, streaming, reveal)` 返回本遍要显示的 `source` 前缀：文字不按网络送达的节奏成块出现，而是匀速地一个单位一个单位显示，追上 `Reveal.catch_up_ns`（默认 250 ms）内到达的部分，积压越多越快，每秒至少几百字节；每个单位淡入（`Reveal.fade_ns`，默认 300 ms，负数不淡入，系统要求减少动态效果时也不淡入）。应用把前缀解析成树，再用 `options.reveal = &state` 构建：段落文字按显示的时刻分段淡入，代码块、分隔线和整体交给 `options.rich` 绘制的段落按块淡入。`RevealState` 由应用为每份流式文档保留。
+
+`Reveal.unit`：`.word`（默认，一个词及其后的空格；中日文每个汉字和假名各算一个词）、`.character`、`.sentence`（句号、问号、感叹号后接空格，或中文句末标点、换行；流式中只显示完整的句子）、`.line`、`.paragraph`（空行之间的块）和 `.at_once`（不控制节奏）。
+
+回复完成后在同一处、用同一个状态把 `streaming` 改为 false，还没显示完的部分继续进来；其他交给已完成文档的文字立即显示，修改文本也一样。`state.revealed()` 在构建之后读取，表示全部文字都已显示且淡入结束：聊天在回复完成并 `revealed()` 后才显示时间和操作按钮，而不是在最后几个字节到达、文字还在进来的时候。立即显示的文字（`.at_once`、没有流留下待显示内容的已完成文档、修改）在到达的那一遍就是 revealed；没有淡入时在最后一个单位显示出来时 revealed；更多文字到来又变回 false。对流式文档它只说明到目前为止到达的文字都显示了，是否还会有更多由调用方判断；按句、行、段显示时被扣住的不完整部分会让它保持 false，直到流结束。视图在显示和淡入期间自己请求下一帧，因此每遍读取它的调用方会看到它自动变成 true。
+
+```zig
+const shown = mv.show(v, &self.reveal, reply.text, !reply.done, .{});
+const tree = try md.parse(shown, self.parsed.buffers());
+_ = try mv.build(v, tree, .{ .reveal = &self.reveal }, .{});
+if (reply.done and self.reveal.revealed()) try v.text(reply.time, .{});
+```
 
 ### 锚点
 

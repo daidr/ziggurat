@@ -450,6 +450,9 @@ pub const WindowBackdrop = enum { system, none, mica, acrylic, mica_alt };
 /// backdrops; the other materials use the closest one: Acrylic for transient
 /// UI (menu, popover, hud, sheet, tooltip, selection, fullscreen_ui) and the
 /// glass, Mica otherwise. Linux has none.
+/// A color with its alpha, 255 opaque.
+pub const Rgba = struct { r: u8, g: u8, b: u8, a: u8 = 255 };
+
 pub const Vibrancy = enum {
     none,
     window,
@@ -623,6 +626,11 @@ pub const WindowOptions = struct {
     /// later with `setVibrancy`, and its frames are then transparent. Linux
     /// shows none.
     vibrancy: Vibrancy = .none,
+    /// Tints the material, where the platform's material takes a tint:
+    /// macOS 26's Liquid Glass (`Vibrancy.glass`, `.glass_clear`), through
+    /// its tint color. Other materials and platforms ignore it. See
+    /// `Window.setVibrancyTint`.
+    vibrancy_tint: ?Rgba = null,
     /// Rounds the corners of a `.borderless` or `.custom` window, in DIP: on
     /// macOS its content and material are cut to them, a continuous curve
     /// of this radius, and its shadow follows them; Windows 11 gives it its
@@ -853,7 +861,7 @@ pub const App = struct {
             self.allocator.free(title);
             return err;
         };
-        record.* = .{ .window = .{ .app = self, .key = key }, .options = options, .vibrancy = options.vibrancy, .next = self.first, .pins = 1, .title = title };
+        record.* = .{ .window = .{ .app = self, .key = key }, .options = options, .vibrancy = options.vibrancy, .vibrancy_tint = options.vibrancy_tint, .next = self.first, .pins = 1, .title = title };
         if (owner) |parent| record.linkOwner(parent);
         if (self.first) |first| first.previous = record;
         self.first = record;
@@ -1599,6 +1607,22 @@ pub const Window = struct {
         scope.record.vibrancy = material;
         backend.setVibrancy(scope.record, material);
     }
+    /// Tints the window's material, where it takes a tint (macOS 26's
+    /// Liquid Glass); null removes the tint. Other materials and platforms
+    /// ignore it, and a material set later takes the tint kept. See
+    /// `WindowOptions.vibrancy_tint`.
+    pub fn setVibrancyTint(self: Window, tint: ?Rgba) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        scope.record.vibrancy_tint = tint;
+        if (comptime @hasDecl(backend, "setVibrancyTint")) backend.setVibrancyTint(scope.record, tint);
+    }
+    /// The window's material tint (`setVibrancyTint`).
+    pub fn vibrancyTint(self: Window) !?Rgba {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        return record.vibrancy_tint;
+    }
     /// Keeps the window drawn as active, as the key window of the app in
     /// front is, while another window or app has the keyboard: its controls
     /// and materials keep their active look, and the clear glass
@@ -2153,6 +2177,7 @@ pub const WindowRecord = struct {
     zoom: f32 = 1,
     native: backend.WindowData = .{},
     vibrancy: Vibrancy = .none,
+    vibrancy_tint: ?Rgba = null,
     background: ?u32 = null,
     pointer_state: ?*PointerState = null,
     /// The device and pressure of the latest pointer event; see `notePointer`.

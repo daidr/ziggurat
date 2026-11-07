@@ -1,7 +1,8 @@
 //! A chat with a pretend language model whose replies stream in token by
-//! token as Markdown. While a reply comes, it shows up to the last whole
-//! word, sentence, line or paragraph, as the bar at the top chooses, or
-//! nothing until it is done; the list follows the end until the user
+//! token as Markdown. While a reply comes, it shows at an even pace a word,
+//! sentence, line or paragraph at a time, as the bar at the top chooses,
+//! each fading in (`markdown_view.show`), or as it comes; the reply's time
+//! shows once all of it has; the list follows the end until the user
 //! scrolls up.
 //!
 //! The tokens arrive on the main thread at the uneven pace of a model,
@@ -31,6 +32,8 @@ const Message = struct {
     /// Bytes of a reply streamed so far.
     shown: usize = 0,
     done: bool = false,
+    /// How much of the reply shows, and what fades in.
+    pace: mv.RevealState = .{},
 };
 
 const muted: u32 = 0x5f6b7a;
@@ -136,7 +139,7 @@ const Chat = struct {
     }
 
     /// The user's words in a bubble on the right, the model's as Markdown.
-    fn message(self: *Chat, v: *view.View, m: *const Message, i: usize) !void {
+    fn message(self: *Chat, v: *view.View, m: *Message, i: usize) !void {
         if (m.mine) {
             try v.row(.{ .self_align = .stretch, .key = 100 + i });
             try v.spacer(.{});
@@ -149,7 +152,7 @@ const Chat = struct {
             try v.end();
             return;
         }
-        const source = revealed(m.text[0..m.shown], if (m.done) null else self.reveal);
+        const source = mv.show(v, &m.pace, m.text[0..m.shown], !m.done, .{ .unit = unitOf(self.reveal) });
         if (source.len == 0) {
             try v.text("…", .{ .color = muted, .key = 100 + i });
             return;
@@ -158,10 +161,13 @@ const Chat = struct {
             try v.text(@errorName(err), .{ .color = muted, .key = 100 + i });
             return;
         };
-        if (try mv.build(v, tree, .{ .width = 720 }, .{ .key = 100 + i, .max_width = 760 })) |activation| switch (activation) {
+        if (try mv.build(v, tree, .{ .width = 720, .reveal = &m.pace }, .{ .key = 100 + i, .max_width = 760 })) |activation| switch (activation) {
             .link => |url| std.log.info("link: {s}", .{url}),
             .task => {},
         };
+        // Once the reply is complete and all of it shows, not as its last
+        // bytes arrive.
+        if (m.done and m.pace.revealed()) try v.text("Done", .{ .color = muted, .key = 100_000 + i });
     }
 
     fn draftText(self: *Chat) []const u8 {
@@ -223,34 +229,14 @@ const Chat = struct {
     }
 };
 
-/// The part of a streaming reply to show: up to the end of the last whole
-/// unit, or all of a finished reply (`unit` null).
-fn revealed(source: []const u8, unit: ?Reveal) []const u8 {
-    const by = unit orelse return source;
-    var end: usize = 0;
-    switch (by) {
-        .at_once => {},
-        .word => {
-            if (std.mem.lastIndexOfAny(u8, source, " \t\n")) |at| end = at + 1;
-        },
-        .sentence => {
-            var i: usize = source.len;
-            while (i > 0) : (i -= 1) {
-                const c = source[i - 1];
-                if (c == '\n' or ((c == '.' or c == '!' or c == '?' or c == ':') and i < source.len and (source[i] == ' ' or source[i] == '\n'))) {
-                    end = i;
-                    break;
-                }
-            }
-        },
-        .line => {
-            if (std.mem.lastIndexOfScalar(u8, source, '\n')) |at| end = at + 1;
-        },
-        .paragraph => {
-            if (std.mem.lastIndexOf(u8, source, "\n\n")) |at| end = at + 2;
-        },
-    }
-    return source[0..end];
+fn unitOf(reveal: Reveal) mv.RevealUnit {
+    return switch (reveal) {
+        .word => .word,
+        .sentence => .sentence,
+        .line => .line,
+        .paragraph => .paragraph,
+        .at_once => .at_once,
+    };
 }
 
 const replies = [_][]const u8{
@@ -317,18 +303,7 @@ test "a message and its reply" {
     // Without a window, the reply comes whole.
     _ = try h.find(.{ .text = "A few things to note:" });
     try std.testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Stop" }));
-}
-
-test "a streaming reply shows whole units" {
-    const source = "One two. Three\nfour five\n\nSix";
-    try std.testing.expectEqualStrings("One two. Three\nfour five\n\n", revealed(source, .word));
-    try std.testing.expectEqualStrings("One two. Three\nfour five\n\n", revealed(source, .line));
-    try std.testing.expectEqualStrings("One two. Three\nfour five\n\n", revealed(source, .paragraph));
-    try std.testing.expectEqualStrings("One ", revealed(source[0..6], .word));
-    try std.testing.expectEqualStrings("One two.", revealed(source[0..12], .sentence));
-    try std.testing.expectEqualStrings("", revealed(source[0..12], .line));
-    try std.testing.expectEqualStrings("", revealed(source, .at_once));
-    try std.testing.expectEqualStrings(source, revealed(source, null));
+    _ = try h.find(.{ .text = "Done" });
 }
 
 test "replies stream token by token and stop" {
@@ -345,9 +320,14 @@ test "replies stream token by token and stop" {
     var passes: usize = 0;
     while (!reply.done and passes < 10) : (passes += 1) try h.advance(50 * std.time.ns_per_ms);
     try std.testing.expect(reply.shown > 0 and !reply.done);
+    try std.testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Done" }));
     try h.click(.{ .text = "Stop" });
     try std.testing.expect(reply.done);
     const shown = reply.shown;
     try h.advance(std.time.ns_per_s);
     try std.testing.expectEqual(shown, reply.shown);
+    // What came still comes in, and then the reply is done.
+    passes = 0;
+    while (h.count(.{ .text = "Done" }) == 0 and passes < 100) : (passes += 1) try h.advance(16 * std.time.ns_per_ms);
+    _ = try h.find(.{ .text = "Done" });
 }
