@@ -208,6 +208,15 @@ pub const Harness = struct {
         try self.render();
     }
 
+    /// Send an editing command as an Edit menu item does (copy as
+    /// Control+C, paste as Control+V and so on): the `observeInput`
+    /// containers around the focus see it, then a render.
+    pub fn editCommand(self: *Harness, edit: z.EditKey) anyerror!void {
+        if (self.input == null) return error.NoInput;
+        try self.observe(.{ .edit = edit });
+        try self.render();
+    }
+
     /// Replay a key release to the focused embedded leaf, then render if it
     /// took it, as Host does. True when it took it.
     pub fn keyUp(self: *Harness, input: z.KeyInput) anyerror!bool {
@@ -305,6 +314,27 @@ pub const Harness = struct {
             const tree = &context.semantic_tree;
             const entry = tree.find(id) orelse return error.NotFound;
             return .{ .entry = entry.*, .tree = tree };
+        } else return error.SkipZigTest;
+    }
+
+    /// Every semantic node of the last render but the window root, in the
+    /// order the view recorded them (paint order, parents before their
+    /// children), written to `out`; returns the part of `out` filled.
+    /// `error.NoSpaceLeft` when the tree has more nodes than `out` holds.
+    pub fn accessibleAll(self: *const Harness, out: []Accessible) anyerror![]Accessible {
+        const context = self.input orelse return error.NoInput;
+        if (!self.semantics) return error.NoSemantics;
+        if (comptime ui.capabilities.accessibility) {
+            const tree = &context.semantic_tree;
+            const entries = tree.entries[0..tree.len];
+            var written: usize = 0;
+            for (entries) |entry| {
+                if (entry.parent == null) continue;
+                if (written == out.len) return error.NoSpaceLeft;
+                out[written] = .{ .entry = entry, .tree = tree };
+                written += 1;
+            }
+            return out[0..written];
         } else return error.SkipZigTest;
     }
 

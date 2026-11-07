@@ -221,6 +221,7 @@ const Panel = struct {
     left: usize = 0,
     seen_keys: usize = 0,
     seen_presses: usize = 0,
+    seen_edits: usize = 0,
     outer_keys: usize = 0,
     hint: bool = true,
     fn build(self: *Panel, v: *View) anyerror!void {
@@ -237,6 +238,9 @@ const Panel = struct {
                 self.hint = false;
             },
             .pointer_down => self.seen_presses += 1,
+            .edit => |edit| if (edit.key == .c and edit.control) {
+                self.seen_edits += 1;
+            },
             else => {},
         };
         self.within = v.focusWithin(id);
@@ -274,6 +278,9 @@ test "focus within a container, the focus leaving it, and the input inside it" {
     try testing.expectEqual(@as(usize, 1), app.seen_keys);
     try testing.expectEqual(@as(usize, 1), app.outer_keys);
     try testing.expect(!app.hint);
+    // And the editing commands an Edit menu sends it.
+    try h.editCommand(.{ .key = .c, .control = true });
+    try testing.expectEqual(@as(usize, 1), app.seen_edits);
     // Moving within it is not leaving it.
     try h.focus(.{ .text = "Email" });
     try h.render();

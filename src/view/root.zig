@@ -1656,6 +1656,11 @@ pub const Observed = union(enum) {
     /// focus is inside it; borrowed for the pass.
     text: []const u8,
     composition: []const u8,
+    /// An editing command for the focus inside it: one an Edit menu item
+    /// sends (copy, paste, undo and the others, as their keys), or the
+    /// keys a platform turns into one, which a typed shortcut also shows
+    /// as `key_down` first.
+    edit: z.EditKey,
     /// A button went down or came up over the container.
     pointer_down: struct { position: Point, button: z.PointerButton, modifiers: z.KeyModifiers },
     pointer_up: struct { position: Point, button: z.PointerButton },
@@ -7981,6 +7986,7 @@ pub const FindMatches = find_bar_controls.Matches;
 pub const FindTexts = find_bar_controls.Texts;
 pub const FindEvent = find_bar_controls.FindEvent;
 pub const Query = @import("harness.zig").Query;
+pub const Accessible = @import("harness.zig").Accessible;
 
 /// A monotonic time source in nanoseconds; only differences matter.
 pub const Clock = struct {
@@ -8812,6 +8818,7 @@ pub const Host = struct {
             .key_input => |input| if (input.from_page) null else .{ .key_down = input },
             .text_input => |typed| .{ .text = typed.text },
             .text_preedit => |composed| .{ .composition = composed.text },
+            .edit_key => |edit| .{ .edit = edit },
             .pointer_down => |press| .{ .pointer_down = .{ .position = .{ .x = press.position.x, .y = press.position.y }, .button = press.button, .modifiers = press.modifiers } },
             .pointer_up => |release| .{ .pointer_up = .{ .position = .{ .x = release.position.x, .y = release.position.y }, .button = release.button } },
             else => null,

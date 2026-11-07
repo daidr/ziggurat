@@ -84,6 +84,21 @@ test "assistive technology reads roles, names and the states a style gives" {
     const title = try h.accessible(.{ .key = 9 });
     try testing.expectEqual(ui.accessibility.Role.heading, title.role());
     try testing.expectEqual(@as(u32, 2), title.entry.level);
+    // Every node but the window, parents before children.
+    var all: [32]view.Accessible = undefined;
+    const nodes = try h.accessibleAll(&all);
+    try testing.expect(nodes.len >= 7);
+    try testing.expectEqual(region.entry.id, nodes[0].entry.id);
+    for (nodes, 0..) |node, at| {
+        try testing.expect(node.role() != .window);
+        if (node.parent()) |parent| if (parent != ui.accessibility.root_id) {
+            var before = false;
+            for (nodes[0..at]) |earlier| before = before or earlier.entry.id == parent;
+            try testing.expect(before);
+        };
+    }
+    var few: [2]view.Accessible = undefined;
+    try testing.expectError(error.NoSpaceLeft, h.accessibleAll(&few));
 }
 
 test "Tab passes over a node out of its order, which a press still focuses" {
