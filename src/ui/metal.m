@@ -36,6 +36,7 @@
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreVideo/CoreVideo.h>
 #import <objc/runtime.h>
 // MTLCommandBufferErrorDeviceRemoved (11) is deprecated in newer SDKs because it
 // cannot occur on Apple Silicon; Intel Macs with removable GPUs can still report it.
@@ -77,7 +78,7 @@ _Static_assert(sizeof(ZmGlass)==192,"backdrop layout");
 _Static_assert(sizeof(ZmInstance)==80,"instance layout");
 _Static_assert(sizeof(ZmBrush)==352,"brush layout");
 
-enum {KIND_RECT,KIND_SHAPE,KIND_GRADIENT,KIND_MASK,KIND_GLYPH,KIND_IMAGE,KIND_LAYER,KIND_TRANSFORM,KIND_INDICATOR};
+enum {KIND_RECT,KIND_SHAPE,KIND_GRADIENT,KIND_MASK,KIND_GLYPH,KIND_IMAGE,KIND_LAYER,KIND_TRANSFORM,KIND_INDICATOR,KIND_VIDEO};
 enum {BIND_NONE,BIND_ATLAS,BIND_TEXTURE};
 
 static NSString *const shader_source=@
@@ -89,7 +90,7 @@ static NSString *const shader_source=@
 "struct VOut{float4 pos[[position]];float2 uv;uint inst[[flat]];};\n"
 "vertex VOut zm_vertex(uint vid[[vertex_id]],uint iid[[instance_id]],constant Uniforms&u[[buffer(0)]],const device Inst*insts[[buffer(1)]]){\n"
 "  Inst i=insts[iid];uint kind=uint(i.p.z);\n"
-"  float grow=(kind<=2u||kind==5u||kind==6u)?1.0:0.0;\n"
+"  float grow=(kind<=2u||kind==5u||kind==6u||kind==9u)?1.0:0.0;\n"
 "  float4 q=float4(max(i.rect.xy-grow,floor(i.clip.xy)),min(i.rect.zw+grow,ceil(i.clip.zw)));\n"
 "  q.zw=max(q.zw,q.xy);\n"
 "  float2 corner=float2(float(vid&1u),float(vid>>1));\n"
@@ -179,6 +180,17 @@ static NSString *const shader_source=@
 "    for(uint j=0u;j<n;j++){float2 v=element(e+j*12u,px,py);float a=clamp(0.5-v.x/aa,0.0,1.0)*e[j*12u+1u]*v.y;total=a+total*(1.0-a);}\n"
 "    float alpha=round(clamp(total*i.color.a*cov,0.0,1.0)*255.0);if(alpha==0.0)return float4(0.0);\n"
 "    return float4(floor((round(i.color.rgb*255.0)*alpha+127.0)/255.0),alpha)/255.0;}\n"
+/* A frame of video in NV12: luma sampled as an image's, chroma bilinear
+   between its samples (centered between luma's), clamped at its edges, then
+   converted with the matrix in p.y as src/ui/video_image.zig does. */
+"  else if(kind==9u){float l=(i.p.w>0.5?tex.sample(linear_sampler,in.uv,level(0.0)):tex.sample(nearest_sampler,in.uv,level(0.0))).r;\n"
+"    int2 cs=int2(mask.get_width(),mask.get_height());float2 c=in.uv*float2(tex.get_width(),tex.get_height())*0.5-0.5;float2 f=floor(c);float2 w=c-f;int2 q=int2(f);int2 hi=cs-1;\n"
+"    float2 c00=mask.read(uint2(clamp(q,int2(0),hi))).rg,c10=mask.read(uint2(clamp(q+int2(1,0),int2(0),hi))).rg,c01=mask.read(uint2(clamp(q+int2(0,1),int2(0),hi))).rg,c11=mask.read(uint2(clamp(q+int2(1,1),int2(0),hi))).rg;\n"
+"    float2 ch=mix(mix(c00,c10,w.x),mix(c01,c11,w.x),w.y);\n"
+"    float m=i.p.y;float full=m>2.5?1.0:0.0;float sd=m-3.0*full;float2 k=sd<0.5?float2(0.299,0.114):sd<1.5?float2(0.2126,0.0722):float2(0.2627,0.0593);\n"
+"    ch-=128.0/255.0;if(full<0.5){l=(l-16.0/255.0)*(255.0/219.0);ch*=255.0/224.0;}\n"
+"    float r=l+2.0*(1.0-k.x)*ch.y;float b=l+2.0*(1.0-k.y)*ch.x;float g=(l-k.x*r-k.y*b)/(1.0-k.x-k.y);\n"
+"    return float4(clamp(float3(r,g,b),0.0,1.0),1.0)*(color.a*cov*box(p,i.rect));}\n"
 "  else{float lod=i.p.x;float4 t=i.p.w>0.5?tex.sample(linear_sampler,in.uv,level(lod)):tex.sample(nearest_sampler,in.uv,level(lod));return t*(color.a*cov*box(p,i.rect));}\n"
 "  return color*cov;\n"
 "}\n"
@@ -347,7 +359,7 @@ static void domain_lose(ZigMetalDomain *domain);
     NSMutableArray *fonts,*font_sources;NSMutableArray<NSNumber *> *font_scales;
     CTFontRef font;char font_family[256];float font_size;uint16_t font_weight;int font_italic,font_monospace;
     /* Uploaded images and coverage by slot, and a candidate before commit. */
-    NSMutableArray *slots;id candidate;
+    NSMutableArray *slots;id candidate;CVMetalTextureCacheRef video_cache;
     /* Prepared text coverage by the CGImage it was made from (retained). */
     NSMutableArray *prepared_keys,*prepared_textures;
     /* Shader effects: the installed programs, this frame's runs, their
@@ -371,6 +383,7 @@ static void domain_lose(ZigMetalDomain *domain);
 - (void)dealloc{
     free(instances);free(batches);free(runs);free(words);
     if(font)CFRelease(font);
+    if(video_cache)CFRelease(video_cache);
     atomic_fetch_sub(&live_objects,1);
 }
 @end
@@ -880,6 +893,89 @@ int zmtl_prepared(void *p,void *key,const ZgCoverage *coverage,float x,float y,c
 }
 void zmtl_forget_prepared(void *p){ZigMetalRenderer *s=R(p);[s->prepared_keys removeAllObjects];[s->prepared_textures removeAllObjects];}
 
+/* Frames of video. A picture in a CVPixelBuffer backed by an IOSurface
+   (NV12, as AVFoundation decodes it) is wrapped as two textures through a
+   CVMetalTextureCache, R8 luma and RG8 chroma, without a copy; planes in
+   memory upload as they are. The shader converts the YCbCr. A frame keeps
+   the one before it, which a frame the GPU still draws may read. */
+@interface ZigVideoFrame : NSObject {
+@public
+    id<MTLTexture> luma,chroma;uint32_t matrix;
+    CVMetalTextureRef refs[2];CVPixelBufferRef buffer;
+    ZigVideoFrame *previous;
+}
+@end
+@implementation ZigVideoFrame
+- (void)dealloc{
+    for(int k=0;k<2;k++)if(refs[k])CFRelease(refs[k]);
+    if(buffer)CVPixelBufferRelease(buffer);
+}
+@end
+static ZigVideoFrame *slot_video(ZigMetalRenderer *s,uint32_t slot);
+static id<MTLTexture> plane_texture(ZigMetalRenderer *s,MTLPixelFormat format,uint32_t width,uint32_t height,const uint8_t *pixels,uint32_t stride){
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
+    d.usage=MTLTextureUsageShaderRead;d.storageMode=MTLStorageModeShared;
+    id<MTLTexture> texture=[s->device newTextureWithDescriptor:d];if(!texture)return nil;
+    [texture replaceRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0 withBytes:pixels bytesPerRow:stride];
+    return texture;
+}
+static CVMetalTextureCacheRef video_cache(ZigMetalRenderer *s){
+    if(!s->video_cache&&CVMetalTextureCacheCreate(kCFAllocatorDefault,NULL,s->device,NULL,&s->video_cache)!=kCVReturnSuccess)s->video_cache=NULL;
+    return s->video_cache;
+}
+static ZigVideoFrame *video_frame(ZigMetalRenderer *s,const ZiVideoPicture *v){
+    ZigVideoFrame *frame=[ZigVideoFrame new];frame->matrix=v->matrix;
+    uint32_t cw=(v->width+1)/2,ch=(v->height+1)/2;
+    if(v->native){
+        CVPixelBufferRef buffer=(CVPixelBufferRef)v->native;CVMetalTextureCacheRef cache=video_cache(s);if(!cache)return nil;
+        OSType format=CVPixelBufferGetPixelFormatType(buffer);
+        if(format==kCVPixelFormatType_32BGRA){
+            if(CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,cache,buffer,NULL,MTLPixelFormatBGRA8Unorm,v->width,v->height,0,&frame->refs[0])!=kCVReturnSuccess)return nil;
+            frame->luma=CVMetalTextureGetTexture(frame->refs[0]);
+        }else{
+            if(CVPixelBufferGetPlaneCount(buffer)<2)return nil;
+            if(CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,cache,buffer,NULL,MTLPixelFormatR8Unorm,CVPixelBufferGetWidthOfPlane(buffer,0),CVPixelBufferGetHeightOfPlane(buffer,0),0,&frame->refs[0])!=kCVReturnSuccess)return nil;
+            if(CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,cache,buffer,NULL,MTLPixelFormatRG8Unorm,CVPixelBufferGetWidthOfPlane(buffer,1),CVPixelBufferGetHeightOfPlane(buffer,1),1,&frame->refs[1])!=kCVReturnSuccess)return nil;
+            frame->luma=CVMetalTextureGetTexture(frame->refs[0]);frame->chroma=CVMetalTextureGetTexture(frame->refs[1]);
+        }
+        frame->buffer=CVPixelBufferRetain(buffer);
+    }else if(v->planes[0]&&v->format==ZI_VIDEO_NV12){
+        if(!v->planes[1])return nil;
+        frame->luma=plane_texture(s,MTLPixelFormatR8Unorm,v->width,v->height,v->planes[0],v->strides[0]);
+        frame->chroma=plane_texture(s,MTLPixelFormatRG8Unorm,cw,ch,v->planes[1],v->strides[1]);
+    }else if(v->planes[0]){
+        frame->luma=plane_texture(s,MTLPixelFormatBGRA8Unorm,v->width,v->height,v->planes[0],v->strides[0]);
+    }else return nil;
+    if(!frame->luma||(v->format==ZI_VIDEO_NV12&&!frame->chroma&&!(v->native&&CVPixelBufferGetPixelFormatType((CVPixelBufferRef)v->native)==kCVPixelFormatType_32BGRA)))return nil;
+    return frame;
+}
+/* Whether a picture is one Metal samples where it is. */
+int zmtl_takes_video(const ZiVideoPicture *v){return v->native||v->planes[0]?1:0;}
+int zmtl_prepare_video(void *p,const ZiVideoPicture *v){
+    ZigMetalRenderer *s=R(p);if(s->candidate)return 1;
+    @autoreleasepool{s->candidate=video_frame(s,v);}
+    return s->candidate?0:2;
+}
+int zmtl_update_video(void *p,uint32_t slot,const ZiVideoPicture *v){
+    ZigMetalRenderer *s=R(p);ZigVideoFrame *old=slot_video(s,slot);if(!old)return 1;
+    ZigVideoFrame *frame;@autoreleasepool{frame=video_frame(s,v);}
+    if(!frame)return 2;
+    old->previous=nil;frame->previous=old;s->slots[slot]=frame;return 0;
+}
+static int draw_video(ZigMetalRenderer *s,ZigVideoFrame *frame,const ZiImagePlan *plan){
+    const ZiImageRect *d=&plan->destination,*r=&plan->source;
+    if(d->width<=0||d->height<=0||plan->opacity<=0||!visible(s))return 0;
+    if(!(r->width>0&&r->height>0))return 1;
+    double lw=(double)frame->luma.width,lh=(double)frame->luma.height;
+    ZmInstance *i=frame->chroma?push_with(s,BIND_TEXTURE,frame->luma,frame->chroma,0):push(s,BIND_TEXTURE,frame->luma);if(!i)return 1;
+    [s->frame_textures addObject:frame];
+    device_rect(s,i->rect,d->x,d->y,d->width,d->height);
+    float opacity=plan->opacity>1?1:plan->opacity;i->color[0]=i->color[1]=i->color[2]=i->color[3]=opacity;
+    i->params[0]=0;i->params[1]=(float)frame->matrix;i->params[2]=frame->chroma?KIND_VIDEO:KIND_IMAGE;i->params[3]=plan->sampling?1:0;
+    i->uv[0]=(float)(r->x/lw);i->uv[1]=(float)(r->y/lh);i->uv[2]=(float)((r->x+r->width)/lw);i->uv[3]=(float)((r->y+r->height)/lh);
+    return 0;
+}
+
 /* Image and coverage slots. */
 int zmtl_reserve_images(void *p,uint32_t capacity){ZigMetalRenderer *s=R(p);while([s->slots count]<capacity)[s->slots addObject:[NSNull null]];return 0;}
 static id<MTLTexture> image_texture(ZigMetalRenderer *s,const ZiImageLevel *levels,uint32_t count){
@@ -903,20 +999,23 @@ void zmtl_release_image(void *p,uint32_t slot){ZigMetalRenderer *s=R(p);if(slot<
 /* A dynamic image's new pixels go into a new texture: the old one may be
    in a frame the GPU still draws. */
 int zmtl_update_image(void *p,uint32_t slot,const ZiImageLevel *levels,uint32_t count){
-    ZigMetalRenderer *s=R(p);if(slot>=[s->slots count]||[s->slots[slot] isKindOfClass:[NSNull class]])return 1;
+    ZigMetalRenderer *s=R(p);if(slot>=[s->slots count]||[s->slots[slot] isKindOfClass:[NSNull class]]||slot_video(s,slot))return 1;
     id<MTLTexture> old=s->slots[slot];if(old.mipmapLevelCount!=count)return 1;
     id<MTLTexture> texture=image_texture(s,levels,count);if(!texture)return 2;
     s->slots[slot]=texture;return 0;
 }
 static id<MTLTexture> slot_texture(ZigMetalRenderer *s,uint32_t slot){
-    if(slot>=[s->slots count])return nil;id value=s->slots[slot];return [value isKindOfClass:[NSNull class]]?nil:value;
+    if(slot>=[s->slots count])return nil;id value=s->slots[slot];return [value isKindOfClass:[NSNull class]]||[value isKindOfClass:[ZigVideoFrame class]]?nil:value;
+}
+static ZigVideoFrame *slot_video(ZigMetalRenderer *s,uint32_t slot){
+    if(slot>=[s->slots count])return nil;id value=s->slots[slot];return [value isKindOfClass:[ZigVideoFrame class]]?value:nil;
 }
 int zmtl_coverage(void *p,uint32_t slot,float x,float y,uint32_t rgba){
     ZigMetalRenderer *s=R(p);id<MTLTexture> texture=slot_texture(s,slot);if(!texture||texture.pixelFormat!=MTLPixelFormatR8Unorm)return 1;
     return draw_mask(s,texture,(double)x*s->scale,(double)y*s->scale,rgba);
 }
 static int draw_image(ZigMetalRenderer *s,id<MTLTexture> texture,const ZiImagePlan *plan);
-int zmtl_image(void *p,uint32_t slot,const ZiImagePlan *plan){return draw_image(R(p),slot_texture(R(p),slot),plan);}
+int zmtl_image(void *p,uint32_t slot,const ZiImagePlan *plan){ZigVideoFrame *frame=slot_video(R(p),slot);if(frame)return draw_video(R(p),frame,plan);return draw_image(R(p),slot_texture(R(p),slot),plan);}
 /* An image's level drawn over plan's destination at its opacity. */
 static int draw_image(ZigMetalRenderer *s,id<MTLTexture> texture,const ZiImagePlan *plan){
     if(!texture||texture.pixelFormat!=MTLPixelFormatBGRA8Unorm||plan->level>=texture.mipmapLevelCount)return 1;

@@ -84,7 +84,7 @@ typedef struct ZlInstance {float rect[4],clip[4],color[4],params[4],uv[4];} ZlIn
 typedef struct ZlBrush {float head[4],ab[4],offsets[16],colors[16][4];} ZlBrush;
 _Static_assert(sizeof(ZlInstance)==80,"instance layout");
 _Static_assert(sizeof(ZlBrush)==352,"brush layout");
-enum {KIND_RECT,KIND_SHAPE,KIND_GRADIENT,KIND_MASK,KIND_TEXT,KIND_IMAGE,KIND_LAYER,KIND_TRANSFORM,KIND_INDICATOR};
+enum {KIND_RECT,KIND_SHAPE,KIND_GRADIENT,KIND_MASK,KIND_TEXT,KIND_IMAGE,KIND_LAYER,KIND_TRANSFORM,KIND_INDICATOR,KIND_VIDEO};
 enum {OP_DRAW,OP_CAPTURE,OP_CLOSE,OP_BACKDROP,OP_GLASS};
 /* Run kinds: what a capture does when it closes, or a backdrop's pass. */
 enum {RUN_GROUP,RUN_GAUSSIAN,RUN_TRANSFORM,RUN_EFFECT};
@@ -142,7 +142,10 @@ typedef struct ZlRun {uint32_t kind,radius;float origin[2];ZlTarget source,temp,
 /* A capture while it records: the clips it began under and how it
    composites when it closes. */
 typedef struct ZlCapture {float clips[ZL_CLIPS][4];uint32_t clip_depth,run,kind,empty,opacity,mask;float bounds[4],mask_rect[4];float faded;uint32_t fades;} ZlCapture;
-typedef struct ZlImage {GLuint texture;uint32_t width,height,levels;int coverage;} ZlImage;
+/* An image, a coverage mask, or a frame of video: an NV12 frame keeps its
+   luma in texture and its chroma in chroma, which the shader converts with
+   matrix as it samples them. */
+typedef struct ZlImage {GLuint texture;uint32_t width,height,levels;int coverage;GLuint chroma;uint32_t matrix,element;} ZlImage;
 /* A text drawn once, by what it draws (its bytes, font, color, box and
    where within a device pixel it starts). */
 typedef struct ZlText {uint64_t hash,used;char *bytes;uint32_t len,rgb,width,height;float size,spacing,box[2],offset[2],scale;uint16_t weight;int italic,monospace;char family[64];GLuint texture;} ZlText;
@@ -391,6 +394,17 @@ static const char *fragment_source=
 "  else if(kind==6){float m=1.0;if(params.w>0.5)m=texture(mask,(p-uvr.xy)/(uvr.zw-uvr.xy)).r;return texel(ivec2(floor(p-params.xy)))*(color.a*cov*box(p,rect)*m);}\n"
 "  else if(kind==7){vec2 s=vec2(uvr.x*p.x+uvr.y*p.y+params.x,uvr.z*p.x+uvr.w*p.y+params.y);return bilinear(s)*cov;}\n"
 "  else if(kind==5){float lod=params.x;vec4 t=params.w>0.5?textureLod(tex,uv,lod):textureLod(tex_nearest,uv,lod);return t*(color.a*cov*box(p,rect));}\n"
+/* A frame of video in NV12: luma sampled as an image's, chroma bilinear
+   between its samples (centered between luma's), clamped at its edges, then
+   converted with the matrix in params.y as src/ui/video_image.zig does. */
+"  else if(kind==9){float l=(params.w>0.5?textureLod(tex,uv,0.0):textureLod(tex_nearest,uv,0.0)).r;\n"
+"    ivec2 cs=textureSize(mask,0);vec2 c=uv*vec2(textureSize(tex,0))*0.5-0.5;vec2 f=floor(c);vec2 w=c-f;ivec2 q=ivec2(f);ivec2 hi=cs-1;\n"
+"    vec2 c00=texelFetch(mask,clamp(q,ivec2(0),hi),0).rg,c10=texelFetch(mask,clamp(q+ivec2(1,0),ivec2(0),hi),0).rg,c01=texelFetch(mask,clamp(q+ivec2(0,1),ivec2(0),hi),0).rg,c11=texelFetch(mask,clamp(q+ivec2(1,1),ivec2(0),hi),0).rg;\n"
+"    vec2 ch=mix(mix(c00,c10,w.x),mix(c01,c11,w.x),w.y);\n"
+"    float m=params.y;float full=m>2.5?1.0:0.0;float sd=m-3.0*full;vec2 k=sd<0.5?vec2(0.299,0.114):sd<1.5?vec2(0.2126,0.0722):vec2(0.2627,0.0593);\n"
+"    ch-=128.0/255.0;if(full<0.5){l=(l-16.0/255.0)*(255.0/219.0);ch*=255.0/224.0;}\n"
+"    float r=l+2.0*(1.0-k.x)*ch.y;float b=l+2.0*(1.0-k.y)*ch.x;float g=(l-k.x*r-k.y*b)/(1.0-k.x-k.y);\n"
+"    return vec4(clamp(vec3(r,g,b),0.0,1.0),1.0)*(color.a*cov*box(p,rect));}\n"
 "  else if(kind==8){int e=int(params.x);int n=int(params.y);float k=uvr.z;float px=(p.x-uvr.x)/k,py=(p.y-uvr.y)/k;float aa=1.0/k;float total=0.0;\n"
 "    for(int j=0;j<n;j++){vec2 v=element(e+j*12,px,py);float a=clamp(0.5-v.x/aa,0.0,1.0)*W(e+j*12+1)*v.y;total=a+total*(1.0-a);}\n"
 "    float alpha=floor(clamp(total*color.a*cov,0.0,1.0)*255.0+0.5);if(alpha==0.0)return vec4(0.0);\n"
@@ -532,7 +546,7 @@ static int make_target(ZlTarget *t,uint32_t width,uint32_t height){
     if(!ok){drop_target(t);return 0;}
     t->width=width;t->height=height;return 1;
 }
-static void drop_image(ZlImage *image){if(image->texture)glDeleteTextures(1,&image->texture);memset(image,0,sizeof(*image));}
+static void drop_image(ZlImage *image){if(image->texture)glDeleteTextures(1,&image->texture);if(image->chroma)glDeleteTextures(1,&image->chroma);memset(image,0,sizeof(*image));}
 static void drop_text(ZlRenderer *s,ZlText *t){
     if(t->texture)glDeleteTextures(1,&t->texture);
     s->text_bytes-=(size_t)t->width*t->height*4;free(t->bytes);memset(t,0,sizeof(*t));
@@ -1295,14 +1309,14 @@ int zglr_prepare_image(void *p,const ZiImageLevel *levels,uint32_t count){
     if(levels[0].width>(uint32_t)s->max_texture||levels[0].height>(uint32_t)s->max_texture){leave(s);return 2;}
     GLuint texture=image_texture(levels,count);leave(s);
     if(!texture)return 2;
-    s->candidate=(ZlImage){texture,levels[0].width,levels[0].height,count,0};return 0;
+    s->candidate=(ZlImage){.texture=texture,.width=levels[0].width,.height=levels[0].height,.levels=count};return 0;
 }
 int zglr_prepare_coverage(void *p,const ZgCoverage *coverage){
     ZlRenderer *s=p;if(s->candidate.texture||!coverage->width||!coverage->height||coverage->stride<coverage->width)return 1;
     if(enter(s))return 2;
     GLuint texture=mask_texture(coverage);leave(s);
     if(!texture)return 2;
-    s->candidate=(ZlImage){texture,coverage->width,coverage->height,1,1};return 0;
+    s->candidate=(ZlImage){.texture=texture,.width=coverage->width,.height=coverage->height,.levels=1,.coverage=1};return 0;
 }
 void zglr_commit_image(void *p,uint32_t slot){
     ZlRenderer *s=p;
@@ -1329,6 +1343,77 @@ int zglr_update_image(void *p,uint32_t slot,const ZiImageLevel *levels,uint32_t 
     int failed=glGetError()!=GL_NO_ERROR;leave(s);
     return failed?2:0;
 }
+/* Frames of video: an NV12 frame's two planes upload as they are, R8 luma
+   and RG8 chroma, for the shader to convert; a BGRA one as an image; a
+   browser's video element GPU to GPU. */
+static GLuint plane_texture(GLenum internal,GLenum format,uint32_t width,uint32_t height,const uint8_t *pixels,uint32_t stride,uint32_t bytes){
+    GLuint texture=0;glGenTextures(1,&texture);glBindTexture(GL_TEXTURE_2D,texture);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,0);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT,1);glPixelStorei(GL_UNPACK_ROW_LENGTH,pixels?(GLint)(stride/bytes):0);
+    glTexImage2D(GL_TEXTURE_2D,0,(GLint)internal,(GLsizei)width,(GLsizei)height,0,format,GL_UNSIGNED_BYTE,pixels);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH,0);glPixelStorei(GL_UNPACK_ALIGNMENT,4);
+    return texture;
+}
+static void plane_update(GLuint texture,GLenum format,uint32_t width,uint32_t height,const uint8_t *pixels,uint32_t stride,uint32_t bytes){
+    glBindTexture(GL_TEXTURE_2D,texture);glPixelStorei(GL_UNPACK_ALIGNMENT,1);glPixelStorei(GL_UNPACK_ROW_LENGTH,(GLint)(stride/bytes));
+    glTexSubImage2D(GL_TEXTURE_2D,0,0,0,(GLsizei)width,(GLsizei)height,format,GL_UNSIGNED_BYTE,pixels);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH,0);glPixelStorei(GL_UNPACK_ALIGNMENT,4);
+}
+static int video_upload(ZlImage *image,const ZiVideoPicture *v,int fresh){
+    uint32_t cw=(v->width+1)/2,ch=(v->height+1)/2;
+    if(v->planes[0]&&v->format==ZI_VIDEO_NV12){
+        if(!v->planes[1])return 1;
+        if(fresh){
+            image->texture=plane_texture(GL_R8,GL_RED,v->width,v->height,v->planes[0],v->strides[0],1);
+            image->chroma=plane_texture(GL_RG8,GL_RG,cw,ch,v->planes[1],v->strides[1],2);
+        }else{
+            plane_update(image->texture,GL_RED,v->width,v->height,v->planes[0],v->strides[0],1);
+            plane_update(image->chroma,GL_RG,cw,ch,v->planes[1],v->strides[1],2);
+        }
+        image->matrix=v->matrix;
+    }else if(v->planes[0]){
+        if(fresh)image->texture=plane_texture(GL_RGBA8,GL_BGRA,v->width,v->height,v->planes[0],v->strides[0],4);
+        else plane_update(image->texture,GL_BGRA,v->width,v->height,v->planes[0],v->strides[0],4);
+    }else if(v->element){
+#ifdef __wasm__
+        if(fresh)image->texture=plane_texture(GL_RGBA8,GL_RGBA,v->width,v->height,NULL,0,4);
+        glBindTexture(GL_TEXTURE_2D,image->texture);
+        if(!zw_video_upload(v->element))return 1;
+        image->element=v->element;
+#else
+        return 1;
+#endif
+    }else return 1;
+    image->width=v->width;image->height=v->height;image->levels=1;
+    return glGetError()!=GL_NO_ERROR?2:0;
+}
+/* Whether a picture is one OpenGL samples where it is. */
+int zglr_takes_video(const ZiVideoPicture *v){
+    if(v->planes[0])return 1;
+#ifdef __wasm__
+    if(v->element)return 1;
+#endif
+    return 0;
+}
+int zglr_prepare_video(void *p,const ZiVideoPicture *v){
+    ZlRenderer *s=p;if(s->candidate.texture||!v->width||!v->height)return 1;
+    if(enter(s))return 2;
+    if(v->width>(uint32_t)s->max_texture||v->height>(uint32_t)s->max_texture){leave(s);return 2;}
+    ZlImage image;memset(&image,0,sizeof(image));
+    int failed=video_upload(&image,v,1);
+    if(failed){drop_image(&image);leave(s);return failed;}
+    leave(s);s->candidate=image;return 0;
+}
+int zglr_update_video(void *p,uint32_t slot,const ZiVideoPicture *v){
+    ZlRenderer *s=p;if(slot>=s->slot_len||!s->slots[slot].texture||s->slots[slot].coverage)return 1;
+    ZlImage *image=&s->slots[slot];
+    int nv12=v->planes[0]&&v->format==ZI_VIDEO_NV12;
+    /* Another kind of picture, or of size, is a new texture. */
+    if(image->width!=v->width||image->height!=v->height||(image->chroma!=0)!=nv12||image->levels!=1)return 1;
+    if(enter(s))return 2;
+    int failed=video_upload(image,v,0);leave(s);
+    return failed;
+}
 static ZlImage *slot_image(ZlRenderer *s,uint32_t slot){return slot<s->slot_len&&s->slots[slot].texture?&s->slots[slot]:NULL;}
 int zglr_coverage(void *p,uint32_t slot,float x,float y,uint32_t rgba){
     ZlRenderer *s=p;ZlImage *image=slot_image(s,slot);if(!image||!image->coverage)return 1;
@@ -1340,10 +1425,11 @@ static int draw_image(ZlRenderer *s,const ZlImage *image,const ZiImagePlan *plan
     if(d->width<=0||d->height<=0||plan->opacity<=0||!visible(s))return 0;
     if(!(r->width>0&&r->height>0))return 1;
     double lw=(double)(image->width>>plan->level?image->width>>plan->level:1),lh=(double)(image->height>>plan->level?image->height>>plan->level:1);
-    ZlInstance *i=push(s,image->texture);if(!i)return 1;
+    ZlInstance *i=image->chroma?push_with(s,image->texture,image->chroma,0):push(s,image->texture);if(!i)return 1;
     device_rect(s,i->rect,d->x,d->y,d->width,d->height);
     float opacity=plan->opacity>1?1:plan->opacity;i->color[0]=i->color[1]=i->color[2]=i->color[3]=opacity;
-    i->params[0]=(float)plan->level;i->params[2]=KIND_IMAGE;i->params[3]=plan->sampling?1:0;
+    i->params[0]=(float)plan->level;i->params[2]=image->chroma?KIND_VIDEO:KIND_IMAGE;i->params[3]=plan->sampling?1:0;
+    if(image->chroma)i->params[1]=(float)image->matrix;
     i->uv[0]=(float)(r->x/lw);i->uv[1]=(float)(r->y/lh);i->uv[2]=(float)((r->x+r->width)/lw);i->uv[3]=(float)((r->y+r->height)/lh);
     return 0;
 }
@@ -2030,7 +2116,7 @@ const GpuTextureToken *zgpu_domain_upload(void *p,uint32_t slot,uint64_t identit
     texture=image_texture(levels,count);
     egl_release();
     if(!texture){*out=ZL_NO_MEMORY;return NULL;}
-    d->textures[slot]=(ZlImage){texture,levels[0].width,levels[0].height,count,0};d->texture_creations++;
+    d->textures[slot]=(ZlImage){.texture=texture,.width=levels[0].width,.height=levels[0].height,.levels=count};d->texture_creations++;
     d->tokens[slot]=(GpuTextureToken){identity,d->epoch->generation,levels[0].width,levels[0].height,count,0};
     *out=ZL_OK;return &d->tokens[slot];
 }
@@ -2127,7 +2213,7 @@ const GpuTextureToken *zgpu_snapshot_offscreen(void *domain,void *renderer,uint3
     int failed=glGetError()!=GL_NO_ERROR;
     if(failed){glDeleteTextures(1,&texture);egl_release();*out=ZL_UNEXPECTED;return NULL;}
     egl_release();
-    d->textures[slot]=(ZlImage){texture,width,height,1,0};d->texture_creations++;
+    d->textures[slot]=(ZlImage){.texture=texture,.width=width,.height=height,.levels=1};d->texture_creations++;
     d->tokens[slot]=(GpuTextureToken){identity,d->epoch->generation,width,height,1,0};
     *out=ZL_OK;return &d->tokens[slot];
 }

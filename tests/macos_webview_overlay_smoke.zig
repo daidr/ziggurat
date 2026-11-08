@@ -58,6 +58,8 @@ const State = struct {
     /// The last element of the page that took the focus.
     focused: [8]u8 = undefined,
     focused_len: usize = 0,
+    /// Ticks a phase's condition has held in a row.
+    steady: u32 = 0,
     failure: ?anyerror = null,
 
     fn build(self: *State, v: *view.View) !void {
@@ -124,6 +126,7 @@ const State = struct {
     }
     fn next(self: *State, phase: Phase) void {
         self.phase = phase;
+        self.steady = 0;
         self.since = self.ticks;
     }
     fn press(self: *State, shift: bool) !void {
@@ -167,7 +170,11 @@ const State = struct {
         const state = &self.host.context.input_state;
         if (self.ticks > self.since + 400) {
             const visible = if (self.item.region) |region| if (region.snapshot()) |snapshot| snapshot.viewport.visible else |_| false else false;
-            std.debug.print("loaded={} visible={} key={?} page keyboard={} element={s} control={?d} wanted={?d}\n", .{ self.loaded, visible, self.key, self.pageHasKeyboard(), self.focused[0..self.focused_len], state.focused, self.control(2) });
+            var at: ?usize = null;
+            for (0..4) |index| if (state.focused != null and self.control(index) == state.focused) {
+                at = index;
+            };
+            std.debug.print("{s}: loaded={} visible={} key={?} page keyboard={} element={s} control={?d} (focusable #{?d}) wanted={?d}\n", .{ @tagName(self.phase), self.loaded, visible, self.key, self.pageHasKeyboard(), self.focused[0..self.focused_len], state.focused, at, self.control(2) });
             return error.TimedOut;
         }
         switch (self.phase) {
@@ -231,7 +238,15 @@ const State = struct {
                 self.next(.out);
             },
             .out => {
-                if (self.pageHasKeyboard() or state.focused != self.control(2)) return;
+                if (self.pageHasKeyboard() or state.focused != self.control(2)) {
+                    self.steady = 0;
+                    return;
+                }
+                // The page may report the keyboard gone before WebKit has
+                // settled its focus out; Shift+Tab at once has been seen to
+                // pass the page by. Let it hold for 200 ms first.
+                self.steady += 1;
+                if (self.steady < 10) return;
                 self.focused_len = 0;
                 try self.press(true);
                 self.next(.back);

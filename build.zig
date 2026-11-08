@@ -890,7 +890,25 @@ pub fn build(b: *std.Build) void {
     const view_video = b.addModule("ziggurat_view_video", .{ .root_source_file = b.path("src/view/video.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat_ui", .module = ui },   .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_gif", .module = gif }, .{ .name = "ziggurat_apng", .module = apng },
+        .{ .name = "ziggurat", .module = core },
     } });
+    // The system's media engines: GStreamer (loaded at the first video),
+    // AVFoundation, the browser's video element.
+    const system_video = b.addModule("ziggurat_video", .{ .root_source_file = b.path("src/video/root.zig"), .target = target, .optimize = optimize, .link_libc = target.result.cpu.arch != .wasm32, .imports = &.{
+        .{ .name = "ziggurat_ui", .module = ui },                 .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_view_video", .module = view_video },
+    } });
+    if (target.result.os.tag == .macos) {
+        native_support.add(b, system_video, "video-avfoundation", "src/video/avfoundation.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize).addIncludePath(b.path("src/ui"));
+        native_support.linkFrameworks(b, system_video, &.{ "AVFoundation", "CoreMedia", "CoreVideo", "QuartzCore", "Foundation" });
+    }
+    // A clip played by the system's engine in a real window, drawn in
+    // software, and with -Dgpu=true by OpenGL or Metal from its NV12 planes.
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) addSmoke(b, "smoke-video", "tests/video_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_view_video", .module = view_video },
+        .{ .name = "ziggurat_video", .module = system_video },
+    });
     const view_timer = b.addModule("ziggurat_view_timer", .{ .root_source_file = b.path("src/view/timer.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },      .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_wake", .module = wake },
@@ -1565,7 +1583,7 @@ pub fn build(b: *std.Build) void {
     ui.addOptions("ziggurat_ui_options", ui_options);
     if (gpu and target.result.os.tag == .macos) {
         _ = native_support.add(b, ui, "ui-metal-native", "src/ui/metal.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        native_support.linkFrameworks(b, ui, &.{ "Metal", "QuartzCore", "AppKit", "Foundation", "CoreText", "CoreGraphics" });
+        native_support.linkFrameworks(b, ui, &.{ "Metal", "QuartzCore", "AppKit", "Foundation", "CoreText", "CoreGraphics", "CoreVideo" });
         addSmoke(b, "smoke-metal", "tests/metal_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -3155,6 +3173,14 @@ pub fn build(b: *std.Build) void {
     b.step("test-system-integration", "Run single-instance framing, identity, registration and power unit tests").dependOn(&run_system_unit_tests.step);
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
+    // The system's media engines, on macOS as on Linux.
+    if (target.result.os.tag != .windows and target.result.cpu.arch != .wasm32) {
+        const system_video_tests = addTest(b, .{ .root_module = system_video });
+        check.dependOn(&system_video_tests.step);
+        const run_system_video_tests = b.addRunArtifact(system_video_tests);
+        test_step.dependOn(&run_system_video_tests.step);
+        b.step("test-video", "Play a clip with the system's media engine: frames in order, its end, seeks (skips without an engine)").dependOn(&run_system_video_tests.step);
+    }
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         const ui_tests = addTest(b, .{ .root_module = ui });
         check.dependOn(&ui_tests.step);
@@ -3473,7 +3499,7 @@ const app_example_imports = [_][]const u8{
     "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",             "ziggurat_terminal",
     "ziggurat_terminal_view", "ziggurat_rich_text",        "ziggurat_rich_text_editor", "ziggurat_rich_text_clipboard",
     "ziggurat_text_measure",  "ziggurat_markdown",         "ziggurat_markdown_view",    "ziggurat_vector",
-    "ziggurat_text_outlines", "ziggurat_view_video",
+    "ziggurat_text_outlines", "ziggurat_view_video",       "ziggurat_video",
 };
 
 /// `web` examples show web pages and need `-Dwebview=true`; `browser`

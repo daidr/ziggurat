@@ -121,6 +121,9 @@ extern fn zglr_prepare_coverage(*anyopaque, *const drawing.NativeCoverage) c_int
 extern fn zglr_commit_image(*anyopaque, u32) void;
 extern fn zglr_release_image(*anyopaque, u32) void;
 extern fn zglr_update_image(*anyopaque, u32, [*]const drawing.ImageLevel, u32) c_int;
+extern fn zglr_takes_video(*const drawing.VideoPicture) c_int;
+extern fn zglr_prepare_video(*anyopaque, *const drawing.VideoPicture) c_int;
+extern fn zglr_update_video(*anyopaque, u32, *const drawing.VideoPicture) c_int;
 extern fn zglr_coverage(*anyopaque, u32, f32, f32, u32) c_int;
 extern fn zglr_image(*anyopaque, u32, *const drawing.ImagePlan) c_int;
 extern fn zglr_end(*anyopaque, ?*anyopaque) c_int;
@@ -1203,11 +1206,25 @@ pub const Renderer = struct {
         errdefer view.lease.releaseResidency();
         self.images.stats.peak_reserved_bytes = @max(self.images.stats.peak_reserved_bytes, self.images.stats.pixel_bytes + charge);
         self.images.reserveCandidate(charge);
-        if (zglr_prepare_image(native, view.levels.ptr, @intCast(view.levels.len)) != 0) return error.ImageUploadFailed;
+        if (try self.videoPicture(view)) |picture| {
+            if (zglr_prepare_video(native, picture) != 0) return error.ImageUploadFailed;
+        } else if (zglr_prepare_image(native, view.levels.ptr, @intCast(view.levels.len)) != 0) return error.ImageUploadFailed;
         while (self.images.needsEviction(charge)) self.dropImage(self.images.victim() orelse break, true);
         const slot = self.images.empty().?;
         zglr_commit_image(native, @intCast(slot));
         self.images.commitCharged(slot, view, dynamic, charge);
+    }
+    /// Frames of video upload as their decoder left them (`drawing.VideoPicture`):
+    /// NV12 planes, which the shader converts, or a browser's video element.
+    pub const samples_video = true;
+    /// The picture of a frame of video OpenGL samples where it is, or null
+    /// for an image, or for a picture it takes converted into the view's
+    /// levels, as one it cannot read in place.
+    fn videoPicture(_: *Renderer, view: drawing.ImageView) !?*const drawing.VideoPicture {
+        const source = view.video orelse return null;
+        if (zglr_takes_video(&source.picture) != 0) return &source.picture;
+        if (!source.ensure(view)) return error.ImageUploadFailed;
+        return null;
     }
     pub fn updateImage(self: *Renderer, old_identity: u64, view: drawing.ImageView) !void {
         if (self.active) return error.AlreadyDrawing;
@@ -1218,7 +1235,14 @@ pub const Renderer = struct {
         if (self.images.entries[slot].?.view.identity == view.identity) return;
         try view.lease.acquireResidency();
         errdefer view.lease.releaseResidency();
-        if (zglr_update_image(native, @intCast(slot), view.levels.ptr, @intCast(view.levels.len)) != 0) return error.ImageUpdateFailed;
+        if (try self.videoPicture(view)) |picture| {
+            // A picture of another kind or size does not fit the texture:
+            // it uploads again.
+            if (zglr_update_video(native, @intCast(slot), picture) != 0) {
+                self.dropImage(slot, false);
+                return error.ImageNotUploaded;
+            }
+        } else if (zglr_update_image(native, @intCast(slot), view.levels.ptr, @intCast(view.levels.len)) != 0) return error.ImageUpdateFailed;
         self.images.replace(slot, view);
     }
     fn dropImage(self: *Renderer, slot: usize, eviction: bool) void {

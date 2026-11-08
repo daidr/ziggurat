@@ -128,6 +128,7 @@ body>.ziggurat-window{position:fixed}
     MAX_TEXTURE_BUFFER_SIZE: 0x8c2b,
     BGRA: 0x80e1,
     RED: 0x1903,
+    RG: 0x8227,
     RGBA: 0x1908,
     RGBA32F: 0x8814,
     R32F: 0x822e,
@@ -225,7 +226,7 @@ body>.ziggurat-window{position:fixed}
     // Pixels from memory for an upload, BGRA swizzled to RGBA.
     upload(format, width, height, ptr) {
       if (!ptr) return { format: format === GL.BGRA ? GL.RGBA : format, data: null };
-      const bytes = format === GL.RED ? 1 : 4;
+      const bytes = format === GL.RED ? 1 : format === GL.RG ? 2 : 4;
       const length = this.span(this.unpack, width, height, bytes);
       const view = new Uint8Array(this.rt.memory.buffer, ptr, length);
       if (format !== GL.BGRA) return { format, data: view };
@@ -1004,6 +1005,32 @@ body>.ziggurat-window{position:fixed}
           rt.maskBegin(width, height, scale, left, top, rt.string(fontPtr, fontLen), rtl, spacing),
         zw_layout_draw: (textPtr, len, x, baseline) => rt.maskCtx.fillText(rt.utf16(textPtr, len), x, baseline),
         zw_layout_end: (mask, stride) => rt.maskEnd(mask, stride),
+        zw_video_open: (engine, urlPtr, urlLen, dataPtr, dataLen) => rt.videoOpen(engine, urlPtr, urlLen, dataPtr, dataLen),
+        zw_video_frame: (id, out) => rt.videoFrame(id, out),
+        zw_video_state: (id) => {
+          const v = rt.videos.get(id);
+          return v ? v.state : 4;
+        },
+        zw_video_number: (id, what) => rt.videoNumber(id, what),
+        zw_video_control: (id, what, value) => rt.videoControl(id, what, value),
+        zw_video_read: (id, pixels, stride, width, height) => rt.videoRead(id, pixels, stride, width, height),
+        zw_video_close: (id) => rt.videoClose(id),
+        zw_video_upload: (id) => {
+          const v = rt.videos.get(id);
+          const gl = rt.glc && rt.glc.gl;
+          if (!v || !gl || v.el.readyState < 2) return 0;
+          gl.pixelStorei(GL.UNPACK_ROW_LENGTH, 0);
+          gl.pixelStorei(GL.UNPACK_ALIGNMENT, 4);
+          try {
+            gl.texImage2D(GL.TEXTURE_2D, 0, gl.RGBA8, GL.RGBA, gl.UNSIGNED_BYTE, v.el);
+          } catch (err) {
+            return 0; // a picture of another origin that does not allow it
+          } finally {
+            gl.pixelStorei(GL.UNPACK_ROW_LENGTH, rt.glc.unpack.row);
+            gl.pixelStorei(GL.UNPACK_ALIGNMENT, rt.glc.unpack.align);
+          }
+          return 1;
+        },
         zw_audio_open: (engine, rate, aheadMs, audible) => rt.audioOpen(engine, rate, aheadMs, audible),
         zw_audio_close: (engine) => rt.audioClose(engine),
         zw_gamepads: (keys, capacity) => {
@@ -1377,6 +1404,187 @@ body>.ziggurat-window{position:fixed}
     // Audio: a Web Audio output per engine that asks the module for
     // frames on the main thread. Pages may only start sound after a press
     // or a key, so a suspended context resumes on the next one.
+    // Videos play in video elements of their own, not in the page: the
+    // element decodes, plays the sound and keeps the clock, and WebGL
+    // uploads each picture from it (zw_video_upload). Where the browser has
+    // requestVideoFrameCallback, each picture presented wakes the app's
+    // engine (src/video/web.zig); elsewhere the app asks for frames at the
+    // display's rate while it plays. Bytes in memory play from a Blob's URL.
+    // States as ziggurat_view_video.State numbers them: 0 loading, 1 ready,
+    // 2 buffering, 3 ended, 4 failed.
+    videoOpen(engine, urlPtr, urlLen, dataPtr, dataLen) {
+      if (typeof document === "undefined") return 0;
+      if (!this.videos) {
+        this.videos = new Map();
+        this.nextVideo = 1;
+      }
+      const el = document.createElement("video");
+      el.playsInline = true;
+      el.preload = "auto";
+      el.crossOrigin = "anonymous"; // for WebGL to read a picture of another origin that allows it
+      const id = this.nextVideo++;
+      const v = { el, engine, state: 0, fresh: false, shown: false, last: -1, blob: "", undo: [], frameRequest: 0, canvas: null };
+      let url = this.string(urlPtr, urlLen);
+      if (dataLen > 0) {
+        const bytes = new Uint8Array(this.memory.buffer, dataPtr, dataLen).slice();
+        const tag = (at, text) => bytes.length >= at + text.length && String.fromCharCode(...bytes.subarray(at, at + text.length)) === text;
+        const type = bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3 ? "video/webm" : tag(4, "ftyp") && tag(8, "qt  ") ? "video/quicktime" : "video/mp4";
+        v.blob = URL.createObjectURL(new Blob([bytes], { type }));
+        url = v.blob;
+      }
+      const wake = () => {
+        if (!this.quitting && this.videos.get(id) === v) this.call(() => (this.exports.ziggurat_video_wake(v.engine), 0));
+      };
+      const on = (name, fn) => {
+        const f = () => {
+          if (this.videos.get(id) !== v) return;
+          fn();
+          wake();
+        };
+        el.addEventListener(name, f);
+        v.undo.push(() => el.removeEventListener(name, f));
+      };
+      on("loadeddata", () => (v.fresh = true));
+      on("seeked", () => (v.fresh = true));
+      on("waiting", () => {
+        if (v.state === 1) v.state = 2;
+      });
+      on("playing", () => {
+        if (v.state === 2) v.state = 1;
+      });
+      on("ended", () => {
+        if (!el.loop) v.state = 3;
+      });
+      on("error", () => (v.state = 4));
+      on("durationchange", () => {});
+      v.frames = typeof el.requestVideoFrameCallback === "function";
+      if (v.frames) {
+        const presented = () => {
+          if (this.videos.get(id) !== v) return;
+          v.fresh = true;
+          v.frameRequest = el.requestVideoFrameCallback(presented);
+          wake();
+        };
+        v.frameRequest = el.requestVideoFrameCallback(presented);
+      }
+      this.videos.set(id, v);
+      el.src = url;
+      return id;
+    }
+    // Whether the element has a picture: its size, and whether it is a new
+    // one, into out.
+    videoFrame(id, out) {
+      const v = this.videos.get(id);
+      if (!v || v.el.readyState < 2) return 0; // HAVE_CURRENT_DATA
+      const t = v.el.currentTime;
+      const changed = v.fresh || !v.shown || (!v.frames && t !== v.last);
+      v.fresh = false;
+      v.shown = true;
+      v.last = t;
+      if (v.state === 0) v.state = 1;
+      new Uint32Array(this.memory.buffer, out, 3).set([v.el.videoWidth, v.el.videoHeight, changed ? 1 : 0]);
+      return 1;
+    }
+    // 0 the duration in seconds (0 unknown or live), 1 the position, 2 the
+    // interval in seconds (0 when each picture wakes the app).
+    videoNumber(id, what) {
+      const v = this.videos.get(id);
+      if (!v) return 0;
+      if (what === 0) {
+        const d = v.el.duration;
+        return Number.isFinite(d) && d > 0 ? d : 0;
+      }
+      if (what === 1) return v.el.currentTime || 0;
+      return v.frames ? 0 : 1 / 60;
+    }
+    // 0 play, 1 pause, 2 seek to value seconds, 3 loop, 4 rate, 5 volume,
+    // 6 muted.
+    videoControl(id, what, value) {
+      const v = this.videos.get(id);
+      if (!v) return;
+      const el = v.el;
+      switch (what) {
+        case 0: {
+          if (v.state === 3) {
+            v.state = 1;
+            el.currentTime = 0;
+          }
+          // A browser that does not let a page play sound before the user
+          // interacted with it rejects the promise: the video plays muted.
+          const p = el.play();
+          if (p && typeof p.catch === "function")
+            p.catch(() => {
+              if (this.videos.get(id) === v && !el.muted) {
+                el.muted = true;
+                const again = el.play();
+                if (again && typeof again.catch === "function") again.catch(() => {});
+              }
+            });
+          break;
+        }
+        case 1:
+          el.pause();
+          break;
+        case 2:
+          if (v.state === 3) v.state = 1;
+          el.currentTime = value;
+          break;
+        case 3:
+          el.loop = value !== 0;
+          break;
+        case 4:
+          el.defaultPlaybackRate = value;
+          el.playbackRate = value;
+          break;
+        case 5:
+          el.volume = Math.min(Math.max(value, 0), 1);
+          break;
+        case 6:
+          el.muted = value !== 0;
+          break;
+      }
+    }
+    // The picture drawn into a canvas of its own, for the software
+    // renderer, as BGRA rows: opaque, so premultiplied as it is.
+    videoRead(id, pixels, stride, width, height) {
+      const v = this.videos.get(id);
+      if (!v || width <= 0 || height <= 0 || v.el.readyState < 2) return 0;
+      if (!v.canvas) v.canvas = document.createElement("canvas");
+      v.canvas.width = width;
+      v.canvas.height = height;
+      const ctx = v.canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return 0;
+      let data;
+      try {
+        ctx.drawImage(v.el, 0, 0, width, height);
+        data = ctx.getImageData(0, 0, width, height).data;
+      } catch (err) {
+        return 0;
+      }
+      const out = new Uint8Array(this.memory.buffer, pixels, stride * (height - 1) + width * 4);
+      for (let y = 0; y < height; y++)
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4,
+            o = y * stride + x * 4;
+          out[o] = data[i + 2];
+          out[o + 1] = data[i + 1];
+          out[o + 2] = data[i];
+          out[o + 3] = 255;
+        }
+      return 1;
+    }
+    videoClose(id) {
+      const v = this.videos && this.videos.get(id);
+      if (!v) return;
+      this.videos.delete(id);
+      for (const undo of v.undo) undo();
+      if (v.frames && v.frameRequest) v.el.cancelVideoFrameCallback(v.frameRequest);
+      v.el.pause();
+      v.el.removeAttribute("src");
+      v.el.load();
+      if (v.blob) URL.revokeObjectURL(v.blob);
+    }
+
     audioOpen(engine, rate, aheadMs, audible) {
       const AC = global.AudioContext || global.webkitAudioContext;
       if (!AC) return;
