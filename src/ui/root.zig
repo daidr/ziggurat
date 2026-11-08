@@ -141,6 +141,8 @@ pub const canvas = @import("canvas.zig");
 pub const cache = @import("cache.zig");
 pub const Cache = cache.Cache;
 pub const PixelImage = @import("pixel_image.zig").PixelImage;
+pub const VideoImage = @import("video_image.zig").VideoImage;
+pub const video_image = @import("video_image.zig");
 pub const frame_stats = @import("frame_stats.zig");
 pub const FrameStats = frame_stats.Stats;
 pub const Canvas = canvas.Canvas;
@@ -2388,10 +2390,40 @@ pub const Context = struct {
         if (self.painting) return error.Busy;
         try view.validate();
         self.cancelGpuWait();
-        if (dynamic) try self.renderer.uploadDynamicImage(view) else try self.renderer.uploadImage(view);
-        if (!self.live(window)) return error.Closed;
+        // A frame of video reaches the software renderer only as it draws
+        // it (prepareVideo), converted then.
+        if (view.video == null) {
+            if (dynamic) try self.renderer.uploadDynamicImage(view) else try self.renderer.uploadImage(view);
+            if (!self.live(window)) return error.Closed;
+        }
         if (build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi) {
+            try self.gpuVideoReady(view);
             if (dynamic) try self.gpu_renderer.uploadDynamicImage(view) else try self.gpu_renderer.uploadImage(view);
+        }
+    }
+    /// A GPU renderer that does not sample frames of video where they are
+    /// takes them converted.
+    fn gpuVideoReady(self: *Context, view: drawing.ImageView) !void {
+        _ = self;
+        const source = view.video orelse return;
+        if (comptime build_options.gpu and @hasDecl(GpuRenderer, "samples_video")) return;
+        if (!source.ensure(view)) return error.ImageUploadFailed;
+    }
+    /// Converts the frames of video this frame draws that the software
+    /// renderer does not hold yet, and gives them to it, before it draws.
+    fn prepareVideo(self: *Context) void {
+        for (self.command_buffer.imageResources()) |view| {
+            const source = view.video orelse continue;
+            if (source.software == view.identity) continue;
+            if (!source.ensure(view)) continue;
+            if (source.software != 0) {
+                self.renderer.updateImage(source.software, view) catch {
+                    _ = self.renderer.releaseImage(source.software) catch {};
+                    source.software = 0;
+                    self.renderer.uploadDynamicImage(view) catch continue;
+                };
+            } else self.renderer.uploadDynamicImage(view) catch continue;
+            source.software = view.identity;
         }
     }
     /// Commit one immutable version to previously reserved same-shape storage.
@@ -2403,9 +2435,14 @@ pub const Context = struct {
         if (self.painting) return error.Busy;
         try view.validate();
         self.cancelGpuWait();
-        try self.renderer.updateImage(old_identity, view);
-        if (!self.live(window)) return error.Closed;
-        if (build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi) try self.gpu_renderer.updateImage(old_identity, view);
+        if (view.video == null) {
+            try self.renderer.updateImage(old_identity, view);
+            if (!self.live(window)) return error.Closed;
+        }
+        if (build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi) {
+            try self.gpuVideoReady(view);
+            try self.gpu_renderer.updateImage(old_identity, view);
+        }
     }
     /// Releases backend residency pins. A current Frame keeps its own pin.
     pub fn releaseImage(self: *Context, identity: u64) !bool {
@@ -2776,6 +2813,7 @@ pub const Context = struct {
         errdefer self.damage_tracker.invalidate();
         // The plane held the overlay over the glass: draw it whole again.
         if (self.native_glass_len != 0 or self.native_glass_shown) self.damage_tracker.invalidate();
+        self.prepareVideo();
         try self.renderer.begin(paint);
         errdefer self.renderer.abort();
         try self.renderer.residentFrame(&self.command_buffer);
@@ -5260,6 +5298,7 @@ test {
     _ = canvas;
     _ = cache;
     _ = @import("pixel_image.zig");
+    _ = @import("video_image.zig");
     _ = frame_stats;
     _ = input;
     _ = layout;

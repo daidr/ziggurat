@@ -169,7 +169,9 @@ pub const Harness = struct {
     fn run(self: *Harness, event: ?Event) anyerror!void {
         self.view.now = self.clock;
         self.view.focus = self.focusId();
+        self.view.beginMedia();
         try self.build.run(&self.view, self.config.options.root, event);
+        self.view.endMedia();
     }
     fn focusId(self: *const Harness) ?u64 {
         if (self.input) |context| return context.input_state.focused;

@@ -89,6 +89,9 @@ extern fn zmtl_prepare_coverage(*anyopaque, *const drawing.NativeCoverage) c_int
 extern fn zmtl_commit_image(*anyopaque, u32) void;
 extern fn zmtl_release_image(*anyopaque, u32) void;
 extern fn zmtl_update_image(*anyopaque, u32, [*]const drawing.ImageLevel, u32) c_int;
+extern fn zmtl_takes_video(*const drawing.VideoPicture) c_int;
+extern fn zmtl_prepare_video(*anyopaque, *const drawing.VideoPicture) c_int;
+extern fn zmtl_update_video(*anyopaque, u32, *const drawing.VideoPicture) c_int;
 extern fn zmtl_coverage(*anyopaque, u32, f32, f32, u32) c_int;
 extern fn zmtl_image(*anyopaque, u32, *const drawing.ImagePlan) c_int;
 extern fn zmtl_end(*anyopaque) c_int;
@@ -1146,11 +1149,26 @@ pub const Renderer = struct {
         errdefer view.lease.releaseResidency();
         self.images.stats.peak_reserved_bytes = @max(self.images.stats.peak_reserved_bytes, self.images.stats.pixel_bytes + charge);
         self.images.reserveCandidate(charge);
-        if (zmtl_prepare_image(native, view.levels.ptr, @intCast(view.levels.len)) != 0) return error.ImageUploadFailed;
+        if (try self.videoPicture(view)) |picture| {
+            if (zmtl_prepare_video(native, picture) != 0) return error.ImageUploadFailed;
+        } else if (zmtl_prepare_image(native, view.levels.ptr, @intCast(view.levels.len)) != 0) return error.ImageUploadFailed;
         while (self.images.needsEviction(charge)) self.dropImage(self.images.victim() orelse break, true);
         const slot = self.images.empty().?;
         zmtl_commit_image(native, @intCast(slot));
         self.images.commitCharged(slot, view, dynamic, charge);
+    }
+    /// Frames of video are sampled where their decoder left them
+    /// (`drawing.VideoPicture`): a CVPixelBuffer wrapped as textures, or
+    /// NV12 planes, which the shader converts.
+    pub const samples_video = true;
+    /// The picture of a frame of video Metal samples where it is, or null
+    /// for an image, or for a picture it takes converted into the view's
+    /// levels.
+    fn videoPicture(_: *Renderer, view: drawing.ImageView) !?*const drawing.VideoPicture {
+        const source = view.video orelse return null;
+        if (zmtl_takes_video(&source.picture) != 0) return &source.picture;
+        if (!source.ensure(view)) return error.ImageUploadFailed;
+        return null;
     }
     pub fn updateImage(self: *Renderer, old_identity: u64, view: drawing.ImageView) !void {
         if (self.active) return error.AlreadyDrawing;
@@ -1162,7 +1180,12 @@ pub const Renderer = struct {
         if (self.images.entries[slot].?.view.identity == view.identity) return;
         try view.lease.acquireResidency();
         errdefer view.lease.releaseResidency();
-        if (zmtl_update_image(native, @intCast(slot), view.levels.ptr, @intCast(view.levels.len)) != 0) return error.ImageUpdateFailed;
+        if (try self.videoPicture(view)) |picture| {
+            if (zmtl_update_video(native, @intCast(slot), picture) != 0) {
+                self.dropImage(slot, false);
+                return error.ImageNotUploaded;
+            }
+        } else if (zmtl_update_image(native, @intCast(slot), view.levels.ptr, @intCast(view.levels.len)) != 0) return error.ImageUpdateFailed;
         self.images.replace(slot, view);
     }
     fn dropImage(self: *Renderer, slot: usize, eviction: bool) void {

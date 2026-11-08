@@ -61,7 +61,9 @@ typedef long GLintptr;
 #define GL_CLAMP_TO_EDGE 0x812F
 #define GL_TEXTURE_BASE_LEVEL 0x813C
 #define GL_TEXTURE_MAX_LEVEL 0x813D
+#define GL_RG 0x8227
 #define GL_R8 0x8229
+#define GL_RG8 0x822B
 #define GL_R32F 0x822E
 #define GL_TEXTURE0 0x84C0
 #define GL_TEXTURE1 0x84C1
@@ -86,6 +88,10 @@ typedef long GLintptr;
 #define GL_INVALID_INDEX 0xFFFFFFFFu
 
 #define ZGL(name) __attribute__((import_module("ziggurat"),import_name(#name)))
+/* Uploads the picture video element `element` shows into the bound
+   texture, GPU to GPU, reallocating it at the picture's size; 0 when the
+   element has no picture yet. */
+ZGL(zw_video_upload) int zw_video_upload(uint32_t element);
 ZGL(glActiveTexture) void glActiveTexture(GLenum texture);
 ZGL(glAttachShader) void glAttachShader(GLuint program,GLuint shader);
 ZGL(glBindBuffer) void glBindBuffer(GLenum target,GLuint buffer);

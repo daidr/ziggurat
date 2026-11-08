@@ -462,34 +462,71 @@ try v.image(photo.view(), .{ .fit = .cover, .alt = "封面" }, .{ .width = 120, 
 
 ### 视频
 
-`ziggurat_view_video` 播放动画：`Player` 播放 `Decoder` 给出的帧，`player.show(v, options, style)` 像 `image` 显示位图那样布局、填充并命名当前帧（`ImageOptions` 的 `fit`、`alt` 与 `decorative` 照常生效，自然尺寸是帧的像素数作为 DIP）。
+`ziggurat_view_video` 的 `Player` 播放视频，`player.show(v, options, style)` 像 `image` 显示位图那样布局、填充并命名当前画面（`ImageOptions` 的 `fit`、`alt` 与 `decorative` 照常生效，自然尺寸是画面的像素数作为 DIP）。播放器有两种来源：
+
+- `ziggurat_video` 用系统自己的媒体框架打开视频文件和流：macOS 的 AVFoundation、Linux 的 GStreamer、浏览器的 video 元素。系统在能用硬件时用硬件解码，并同步播放声音；画面留在解码器放下的地方交给窗口的渲染器（见下文）。MP4/MOV 里的 H.264 与 AAC 在各处都能播放，HEVC、VP9、AV1 取决于系统是否有解码器，HLS 流在 macOS 与浏览器上可用。
+- 应用内的解码器：`GifDecoder` 与 `ApngDecoder` 在所有系统上播放动画 GIF 与 PNG，没有声音，适合任何时候都不应依赖系统的背景；自己的 `Decoder` 播放其他格式。
 
 ```zig
 const video = @import("ziggurat_view_video");
+const system_video = @import("ziggurat_video");
+
+const trailer_mp4 = @embedFile("trailer.mp4");
+// 或 system_video.open(allocator, &host, path)、openUrl(allocator, &host, url)
+var trailer = try system_video.openData(allocator, &host, trailer_mp4);
+// 在 Context 分离之前、绘制之外：
+defer trailer.deinit();
 
 var decoder = try video.GifDecoder.init(allocator, waves_gif);
 defer decoder.deinit();
 var waves = try video.Player.init(allocator, &host, decoder.decoder());
 waves.setLoop(true);
-// 在 Context 分离之前、绘制之外：
+waves.setMuted(true);
 defer waves.deinit();
 
 // 构建中：
 try waves.show(v, .{ .fit = .cover, .alt = "海浪" }, .{ .grow = 1, .self_align = .stretch });
-if (try v.button(if (waves.playing()) "暂停" else "播放", .{})) {
-    if (waves.playing()) waves.pause() else waves.play();
+try trailer.show(v, .{ .fit = .contain, .alt = "预告片" }, .{ .grow = 1, .self_align = .stretch });
+if (try v.button(if (trailer.playing()) "暂停" else "播放", .{})) {
+    if (trailer.playing()) trailer.pause() else trailer.play();
+}
+var at = @as(f64, @floatFromInt(trailer.position())) / std.time.ns_per_s;
+const length = @as(f64, @floatFromInt(trailer.duration())) / std.time.ns_per_s;
+if (try v.slider(&at, .{ .minimum = 0, .maximum = @max(length, 0.001), .step = 0.1 }, .{ .name = "进度" })) {
+    trailer.seek(@intFromFloat(at * std.time.ns_per_s));
 }
 ```
 
-- `Player.init` 立即解码第一帧，没有帧的视频返回 `error.EmptyVideo`。播放器只创建一次（不要在构建中创建），保持地址稳定，同一时间只在一处显示。新播放器在第一次显示时开始播放。`pause` 停在当前帧，`play` 从停下处继续；视频结束或某帧解码失败后，`play` 从头再播。`playing()` 说明是否在播放，`setLoop(true)` 让视频每次结束时无间隔地从头再播。结束的视频停在最后一帧；`failure` 记录在结尾之前让它停下的错误，`last_error` 记录上传或投递失败。视频没有声音。
-- 一切都在主线程上进行，不开隐藏线程：播放中的视频在构建时用 `wakeAt` 请求当前帧结束时的下一遍；发现帧已到期的那一遍投递一个任务，在绘制之后把下一帧解码进播放器的 `ui.PixelImage`、提交并重绘。窗口有一段时间没有绘制时，期间到期的帧会被解码后跳过，只显示最后一帧，视频跟着时钟走而不是越落越远（一次最多跳 `max_skipped` 帧）。
-- 视频只在视图构建它时前进：离开视图（例如切到别的标签页），或窗口停止绘制超过 `resume_gap`（250 ms）后再回来，视频从停下处继续，期间什么也不解码。系统要求减弱动态（`Preferences.reduce_motion`）时，视频显示第一帧且不请求任何帧；不再要求时从停下处继续。
-- `GifDecoder` 解码动画 GIF：每帧画在前面各帧留下的画面之上，并按帧的处置方式（保留、清为透明背景、恢复为绘制前）处理，与浏览器一致；10 ms 及以下的帧显示 100 ms。循环与否只看 `setLoop`，不看 GIF 自带的循环次数。
-- `ApngDecoder` 解码动画 PNG：每帧按处置方式（保留、清为透明、恢复为绘制前的画面）和混合方式（替换、叠加）画在前面各帧留下的画面上，与浏览器一致；10 ms 及以下的帧显示 100 ms，不是动画的 PNG 是只有一帧的视频。每一帧保持压缩，播放到它时才解码；`duration()` 给出动画总长。循环与否只看 `setLoop`，不看 PNG 自带的播放次数。解码在 `ziggurat_apng` 模块（`src/images/apng.zig`），PNG 本身由 `ziggurat_png` 解码，终端的 Kitty 图片也用它。
-- 其他格式实现自己的 `Decoder`：`next(context, pixels)` 把下一帧以预乘 BGRA、自上而下的行写入 `width * height * 4` 字节并返回显示时长（纳秒，0 表示 100 ms），最后一帧之后返回 null；`rewind(context)` 回到第一帧之前。系统编解码器（H.264、HEVC、VP9、AV1）的解码器暂未提供。
+播放器：
+
+- 播放器只创建一次（不要在构建中创建），保持地址稳定，同一时间只在一处显示。新播放器在第一次显示时开始播放。`pause` 停在当前画面，`play` 从停下处继续；播完后 `play` 从头再播。`playing()` 说明是否在播放，`ended()` 说明是否播到了结尾（停在最后一帧），`setLoop(true)` 让视频每次结束时无间隔地从头再播。`seek(ns)` 显示该时刻的画面并从那里继续（暂停时保持暂停）；`position()` 与 `duration()` 给出播放位置和长度（直播流为 0）。`setRate` 加快或放慢播放，声音保持音高；`setVolume` 与 `setMuted` 设置声音。`err()` 给出在结尾之前让视频停下的错误（文件无法解码、流中断），`last_error` 记录上传或投递失败。`close()` 停止播放和声音，视频停在当时的画面。播放器的方法都在主线程上调用。
+- `Player.init` 立即解码 GIF 等解码器的第一帧，没有帧的视频返回 `error.EmptyVideo`。系统的视频立即打开、在后台加载：第一张画面到来之前 `ready()` 为 false、尺寸为 0×0；流等待数据时 `buffering()` 为 true，供视图显示加载指示。这些状态每次变化都会绘制一帧窗口，视图不需要轮询。
+- 解码器的视频完全在主线程上进行：播放中的视频在构建时用 `wakeAt` 请求当前帧结束时的下一遍；发现帧已到期的那一遍投递一个任务，在绘制之后把下一帧解码进播放器的 `ui.PixelImage`、提交并重绘。窗口有一段时间没有绘制时，期间到期的帧会被解码后跳过，只显示最后一帧，视频跟着时钟走而不是越落越远（一次最多跳 `max_skipped` 帧）。解码器的 `seek` 从头解码到该帧。
+- 系统的视频按它的声音所用的时钟走：每次构建窗口的一帧，播放器在绘制之后向引擎取该帧显示时到期的画面；画面到来时（GStreamer 的 appsink、浏览器的 `requestVideoFrameCallback`）或按视频的帧率（AVFoundation）再绘制下一帧：120 Hz 屏幕上的 24 fps 视频每秒只绘制 24 帧。
+- 静音的视频是一幅画面，就像背景：它只在视图构建它且窗口有部分可见时前进；离开视图（例如切到别的标签页）或窗口被隐藏后，它停下，回来时从停下处继续，期间什么也不解码。系统要求减弱动态（`Preferences.reduce_motion`）时，它静止不动（解码器的显示第一帧）。有声音的视频在看不见时继续播放（如同浏览器标签页），减弱动态时也照常播放，因为是用户要求播放的；解码器的视频没有声音，总是前一种。
 - 视频与图片一样默认是装饰性的；有 `alt` 时对可访问性客户端是名为它的 Image。
 
-示例 `zig build run-video` 循环播放一段 GIF，带暂停/播放按钮与循环开关（GIF 由 `scripts/make-waves-gif.py` 生成）。
+解码器：
+
+- `GifDecoder` 解码动画 GIF：每帧画在前面各帧留下的画面之上，并按帧的处置方式（保留、清为透明背景、恢复为绘制前）处理，与浏览器一致；10 ms 及以下的帧显示 100 ms。循环与否只看 `setLoop`，不看 GIF 自带的循环次数。
+- `ApngDecoder` 解码动画 PNG：每帧按处置方式（保留、清为透明、恢复为绘制前的画面）和混合方式（替换、叠加）画在前面各帧留下的画面上，与浏览器一致；10 ms 及以下的帧显示 100 ms，不是动画的 PNG 是只有一帧的视频。每一帧保持压缩，播放到它时才解码；`duration()` 给出动画总长。循环与否只看 `setLoop`，不看 PNG 自带的播放次数。解码在 `ziggurat_apng` 模块（`src/images/apng.zig`），PNG 本身由 `ziggurat_png` 解码，终端的 Kitty 图片也用它。
+- 其他格式实现自己的 `Decoder`：`next(context, pixels)` 把下一帧以预乘 BGRA、自上而下的行写入 `width * height * 4` 字节并返回显示时长（纳秒，0 表示 100 ms），最后一帧之后返回 null；`rewind(context)` 回到第一帧之前；可选的 `duration` 给出总长，`duration()` 由它报告（GIF 与 APNG 的有）。
+
+系统视频（`ziggurat_video`）：
+
+| 系统 | 框架 | 画面交给渲染器的形式 |
+| --- | --- | --- |
+| macOS | AVFoundation（`AVPlayer` 与 `AVPlayerItemVideoOutput`），用 VideoToolbox 解码 | IOSurface 支持的 NV12 `CVPixelBuffer`，Metal 用 `CVMetalTextureCache` 包成纹理，不复制 |
+| Linux | GStreamer 1.x（`playbin` 与 `appsink`），装有 VA-API 时用它解码；首次打开视频时 dlopen | NV12 平面，每像素 1.5 字节，OpenGL 原样上传为 R8 与 RG8 纹理，由着色器转换 |
+| 浏览器 | video 元素 | 元素本身，WebGL 从它 GPU 到 GPU 上传 |
+
+- `open` 打开文件（浏览器里是相对页面的 URL），`openUrl` 打开 `file:`、`http:`、`https:` URL 或 HLS 播放列表，`openData` 打开内存中的字节（例如嵌入的文件）而不写入文件：macOS 经 `AVAssetResourceLoader` 从内存应答，Linux 经 memfd，浏览器经 Blob URL。字节在播放器关闭之前保持不变。
+- `error.Unsupported` 表示系统没有能播放视频的框架，例如没有 GStreamer 及其 base 插件的 Linux，应用可以改为显示 GIF。能播放什么格式由系统决定。Linux 需要 `gstreamer1.0-plugins-base`，以及 `gstreamer1.0-libav`（或其他 H.264 解码器）才能播放 H.264；缺少解码器表现为 `err()`。
+- 软件渲染器在绘制前把画面转换为 BGRA（macOS 锁定 `CVPixelBuffer` 读取平面，浏览器经 canvas 读回）；OpenGL、Metal 与 WebGL 直接采样画面，按 BT.601/709/2020 矩阵与有限/全范围转换。没有应用导入 `ziggurat_video` 时不会链接其中任何部分。Windows（Media Foundation）暂未提供。
+- 浏览器不允许页面在用户交互之前播放声音时，视频改为静音播放。
+- 测试用的片段 `test_clip`（1.2 s 红、绿、蓝）与示例的预告片由 `scripts/make-video-clips.sh` 用 ffmpeg 生成，H.264 不含 B 帧，因此没有编辑列表推迟画面时间。`zig build test-video` 用系统引擎在内存与文件两种来源上检查播放顺序、结尾与暂停时的跳转；`zig build smoke-video` 在真实窗口中检查软件渲染以及 `-Dgpu=true` 时 OpenGL 或 Metal 绘制的颜色。
+
+示例 `zig build run-video` 在窗口上方循环播放一段 GIF（由 `scripts/make-waves-gif.py` 生成），“Watch the trailer”在它的位置播放带声音的预告片，带播放/暂停、进度条、静音与关闭。
 
 ### 从右到左布局
 
@@ -867,4 +904,4 @@ inspector 在视图之后绘制在同一帧上，并先于视图接收落在面�
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、浮层与弹出字段、对话框、警告对话框与表单页、侧边栏、可编辑文本、查找栏、三态复选框与复选框组、按键绑定、路由与历史按钮、图片、SVG 与图标、视频（通过 `ziggurat_view_video`，有 GIF 与 APNG 解码器）、从右到左布局、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子（通过 `ziggurat_view_text`）可编辑文本字段，以及（通过 `ziggurat_view_pickers`）日历、日期/时间/数字输入与颜色选择器。分栏只接受比例偏好，没有 DIP 偏好和折叠，从右到左时也不镜像；从右到左时基础控件内部（复选框标记的位置、滑块的填充方向、树的缩进与三角）不镜像；路由没有页面过渡动画、历史菜单和转义解码，页面状态由应用持有；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有行内编辑；树不能拖动重排，重排一次只移动一项，拖动边缘的自动滚动只随指针移动发生；内置控件本身没有悬停外观（自绘控件可用指针区域的 `hovered`）；通知没有进出动画；对话框没有进出动画，一次只显示一个，也不能拖动或改变大小；可编辑文本单击即开始编辑；查找栏不自己搜索，也不高亮匹配；侧边栏的选中行在失去焦点时外观不变。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。
+已提供列、行、网格、纵向滚动容器、浮层与弹出字段、对话框、警告对话框与表单页、侧边栏、可编辑文本、查找栏、三态复选框与复选框组、按键绑定、路由与历史按钮、图片、SVG 与图标、视频（通过 `ziggurat_view_video` 的 GIF 与 APNG 解码器，或 `ziggurat_video` 的系统媒体框架）、从右到左布局、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子（通过 `ziggurat_view_text`）可编辑文本字段，以及（通过 `ziggurat_view_pickers`）日历、日期/时间/数字输入与颜色选择器。分栏只接受比例偏好，没有 DIP 偏好和折叠，从右到左时也不镜像；从右到左时基础控件内部（复选框标记的位置、滑块的填充方向、树的缩进与三角）不镜像；路由没有页面过渡动画、历史菜单和转义解码，页面状态由应用持有；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有行内编辑；树不能拖动重排，重排一次只移动一项，拖动边缘的自动滚动只随指针移动发生；内置控件本身没有悬停外观（自绘控件可用指针区域的 `hovered`）；通知没有进出动画；对话框没有进出动画，一次只显示一个，也不能拖动或改变大小；可编辑文本单击即开始编辑；查找栏不自己搜索，也不高亮匹配；侧边栏的选中行在失去焦点时外观不变。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。

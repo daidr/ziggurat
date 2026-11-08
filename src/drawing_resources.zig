@@ -166,6 +166,10 @@ pub const ImageView = struct {
     lease: *Lease,
     identity: u64,
     levels: []const ImageLevel,
+    /// A frame of video where its decoder left it (`VideoSource`): the
+    /// levels are the BGRA buffer the software renderer converts it into
+    /// when it draws it, which they read only after `VideoSource.ensure`.
+    video: ?*VideoSource = null,
     pub fn validate(self: ImageView) !void {
         try self.lease.checkOwner();
         if (self.identity == 0 or self.levels.len == 0 or self.levels.len > max_image_levels) return error.InvalidImageResource;
@@ -187,6 +191,99 @@ pub const ImageView = struct {
         var bytes: usize = 0;
         for (self.levels) |level| bytes += level.byte_len;
         return bytes;
+    }
+};
+
+/// How a `VideoPicture`'s pixels are laid out.
+pub const VideoFormat = enum(u32) {
+    /// 8-bit YCbCr 4:2:0: a plane of luma, a byte a pixel, then a plane of
+    /// chroma half as wide and high (rounded up), Cb and Cr a byte each.
+    nv12 = 0,
+    /// One plane of premultiplied (or opaque) blue, green, red and alpha.
+    bgra = 1,
+};
+/// How a picture's YCbCr converts to RGB: the coefficients of a standard
+/// and whether the samples take the full range or the limited (video)
+/// range, 16 to 235 for luma and 16 to 240 for chroma. The renderers'
+/// shaders take it as a number: 0 to 2 for BT.601, BT.709 and BT.2020,
+/// plus 3 for the full range.
+pub const VideoMatrix = enum(u32) {
+    bt601 = 0,
+    bt709 = 1,
+    bt2020 = 2,
+    bt601_full = 3,
+    bt709_full = 4,
+    bt2020_full = 5,
+
+    pub fn of(standard: u32, full: bool) VideoMatrix {
+        return @fromBackingInt(@intCast(@min(standard, 2) + @as(u32, if (full) 3 else 0)));
+    }
+    /// The matrix players guess for a video that does not say: BT.709 from
+    /// 720 rows, BT.601 below.
+    pub fn guess(height: u32, full: bool) VideoMatrix {
+        return of(if (height >= 720) 1 else 0, full);
+    }
+};
+/// A frame of video where a system decoder left it, which renderers sample
+/// where it is rather than take as BGRA: planes in memory, uploaded as they
+/// are and converted in the shader, or a native picture on the GPU.
+pub const VideoPicture = extern struct {
+    width: u32,
+    height: u32,
+    format: VideoFormat = .nv12,
+    matrix: VideoMatrix = .bt709,
+    /// The luma and chroma planes of NV12, or BGRA's one; null for a
+    /// picture only on the GPU, as `native` has it.
+    planes: [2]?[*]const u8 = .{ null, null },
+    strides: [2]u32 = .{ 0, 0 },
+    /// The picture on the GPU as the platform's renderer takes it: a
+    /// CVPixelBufferRef on macOS, which Metal wraps as textures without a
+    /// copy. The producer keeps it valid until it gives the next picture.
+    native: ?*anyopaque = null,
+    /// In browsers, the number of the video element playing it, which
+    /// WebGL uploads from, GPU to GPU; 0 for none.
+    element: u32 = 0,
+    reserved: u32 = 0,
+    /// Writes the picture as premultiplied BGRA rows into `pixels` when
+    /// its planes are not in memory (a native picture or an element);
+    /// false when it could not. Called on the main thread.
+    read: ?*const fn (context: ?*anyopaque, picture: *const VideoPicture, pixels: [*]u8, stride: u32) callconv(.c) bool = null,
+    read_context: ?*anyopaque = null,
+
+    pub fn chromaWidth(self: VideoPicture) u32 {
+        return (self.width + 1) / 2;
+    }
+    pub fn chromaHeight(self: VideoPicture) u32 {
+        return (self.height + 1) / 2;
+    }
+    pub fn validate(self: VideoPicture) !void {
+        if (self.width == 0 or self.height == 0 or self.width > 16384 or self.height > 16384 or @as(u64, self.width) * self.height > 16 * 1024 * 1024) return error.InvalidImageResource;
+        if (self.planes[0] == null) {
+            if (self.native == null and self.element == 0 and self.read == null) return error.InvalidImageResource;
+            return;
+        }
+        switch (self.format) {
+            .nv12 => if (self.planes[1] == null or self.strides[0] < self.width or self.strides[1] < 2 * self.chromaWidth()) return error.InvalidImageResource,
+            .bgra => if (self.strides[0] < @as(u64, self.width) * 4) return error.InvalidImageResource,
+        }
+    }
+};
+/// What an `ImageView` of a frame of video points at: the picture, and the
+/// conversion into the view's BGRA levels the software renderer draws.
+pub const VideoSource = struct {
+    picture: VideoPicture,
+    /// The identity the levels hold converted, or 0.
+    converted: u64 = 0,
+    /// The identity the software renderer holds, or 0.
+    software: u64 = 0,
+    convert: *const fn (source: *VideoSource, view: ImageView) bool,
+
+    /// Converts the picture into the view's levels unless they hold it.
+    pub fn ensure(self: *VideoSource, view: ImageView) bool {
+        if (self.converted == view.identity) return true;
+        if (!self.convert(self, view)) return false;
+        self.converted = view.identity;
+        return true;
     }
 };
 

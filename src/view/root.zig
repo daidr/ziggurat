@@ -2184,6 +2184,12 @@ pub const View = struct {
     window_hidden: bool = false,
     /// A build asked `windowHidden`, so the host builds again as it changes.
     hidden_asked: bool = false,
+    /// What plays and was shown by this pass and the one before it
+    /// (`showsMedia`): what the pass did not show again is told so.
+    media: [max_media]Media = undefined,
+    media_len: u8 = 0,
+    media_before: [max_media]Media = undefined,
+    media_before_len: u8 = 0,
     /// Hover or focus time before a tooltip appears, in nanoseconds; see
     /// `Options.tooltip_delay`.
     tooltip_delay: u64 = 600 * std.time.ns_per_ms,
@@ -5430,6 +5436,49 @@ pub const View = struct {
     pub fn windowHidden(self: *View) bool {
         self.hidden_asked = true;
         return self.window_hidden;
+    }
+
+    /// Something that plays as the view shows it, such as a video with sound
+    /// that a player holds while it is out of the view (`showsMedia`).
+    pub const Media = struct {
+        context: *anyopaque,
+        /// Called after a pass that did not show it, which the pass
+        /// before did, on the main thread.
+        unseen: *const fn (context: *anyopaque) void,
+    };
+    pub const max_media = 16;
+    /// Note that this pass shows `media`: after the first pass that does
+    /// not, its `unseen` is called. A view shows at most `max_media`.
+    pub fn showsMedia(self: *View, media: Media) void {
+        for (self.media[0..self.media_len]) |known| if (known.context == media.context) return;
+        if (self.media_len == max_media) return;
+        self.media[self.media_len] = media;
+        self.media_len += 1;
+    }
+    /// Forget `context`, which goes, as a player that closes.
+    pub fn forgetMedia(self: *View, context: *anyopaque) void {
+        inline for (.{ .{ &self.media, &self.media_len }, .{ &self.media_before, &self.media_before_len } }) |list| {
+            var kept: u8 = 0;
+            for (list[0][0..list[1].*]) |media| if (media.context != context) {
+                list[0][kept] = media;
+                kept += 1;
+            };
+            list[1].* = kept;
+        }
+    }
+    /// Before a pass builds: what the last one showed.
+    pub fn beginMedia(self: *View) void {
+        @memcpy(self.media_before[0..self.media_len], self.media[0..self.media_len]);
+        self.media_before_len = self.media_len;
+        self.media_len = 0;
+    }
+    /// After a pass built: tell what it no longer shows.
+    pub fn endMedia(self: *View) void {
+        outer: for (self.media_before[0..self.media_before_len]) |before| {
+            for (self.media[0..self.media_len]) |now| if (now.context == before.context) continue :outer;
+            before.unseen(before.context);
+        }
+        self.media_before_len = 0;
     }
 
     /// Add a self-describing leaf; see `Embed`.
@@ -8708,7 +8757,9 @@ pub const Host = struct {
             if (self.options.tools()) |tools| tools.refresh_hz = if (rate > 0) rate else 60;
         }
         self.view.focus = self.context.input_state.focused;
+        self.view.beginMedia();
         try self.build.run(&self.view, self.options.root, event);
+        self.view.endMedia();
     }
 
     fn deliver(self: *Host, event: Event) void {
