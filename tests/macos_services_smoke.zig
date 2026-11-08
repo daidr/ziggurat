@@ -64,6 +64,25 @@ fn checkPower() !void {
     running.release();
 }
 
+/// The language the app chose is kept as the app's own AppleLanguages, read
+/// back by the next launch's Choice, and forgotten again.
+fn checkLocale() !void {
+    var buffer: [32]u8 = undefined;
+    {
+        var choice = try system.locale.Choice.init(.{ .environment = .none });
+        choice.start();
+        try choice.set("de_CH");
+    }
+    {
+        var next = try system.locale.Choice.init(.{ .environment = .none });
+        try std.testing.expectEqualStrings("de-CH", next.chosenTag(&buffer));
+        next.start();
+        try next.set("");
+    }
+    var last = try system.locale.Choice.init(.{ .environment = .none });
+    try std.testing.expectEqualStrings("", last.chosenTag(&buffer));
+}
+
 fn checkDirectories() !void {
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const home = zio.getenv("HOME").?;
@@ -218,6 +237,7 @@ pub fn main() !void {
 
     try checkSecrets();
     try checkPower();
+    try checkLocale();
     try checkDirectories();
     // Shell workers refuse the UI thread.
     var shell_result: anyerror!void = {};

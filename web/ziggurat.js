@@ -1076,6 +1076,22 @@ body>.ziggurat-window{position:fixed}
             () => settle(false),
           );
         },
+        // The language the app chose, kept in the page's localStorage.
+        zw_locale_saved: (ptr, capacity) => {
+          let tag = null;
+          try { tag = localStorage.getItem("ziggurat:locale"); } catch {}
+          if (!tag) return 0;
+          const bytes = encoder.encode(tag);
+          if (bytes.length > capacity) return 0;
+          rt.u8().set(bytes, ptr);
+          return bytes.length;
+        },
+        zw_locale_save: (ptr, len) => {
+          try {
+            if (len === 0) localStorage.removeItem("ziggurat:locale");
+            else localStorage.setItem("ziggurat:locale", rt.string(ptr, len));
+          } catch {}
+        },
         zw_clipboard_read: (ptr, capacity) => {
           if (!rt.clipboardHeld) return -1;
           const bytes = encoder.encode(rt.clipboardText);

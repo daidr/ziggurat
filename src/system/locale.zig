@@ -15,6 +15,32 @@ const builtin = @import("builtin");
 const zio = @import("ziggurat_io");
 const i18n = @import("ziggurat_i18n");
 
+/// Where the system itself keeps the app's choice: macOS's AppleLanguages
+/// of the app's own defaults, a browser's localStorage. Elsewhere the file.
+const system_keeps = builtin.os.tag == .macos or builtin.cpu.arch == .wasm32;
+const native = if (builtin.cpu.arch == .wasm32) struct {
+    extern "ziggurat" fn zw_locale_saved(buffer: [*]u8, capacity: u32) u32;
+    extern "ziggurat" fn zw_locale_save(tag: [*]const u8, len: u32) void;
+    fn saved(buffer: []u8) []const u8 {
+        return buffer[0..zw_locale_saved(buffer.ptr, @intCast(buffer.len))];
+    }
+    fn save(tag: []const u8) void {
+        zw_locale_save(tag.ptr, @intCast(tag.len));
+    }
+} else if (builtin.os.tag == .macos) struct {
+    extern fn zsm_locale_saved(buffer: [*]u8, capacity: usize) usize;
+    extern fn zsm_locale_save(tag: [*:0]const u8) void;
+    fn saved(buffer: []u8) []const u8 {
+        return buffer[0..zsm_locale_saved(buffer.ptr, buffer.len)];
+    }
+    fn save(tag: []const u8) void {
+        var line: [i18n.locale.max_tag_len + 1]u8 = undefined;
+        @memcpy(line[0..tag.len], tag);
+        line[tag.len] = 0;
+        zsm_locale_save(line[0..tag.len :0]);
+    }
+} else struct {};
+
 /// Chooses the language for one run, and keeps nothing, as a development
 /// server's `-lang` does: `ZIGGURAT_LOCALE=de`.
 pub const environment_variable = "ZIGGURAT_LOCALE";
@@ -24,9 +50,10 @@ pub const file_name = "locale";
 pub const max_directory_bytes = 1024;
 
 pub const Options = struct {
-    /// Where the choice is kept for the next launches, such as
-    /// `identity.applicationDirectory(.data, id)`; created when the app
-    /// first chooses. null keeps nothing (browsers, tests).
+    /// Where the choice is kept for the next launches on Linux and Windows,
+    /// such as `identity.applicationDirectory(.data, id)`; created when the
+    /// app first chooses. null keeps nothing. macOS keeps it as the app's
+    /// own AppleLanguages and browsers in localStorage, whatever this is.
     directory: ?[]const u8 = null,
     /// The language chosen for this run, as `ZIGGURAT_LOCALE`: `.process`
     /// reads the variable when the choice is first read.
@@ -146,14 +173,22 @@ pub const Choice = struct {
         return buffer[0 .. directory.len + 1 + file_name.len + suffix.len];
     }
     fn readFile(self: *const Choice) ?i18n.Locale {
-        if (!self.keeps or builtin.cpu.arch == .wasm32) return null;
+        if (system_keeps and !builtin.is_test) {
+            var tag: [64]u8 = undefined;
+            return parseOptional(native.saved(&tag)) catch null;
+        }
+        if (!self.keeps) return null;
         var buffer: [max_directory_bytes + 1 + file_name.len + 4]u8 = undefined;
         var data: [128]u8 = undefined;
         const bytes = std.Io.Dir.cwd().readFile(zio.io(), self.path(&buffer, ""), &data) catch return null;
         return parseOptional(std.mem.trim(u8, bytes, " \t\r\n")) catch null;
     }
     fn save(self: *const Choice) void {
-        if (!self.keeps or builtin.cpu.arch == .wasm32) return;
+        if (system_keeps and !builtin.is_test) {
+            native.save(if (self.override) |locale| locale.tag() else "");
+            return;
+        }
+        if (!self.keeps) return;
         var buffer: [max_directory_bytes + 1 + file_name.len + 4]u8 = undefined;
         const file = self.path(&buffer, "");
         const locale = self.override orelse {

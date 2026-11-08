@@ -129,6 +129,38 @@ void zsm_power_end(void *token) {
     }
 }
 
+/* ---- The language the app chose ----
+   AppleLanguages in the app's own defaults, as System Settings' language of
+   an app writes it: AppKit and WebKit show their own texts in it from the
+   next launch, and NSLocale's preferredLanguages start with it. */
+
+/* The first of the app's own AppleLanguages into buffer, its length, or 0
+   for none. */
+size_t zsm_locale_saved(char *buffer, size_t capacity) {
+    @autoreleasepool {
+        CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+        CFPropertyListRef value = CFPreferencesCopyValue(CFSTR("AppleLanguages"), kCFPreferencesCurrentApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        if (!value) return 0;
+        id list = (__bridge_transfer id)value;
+        if (![list isKindOfClass:[NSArray class]] || [(NSArray *)list count] == 0) return 0;
+        id first = [(NSArray *)list firstObject];
+        if (![first isKindOfClass:[NSString class]]) return 0;
+        const char *text = [(NSString *)first UTF8String];
+        size_t len = text ? strlen(text) : 0;
+        if (len == 0 || len > capacity) return 0;
+        memcpy(buffer, text, len);
+        return len;
+    }
+}
+/* Keeps tag as the app's own AppleLanguages, or forgets them for "". */
+void zsm_locale_save(const char *tag) {
+    @autoreleasepool {
+        NSString *value = tag && tag[0] ? [NSString stringWithUTF8String:tag] : nil;
+        CFPreferencesSetValue(CFSTR("AppleLanguages"), value ? (__bridge CFPropertyListRef)@[value] : NULL, kCFPreferencesCurrentApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        CFPreferencesSynchronize(kCFPreferencesCurrentApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    }
+}
+
 /* ---- Recent documents ----
    NSDocumentController keeps the app's Open Recent list and the system's
    recent items (the Dock menu and Apple menu > Recent Items). It belongs
