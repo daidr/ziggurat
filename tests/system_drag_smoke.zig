@@ -136,6 +136,10 @@ fn windowScale(window: z.Window) !f32 {
     return (try window.contentSize()).scale;
 }
 
+// The other process's file, as a URL and as the local path it names; a
+// path without a drive names no file on Windows.
+const external_url = if (builtin.os.tag == .windows) "file:///C:/drag%20smoke%20&%20more.txt" else "file:///tmp/drag%20smoke%20&%20more.txt";
+const external_path = if (builtin.os.tag == .windows) "C:\\drag smoke & more.txt" else "/tmp/drag smoke & more.txt";
 const Round = enum { copy, move, escape, cancel, no_target, refused, legacy, external };
 const Stage = enum { settle, press, start, travel, over, release, wait_done, next, external, done };
 
@@ -402,7 +406,7 @@ const Smoke = struct {
                 try std.testing.expectEqual(1, self.dropped_items);
                 try std.testing.expectEqualStrings("from another process", self.dropped_text[0..self.dropped_text_len]);
                 try std.testing.expectEqualStrings("{\"note\":2}", self.dropped_note[0..self.dropped_note_len]);
-                try std.testing.expectEqualStrings("/tmp/drag smoke & more.txt", self.dropped_files[0..self.dropped_files_len]);
+                try std.testing.expectEqualStrings(external_path, self.dropped_files[0..self.dropped_files_len]);
                 return self.finish(null);
             },
             .done => {},
@@ -535,7 +539,7 @@ const Other = struct {
     }
     fn detach(_: *anyopaque) void {}
     fn begin(self: *Other) !void {
-        const url = "file:///tmp/drag%20smoke%20&%20more.txt";
+        const url = external_url;
         const items = [_]transfer.Item{.{ .representations = &.{ .fromBytes(transfer.text, "from another process"), .fromBytes(note_format, "{\"note\":2}"), .fromBytes(transfer.file_list, url), .fromBytes(transfer.uri_list, url) } }};
         try self.source.start(self.allocator, self.window, .{ .items = &items }, .{ .context = self, .on_done = done });
     }
