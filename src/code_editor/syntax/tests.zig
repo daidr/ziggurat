@@ -114,7 +114,7 @@ test "dedicated lexers for data, styles, markup, Markdown and diffs" {
     _ = try expectRuns(&languages.diff, "--- a/file", 0, &.{.{ "--- a/file", .meta }});
 }
 
-test "Dart, Scala, R and GraphQL" {
+test "Dart, Scala, R, GraphQL and Nix" {
     var state = try expectRuns(&languages.dart, "final s = r'\\d' + \"a${b}c$d\"; // c", 0, &.{
         .{ "final", .keyword }, .{ "s", .variable }, .{ "=", .operator }, .{ "r'\\d'", .string }, .{ "+", .operator }, .{ "\"a", .string }, .{ "${", .escape }, .{ "b", .variable }, .{ "}", .escape }, .{ "c", .string }, .{ "$d", .variable }, .{ "\"", .string }, .{ ";", .punctuation }, .{ "// c", .comment },
     });
@@ -147,13 +147,35 @@ test "Dart, Scala, R and GraphQL" {
     state = try expectRuns(&languages.graphql, "\"\"\"", state, &.{.{ "\"\"\"", .string }});
     try std.testing.expectEqual(@as(u64, 0), state);
 
+    state = try expectRuns(&languages.nix, "{ pkgs ? import <nixpkgs> {} }: let s = \"a${pkgs.hello-world}\\n\"; # c", 0, &.{
+        .{ "{", .punctuation },  .{ "pkgs", .variable }, .{ "?", .operator },    .{ "import", .function },      .{ "<", .operator },  .{ "nixpkgs", .variable }, .{ ">", .operator },
+        .{ "{}", .punctuation }, .{ "}", .punctuation }, .{ ":", .operator },    .{ "let", .keyword },          .{ "s", .property },  .{ "=", .operator },       .{ "\"a", .string },
+        .{ "${", .escape },      .{ "pkgs", .variable }, .{ ".", .punctuation }, .{ "hello-world", .property }, .{ "}\\n", .escape }, .{ "\"", .string },        .{ ";", .punctuation },
+        .{ "# c", .comment },
+    });
+    try std.testing.expectEqual(@as(u64, 0), state);
+    state = try expectRuns(&languages.nix, "in rec { x = '' echo ${s}", 0, &.{
+        .{ "in", .keyword }, .{ "rec", .keyword }, .{ "{", .punctuation }, .{ "x", .property }, .{ "=", .operator }, .{ "'' echo ", .string }, .{ "${", .escape }, .{ "s", .variable }, .{ "}", .escape },
+    });
+    state = try expectRuns(&languages.nix, "''; y = s // { z = true; }; /* d */ }", state, &.{
+        .{ "''", .string },  .{ ";", .punctuation }, .{ "y", .property },    .{ "=", .operator },    .{ "s", .variable },     .{ "//", .operator },     .{ "{", .punctuation },
+        .{ "z", .property }, .{ "=", .operator },    .{ "true", .constant }, .{ ";", .punctuation }, .{ "};", .punctuation }, .{ "/* d */", .comment }, .{ "}", .punctuation },
+    });
+    try std.testing.expectEqual(@as(u64, 0), state);
+    // The whole of a path before = is the binding's; a.b == c is no binding.
+    _ = try expectRuns(&languages.nix, "inputs.x.\"y\".${s} = a.b == c;", 0, &.{
+        .{ "inputs", .property }, .{ ".", .punctuation }, .{ "x", .property },    .{ ".", .punctuation }, .{ "\"y\"", .string }, .{ ".", .punctuation }, .{ "$", .text },
+        .{ "{", .punctuation },   .{ "s", .variable },    .{ "}", .punctuation }, .{ "=", .operator },    .{ "a", .variable },   .{ ".", .punctuation }, .{ "b", .property },
+        .{ "==", .operator },     .{ "c", .variable },    .{ ";", .punctuation },
+    });
+
     const files = [_]struct { []const u8, *const syntax.Language }{
-        .{ "main.dart", &languages.dart }, .{ "schema.graphql", &languages.graphql }, .{ "q.gql", &languages.graphql },  .{ "plot.r", &languages.r },
-        .{ "plot.R", &languages.r },       .{ "Main.scala", &languages.scala },       .{ "build.sc", &languages.scala }, .{ "a/.Rprofile", &languages.r },
+        .{ "flake.nix", &languages.nix }, .{ "main.dart", &languages.dart },   .{ "schema.graphql", &languages.graphql }, .{ "q.gql", &languages.graphql }, .{ "plot.r", &languages.r },
+        .{ "plot.R", &languages.r },      .{ "Main.scala", &languages.scala }, .{ "build.sc", &languages.scala },         .{ "a/.Rprofile", &languages.r },
     };
     for (files) |file| try std.testing.expectEqual(file[1], syntax.forFile(file[0]).?);
     const names = [_]struct { []const u8, *const syntax.Language }{
-        .{ "dart", &languages.dart }, .{ "GraphQL", &languages.graphql }, .{ "gql", &languages.graphql }, .{ "r", &languages.r }, .{ " R ", &languages.r }, .{ "Scala", &languages.scala }, .{ "sc", &languages.scala },
+        .{ "Nix", &languages.nix }, .{ "dart", &languages.dart }, .{ "GraphQL", &languages.graphql }, .{ "gql", &languages.graphql }, .{ "r", &languages.r }, .{ " R ", &languages.r }, .{ "Scala", &languages.scala }, .{ "sc", &languages.scala },
     };
     for (names) |name| try std.testing.expectEqual(name[1], syntax.named(name[0]).?);
 }

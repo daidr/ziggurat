@@ -113,6 +113,9 @@ pub const Lexer = struct {
     calls: bool = false,
     /// Identifiers and strings before : are properties, as JSON keys.
     keys: bool = false,
+    /// Identifiers before = are properties, and the first of a path before
+    /// it, as Nix's a.b.c = 1.
+    assign_keys: bool = false,
     /// Starts annotations, as @ in Java and Python; 0 for none.
     decorator: u8 = 0,
     /// # at the start of a line is a preprocessor line.
@@ -405,6 +408,7 @@ pub const Lexer = struct {
         while (k < n and (line[k] == ' ' or line[k] == '\t')) k += 1;
         const next: u8 = if (k < n) line[k] else 0;
         if (self.keys and next == ':' and (k + 1 >= n or line[k + 1] != ':')) return .property;
+        if (self.assign_keys and assignAhead(line, k, self.ident_chars)) return .property;
         if (self.calls and (next == '(' or (next == '!' and k + 1 < n and line[k + 1] == '('))) return .function;
         if (st.prev_dot) return .property;
         if (self.capital_types and isUpper(word)) return .type;
@@ -435,6 +439,30 @@ pub const Lexer = struct {
         return null;
     }
 };
+
+/// Whether an assignment starts at `start`, after any rest of a path, as
+/// .b."c".${d}: an = that is no ==.
+fn assignAhead(line: []const u8, start: usize, extra: []const u8) bool {
+    const n = line.len;
+    var i = start;
+    while (i < n and line[i] == '.') {
+        i += 1;
+        if (i < n and line[i] == '"') {
+            i += 1;
+            while (i < n and line[i] != '"') : (i += 1) {
+                if (line[i] == '\\') i += 1;
+            }
+            i += 1;
+        } else if (std.mem.startsWith(u8, line[i..], "${")) {
+            while (i < n and line[i] != '}') i += 1;
+            i += 1;
+        } else {
+            while (i < n and identPart(line[i..], extra)) i += sequenceLength(line[i]);
+        }
+    }
+    while (i < n and (line[i] == ' ' or line[i] == '\t')) i += 1;
+    return i < n and line[i] == '=' and (i + 1 == n or line[i + 1] != '=');
+}
 
 pub const mode_comment = 1;
 pub const mode_string = 32;

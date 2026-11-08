@@ -42,7 +42,7 @@ typedef struct NativeNode {
        a tree item's depth from 1; 0 when not given. */
     uint32_t position, set_size, level;
     /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED,
-       VERTICAL, SEARCH and HORIZONTAL, then the popup kind (bits 8 to 10), current (11 to 13),
+       VERTICAL, SEARCH, HORIZONTAL and MULTI_LINE, then the popup kind (bits 8 to 10), current (11 to 13),
        sort (14, 15) and autocomplete (16, 17). */
     uint32_t states;
     uint32_t role_description_start, role_description_len, key_shortcuts_start, key_shortcuts_len;
@@ -59,7 +59,7 @@ typedef struct NativeNode {
     uint64_t described_by, error_message;
 } NativeNode;
 _Static_assert(sizeof(NativeNode) == 208, "semantic node ABI");
-enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16, SEARCH = 32, HORIZONTAL = 64 };
+enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16, SEARCH = 32, HORIZONTAL = 64, MULTI_LINE = 128 };
 enum { POPUP_NONE, POPUP_MENU, POPUP_LIST_BOX, POPUP_TREE, POPUP_GRID, POPUP_DIALOG };
 enum { CURRENT_NONE, CURRENT_ITEM, CURRENT_PAGE, CURRENT_STEP, CURRENT_LOCATION, CURRENT_DATE, CURRENT_TIME };
 enum { SORT_NONE, SORT_ASCENDING, SORT_DESCENDING, SORT_OTHER };
@@ -544,7 +544,7 @@ static void add_states(AtkStateSet *set, const Node *node) {
     if (n->role == ROLE_SEPARATOR) atk_state_set_add_state(set, (n->states & VERTICAL) ? ATK_STATE_VERTICAL : ATK_STATE_HORIZONTAL);
     if (textual(n->role)) {
         atk_state_set_add_state(set, ATK_STATE_SELECTABLE_TEXT);
-        atk_state_set_add_state(set, ATK_STATE_SINGLE_LINE);
+        atk_state_set_add_state(set, (n->role == ROLE_TEXT_BOX && n->states & MULTI_LINE) ? ATK_STATE_MULTI_LINE : ATK_STATE_SINGLE_LINE);
         atk_state_set_add_state(set, (n->flags & READ_ONLY) ? ATK_STATE_READ_ONLY : ATK_STATE_EDITABLE);
     } else if (n->flags & READ_ONLY) atk_state_set_add_state(set, ATK_STATE_READ_ONLY);
 }

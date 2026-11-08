@@ -49,7 +49,7 @@ typedef struct NativeNode {
        a tree item's depth from 1; 0 when not given. */
     uint32_t position, set_size, level;
     /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED,
-       VERTICAL, SEARCH and HORIZONTAL, then the popup kind (bits 8 to 10), current (11 to 13),
+       VERTICAL, SEARCH, HORIZONTAL and MULTI_LINE, then the popup kind (bits 8 to 10), current (11 to 13),
        sort (14, 15) and autocomplete (16, 17). */
     uint32_t states;
     uint32_t role_description_start, role_description_len, key_shortcuts_start, key_shortcuts_len;
@@ -66,7 +66,7 @@ typedef struct NativeNode {
     uint64_t described_by, error_message;
 } NativeNode;
 _Static_assert(sizeof(NativeNode) == 208, "semantic node ABI");
-enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16, SEARCH = 32, HORIZONTAL = 64 };
+enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16, SEARCH = 32, HORIZONTAL = 64, MULTI_LINE = 128 };
 enum { POPUP_NONE, POPUP_MENU, POPUP_LIST_BOX, POPUP_TREE, POPUP_GRID, POPUP_DIALOG };
 enum { CURRENT_NONE, CURRENT_ITEM, CURRENT_PAGE, CURRENT_STEP, CURRENT_LOCATION, CURRENT_DATE, CURRENT_TIME };
 enum { SORT_NONE, SORT_ASCENDING, SORT_DESCENDING, SORT_OTHER };
@@ -152,6 +152,8 @@ static NSAccessibilityRole role_of(const NativeNode *n, NSAccessibilitySubrole *
     case ROLE_TEXT_BOX: case ROLE_TOKEN_FIELD:
         if (n->flags & PASSWORD) *subrole = NSAccessibilitySecureTextFieldSubrole;
         else if (n->states & SEARCH) *subrole = NSAccessibilitySearchFieldSubrole;
+        /* Several lines are a text area, as NSTextView's. */
+        else if (n->role == ROLE_TEXT_BOX && (n->states & MULTI_LINE)) return NSAccessibilityTextAreaRole;
         return NSAccessibilityTextFieldRole;
     case ROLE_CHECKBOX: return NSAccessibilityCheckBoxRole;
     case ROLE_RADIO: return NSAccessibilityRadioButtonRole;

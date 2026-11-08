@@ -41,6 +41,9 @@ pub const PointerEvent = struct {
     modifiers: z.KeyModifiers = .{},
     /// Where it happened, relative to the area's bounds.
     position: Point = .{},
+    /// The press is the second of a double click on a `drag_window` area
+    /// that takes its double click (`Options.window_double_click`).
+    window_double_click: bool = false,
     pub const Phase = enum { press, release, cancel };
 };
 
@@ -56,7 +59,25 @@ pub const Options = struct {
     /// label reaches it. `pressed` is the press of that control while the
     /// pointer is over the area, and the area clicks nothing itself.
     observe: bool = false,
+    /// Move the window with a primary press, as a title bar does, for a
+    /// window whose view draws its own (`z.WindowOptions.decoration`
+    /// `.custom` or `.borderless`): the press goes to the window
+    /// (`z.Window.startMove`), not to the area, which reports no press or
+    /// click of the primary button. A double click does what one on the
+    /// title bar does (`z.Window.titleBarDoubleClick`), unless
+    /// `window_double_click` takes it.
+    drag_window: bool = false,
+    /// Report a double click on a `drag_window` area in
+    /// `PointerArea.window_double_clicked` and leave the window as it is,
+    /// for a handle whose double click means something else, as the empty
+    /// part of a sidebar starting something new. A press still moves the
+    /// window, which a pointer area without `drag_window` would not.
+    window_double_click: bool = false,
 };
+
+/// What a `drag_window` area asks of the window, which the host does while
+/// it delivers the press (`View.takeWindowGesture`).
+pub const WindowGesture = enum { move, title_bar_double_click };
 
 /// The pointer over an area, as of this pass.
 pub const PointerArea = struct {
@@ -94,6 +115,9 @@ pub const PointerArea = struct {
     clicks: u8 = 0,
     /// The second press of a double click went down on it in this pass.
     double_clicked: bool = false,
+    /// The second press of a double click went down on a `drag_window`
+    /// area that takes it (`Options.window_double_click`) in this pass.
+    window_double_clicked: bool = false,
     /// A secondary click came up over it in this pass, as for a context menu.
     right_clicked: bool = false,
     /// A middle click came up over it in this pass.
@@ -157,6 +181,8 @@ pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
     const node = try v.openNode(.pointer_area, style);
     node.track = options.track;
     node.observe = options.observe;
+    node.drag_window = options.drag_window;
+    node.window_double_click = options.drag_window and options.window_double_click;
     var result: PointerArea = .{ .id = node.id };
     const known = entry(v, node.id);
     if (known) |area| result.bounds = area.bounds;
@@ -192,7 +218,9 @@ pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
     if (event) |value| {
         result.modifiers = value.modifiers;
         switch (value.phase) {
-            .press => {
+            .press => if (value.window_double_click) {
+                result.window_double_clicked = true;
+            } else {
                 result.pressed_now = value.button;
                 result.pressed = value.button == .primary;
                 result.pressed_button = value.button;
@@ -230,6 +258,13 @@ pub fn press(v: *View, point: Point, button: Button, modifiers: z.KeyModifiers, 
     const again = last.id == area.id and last.button == button and now >= last.time and now - last.time <= view.double_press_time and distanceOf(last.at, point) <= view.double_press_distance;
     const count: u8 = if (again) last.count +| 1 else 1;
     v.area_last = .{ .id = area.id, .button = button, .time = now, .at = point, .count = count };
+    if (area.drag_window and button == .primary) {
+        // A handle's press is the window's, but the double click it takes.
+        if (count == 2 and area.window_double_click)
+            return .{ .pointer = .{ .id = area.id, .phase = .press, .button = button, .clicks = count, .modifiers = modifiers, .position = local(area.bounds, point), .window_double_click = true } };
+        v.window_gesture = if (count == 2) .title_bar_double_click else .move;
+        return null;
+    }
     v.area_press = .{ .id = area.id, .button = button, .clicks = count, .modifiers = modifiers };
     return .{ .pointer = .{ .id = area.id, .phase = .press, .button = button, .clicks = count, .modifiers = modifiers, .position = local(area.bounds, point) } };
 }

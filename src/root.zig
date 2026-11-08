@@ -382,6 +382,12 @@ pub const ClosedHandler = struct {
     notify: *const fn (*anyopaque, Window) void,
 };
 pub const WindowAction = enum { show, hide, minimize, maximize, restore, focus, enable, disable };
+/// What a double click on a title bar does (`Window.titleBarDoubleClick`).
+pub const TitleBarAction = enum { maximize, minimize, none };
+/// What a double click on a title bar does here, as the user set it.
+pub fn titleBarAction() TitleBarAction {
+    return if (@hasDecl(backend, "titleBarAction")) backend.titleBarAction() else .maximize;
+}
 pub const WindowState = struct {
     visible: bool,
     minimized: bool,
@@ -1472,6 +1478,22 @@ pub const Window = struct {
             self.reportUpdateFailure(scope.record, err);
             return err;
         };
+    }
+    /// Do what a double click on the window's title bar does, as the user
+    /// set it, for a drag handle the view draws (`view.AreaOptions.drag_window`):
+    /// on macOS zoom, minimize or nothing, as System Settings says; on
+    /// Windows and Linux maximize or restore, as their title bars do. A
+    /// window that may not maximize stays as it is.
+    pub fn titleBarDoubleClick(self: Window) !void {
+        const policy = try self.traits();
+        switch (titleBarAction()) {
+            .none => {},
+            .minimize => if (policy.minimizable) try self.perform(.minimize),
+            .maximize => if (policy.maximizable and policy.resizable) {
+                const current = try self.state();
+                try self.perform(if (current.maximized) .restore else .maximize);
+            },
+        }
     }
     pub fn showSystemMenu(self: Window) !void {
         const scope = try self.beginInteraction(false);

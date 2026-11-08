@@ -1,5 +1,6 @@
 //! Headless tests of menus that a secondary press or the menu key opens.
 const std = @import("std");
+const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("root.zig");
 
@@ -555,4 +556,101 @@ test "a menu item shows content of the application's own and is chosen by a pres
     try h.clickAt(text.x + 2, text.y + text.height / 2);
     try testing.expectEqual(@as(usize, 1), app.started);
     try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Download" }));
+}
+
+const TippedMenus = struct {
+    const Kind = enum { menu_button, popover, context_menu };
+    kind: Kind,
+    open: bool = false,
+    fn build(self: *TippedMenus, v: *View) anyerror!void {
+        try v.column(.{ .padding = .all(60), .gap = 20 });
+        _ = try v.button("First", .{});
+        switch (self.kind) {
+            .menu_button => {
+                if (try v.popoverMenuButton("More", .{})) _ = try v.menuItem("Duplicate", .{}, .{});
+                try v.end();
+            },
+            .popover => {
+                if (try v.button("More", .{})) self.open = !self.open;
+                if (try v.popover(&self.open, .{}, .{})) try v.text("Duplicate", .{});
+                try v.end();
+            },
+            .context_menu => {
+                _ = try v.button("More", .{});
+                if (try v.popoverMenu(.{ .name = "Actions" })) _ = try v.menuItem("Duplicate", .{}, .{});
+                try v.end();
+            },
+        }
+        try v.tooltip("More actions");
+        try v.end();
+    }
+};
+
+test "a button's tip goes as its menu or popover opens and stays hidden while it shows and as it closes" {
+    for ([_]TippedMenus.Kind{ .menu_button, .popover, .context_menu }) |kind| {
+        var storage: Storage = .{};
+        var app: TippedMenus = .{ .kind = kind };
+        var h = Harness.init(&app, TippedMenus.build, storage.buffers(), .{ .options = .{ .tooltip_delay = 1 } });
+        var dummy: u8 = 0;
+        var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+        try h.attachInput(&context);
+        try h.render();
+        const more = try h.boundsOf(.{ .text = "More" });
+        const x = more.x + more.width / 2;
+        const y = more.y + more.height / 2;
+        try h.hoverAt(x, y);
+        try h.advance(std.time.ns_per_s);
+        try testing.expectEqualStrings("More actions", h.tooltip().?);
+        if (kind == .context_menu) {
+            try testing.expect(try h.clickButtonAt(x, y, .secondary, .{}));
+        } else try h.clickAt(x, y);
+        try h.advance(16 * std.time.ns_per_ms);
+        try testing.expectEqual(@as(usize, 1), h.count(.{ .text = "Duplicate" }));
+        try testing.expect(h.tooltip() == null);
+        // The pointer goes onto the menu, and back to the button.
+        try h.hover(.{ .text = "Duplicate" });
+        try h.advance(100 * std.time.ns_per_ms);
+        try h.hoverAt(x + 2, y);
+        try h.advance(std.time.ns_per_s);
+        try testing.expect(h.tooltip() == null);
+        // The menu closes, the pointer on the button.
+        try testing.expect(try h.key(.{ .key = .escape }));
+        app.open = false;
+        try h.advance(std.time.ns_per_s);
+        try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Duplicate" }));
+        try testing.expect(h.tooltip() == null);
+        // Once the pointer and the focus have left, the tip shows again.
+        try h.focus(.{ .text = "First" });
+        try h.leave();
+        try h.advance(std.time.ns_per_s);
+        try h.hoverAt(x, y);
+        try h.advance(std.time.ns_per_s);
+        try testing.expectEqualStrings("More actions", h.tooltip().?);
+    }
+}
+
+test "the tip the focus brought to a menu button goes as the keys open its menu and stays hidden as it closes" {
+    var storage: Storage = .{};
+    var app: TippedMenus = .{ .kind = .menu_button };
+    var h = Harness.init(&app, TippedMenus.build, storage.buffers(), .{ .options = .{ .tooltip_delay = 1 } });
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.render();
+    for ([_]z.KeyCode{ .down, .enter, .space }) |opener| {
+        try h.focus(.{ .text = "First" });
+        try h.advance(std.time.ns_per_s);
+        try h.focus(.{ .text = "More" });
+        try h.advance(std.time.ns_per_s);
+        try testing.expectEqualStrings("More actions", h.tooltip().?);
+        try testing.expect(try h.key(.{ .key = opener }));
+        try h.advance(16 * std.time.ns_per_ms);
+        try testing.expectEqual(@as(usize, 1), h.count(.{ .text = "Duplicate" }));
+        try testing.expect(h.tooltip() == null);
+        try testing.expect(try h.key(.{ .key = .escape }));
+        try h.advance(std.time.ns_per_s);
+        try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Duplicate" }));
+        try testing.expectEqualStrings("More", h.focused().?.text);
+        try testing.expect(h.tooltip() == null);
+    }
 }

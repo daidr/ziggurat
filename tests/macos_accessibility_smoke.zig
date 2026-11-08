@@ -46,6 +46,9 @@ const Probe = struct {
         semantic.add(frame, .{ .id = 8, .role = .list, .name = "Pages", .set_size = 10_000, .bounds = .{ .x = 220, .y = 10, .width = 90, .height = 40 } });
         semantic.add(frame, .{ .id = 9, .parent = 8, .role = .list_item, .name = "Page 120", .position = 120, .bounds = .{ .x = 220, .y = 10, .width = 90, .height = 20 } });
         semantic.add(frame, .{ .id = 10, .parent = 8, .role = .list_item, .name = "Page 121", .position = 121, .bounds = .{ .x = 220, .y = 30, .width = 90, .height = 20 } });
+        // A text box of the application's own over several lines, which
+        // it does not let assistive technology edit.
+        semantic.add(frame, .{ .id = 11, .role = .text_box, .name = "Notes", .value = "line", .read_only = true, .multi_line = true, .bounds = .{ .x = 220, .y = 60, .width = 90, .height = 60 } });
         if (self.saved) semantic.add(frame, .{ .id = 7, .role = .status, .name = "Saved", .bounds = .{ .x = 10, .y = 170, .width = 160, .height = 20 } });
     }
     fn action(_: *anyopaque, _: u64) void {}
@@ -114,15 +117,16 @@ pub fn main() !void {
     probe.window.show();
     probe.publish();
 
-    // The top level: five elements, the checkbox and the disabled button
+    // The top level: six elements, the checkbox and the disabled button
     // inside the group, the rows inside the list.
-    try std.testing.expectEqual(@as(c_int, 5), zua_test_child_count(probe.handle()));
+    try std.testing.expectEqual(@as(c_int, 6), zua_test_child_count(probe.handle()));
     // VoiceOver reads the rows "120 of 10,000", not of the two built.
     try std.testing.expectEqual(@as(c_int, 10_000), zua_test_row(try probe.element("Pages"), 0));
     try std.testing.expectEqual(@as(c_int, 119), zua_test_row(try probe.element("Page 120"), 1));
     try std.testing.expectEqual(@as(c_int, 120), zua_test_row(try probe.element("Page 121"), 1));
     try probe.expect("Save", "AXButton/|Save|||1");
     try probe.expect("Name", "AXTextField/||Name|abc|1");
+    try probe.expect("Notes", "AXTextArea/||Notes|line|1");
     try probe.expect("Volume", "AXSlider/||Volume|5|1");
     try probe.expect("Options", "AXGroup/||Options||1");
     try probe.expect("Agree", "AXCheckBox/|Agree||1|1");

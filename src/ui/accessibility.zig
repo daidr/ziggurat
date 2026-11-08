@@ -112,6 +112,10 @@ pub const Node = struct {
     error_message: u64 = 0,
     /// A text box for searching, as role=searchbox.
     search: bool = false,
+    /// A text box that takes several lines, as aria-multiline: a text area,
+    /// or a text box the application draws and edits itself. Other roles
+    /// ignore it.
+    multi_line: bool = false,
     /// Runs left to right, told by the application as aria-orientation;
     /// with `vertical` false and this false the platform's own guess holds.
     horizontal: bool = false,
@@ -175,6 +179,7 @@ pub const Entry = struct {
     described_by: u64 = 0,
     error_message: u64 = 0,
     search: bool = false,
+    multi_line: bool = false,
     horizontal: bool = false,
 
     fn extraLen(self: Entry) usize {
@@ -274,7 +279,7 @@ pub const Tree = struct {
             const value_text = text[used..][0..entry.value_text_len];
             @memcpy(value_text, entry.valueText(&self.storage));
             used += value_text.len;
-            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .password = entry.password, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end, .position = entry.position, .set_size = entry.set_size, .level = entry.level, .native = entry.native, .focusable_disabled = entry.focusable_disabled, .busy = entry.busy, .selected = entry.selected, .vertical = entry.vertical, .popup = entry.popup, .current = entry.current, .sort = entry.sort, .auto_complete = entry.auto_complete, .role_description = role_description, .key_shortcuts = key_shortcuts, .value_text = value_text, .controls = entry.controls, .row_count = entry.row_count, .column_count = entry.column_count, .row_index = entry.row_index, .column_index = entry.column_index, .described_by = entry.described_by, .error_message = entry.error_message, .search = entry.search, .horizontal = entry.horizontal };
+            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .password = entry.password, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end, .position = entry.position, .set_size = entry.set_size, .level = entry.level, .native = entry.native, .focusable_disabled = entry.focusable_disabled, .busy = entry.busy, .selected = entry.selected, .vertical = entry.vertical, .popup = entry.popup, .current = entry.current, .sort = entry.sort, .auto_complete = entry.auto_complete, .role_description = role_description, .key_shortcuts = key_shortcuts, .value_text = value_text, .controls = entry.controls, .row_count = entry.row_count, .column_count = entry.column_count, .row_index = entry.row_index, .column_index = entry.column_index, .described_by = entry.described_by, .error_message = entry.error_message, .search = entry.search, .multi_line = entry.multi_line, .horizontal = entry.horizontal };
             written += 1;
         };
         return nodes[0..written];
@@ -375,6 +380,7 @@ pub const Tree = struct {
             .described_by = node.described_by,
             .error_message = node.error_message,
             .search = node.search,
+            .multi_line = node.multi_line and node.role == .text_box,
             .horizontal = node.horizontal,
         };
         self.used += node.name.len + node.value.len + node.description.len + extra_len;
@@ -412,6 +418,27 @@ test "descriptions and form state survive export" {
     try std.testing.expect(copied[0].invalid and copied[0].required);
     var small: [10]u8 = undefined;
     try std.testing.expectError(error.SemanticExportCapacityExceeded, tree.exportSubtree(4, &nodes, &small));
+}
+
+test "a text box the application edits itself reports read-only and multi-line, which other roles ignore" {
+    var tree: Tree = .{};
+    const bounds: z.Rect = .{ .x = 0, .y = 0, .width = 30, .height = 20 };
+    try tree.reset("Window", bounds);
+    try tree.add(.{ .id = 2, .role = .text_box, .name = "Plain", .bounds = bounds });
+    try tree.add(.{ .id = 3, .role = .text_box, .name = "Locked", .read_only = true, .bounds = bounds });
+    try tree.add(.{ .id = 4, .role = .text_box, .name = "Notes", .multi_line = true, .bounds = bounds });
+    try tree.add(.{ .id = 5, .role = .button, .name = "Button", .multi_line = true, .bounds = bounds });
+    try tree.validate();
+    var nodes: [1]Node = undefined;
+    var text: [32]u8 = undefined;
+    const expected = [_]struct { u64, bool, bool }{ .{ 2, false, false }, .{ 3, true, false }, .{ 4, false, true }, .{ 5, false, false } };
+    for (expected) |entry| {
+        const copied = try tree.exportSubtree(entry[0], &nodes, &text);
+        try std.testing.expectEqual(entry[1], copied[0].read_only);
+        try std.testing.expectEqual(entry[2], copied[0].multi_line);
+        // The platforms read it as a state bit.
+        try std.testing.expectEqual(entry[2], NativeState.pack(copied[0]) & NativeState.multi_line != 0);
+    }
 }
 
 test "subtree export copies labels and rejects complete graph before output" {
@@ -787,6 +814,7 @@ pub const NativeState = struct {
     pub const vertical: u32 = 16;
     pub const search: u32 = 32;
     pub const horizontal: u32 = 64;
+    pub const multi_line: u32 = 128;
     pub fn pack(entry: anytype) u32 {
         var bits: u32 = 0;
         if (entry.focusable_disabled) bits |= focusable_disabled;
@@ -795,6 +823,7 @@ pub const NativeState = struct {
         if (entry.vertical) bits |= vertical;
         if (entry.search) bits |= search;
         if (entry.horizontal and !entry.vertical) bits |= horizontal;
+        if (entry.multi_line) bits |= multi_line;
         bits |= @as(u32, @backingInt(entry.popup)) << 8;
         bits |= @as(u32, @backingInt(entry.current)) << 11;
         bits |= @as(u32, @backingInt(entry.sort)) << 14;

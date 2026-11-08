@@ -1608,6 +1608,10 @@ pub const Node = struct {
     /// A pointer area that reports the pointer without taking presses
     /// (`AreaOptions.observe`).
     observe: bool = false,
+    /// A pointer area that moves the window (`AreaOptions.drag_window`),
+    /// and one of those that takes its double click.
+    drag_window: bool = false,
+    window_double_click: bool = false,
     /// A container that observes the input inside it (`observeInput`).
     observes: bool = false,
     /// The node or one around it is `Style.hidden`, or it floats from an
@@ -1886,6 +1890,11 @@ pub const TooltipState = struct {
     /// When a tip last showed, or went: within the warm time after it the
     /// next one shows at once.
     last_shown: ?u64 = null,
+    /// The nodes whose menu, popover or list showed in the last pass, as
+    /// their tips stay hidden while those show and as they close.
+    popped: [max_popped]u64 = undefined,
+    popped_len: usize = 0,
+    pub const max_popped = 8;
 };
 
 /// Geometry of the last arranged pass that input routing needs between
@@ -2035,7 +2044,7 @@ pub const Overlay = struct {
     /// in build order.
     cursors: [max_cursor_regions]CursorRegion = undefined,
     cursor_count: usize = 0,
-    pub const Area = struct { id: u64, index: u32, bounds: Rect, rect: Rect, track: bool, observe: bool = false };
+    pub const Area = struct { id: u64, index: u32, bounds: Rect, rect: Rect, track: bool, observe: bool = false, drag_window: bool = false, window_double_click: bool = false };
     pub const CursorRegion = struct {
         index: u32,
         bounds: Rect,
@@ -2233,6 +2242,9 @@ pub const View = struct {
     tools: ?*const Inspector = null,
     /// The pointer area a button went down on, until it comes up.
     area_press: ?pointer_controls.Press = null,
+    /// What the last press on a `drag_window` area asks of the window, until
+    /// the host takes it (`takeWindowGesture`).
+    window_gesture: ?pointer_controls.WindowGesture = null,
     /// The control the primary button went down on, until it comes up, for
     /// the areas observing it to show its press.
     control_press: ?u64 = null,
@@ -2799,6 +2811,13 @@ pub const View = struct {
     pub const menuGroupBase = menu_controls.menuGroupBase;
     pub const openMenuAt = menu_controls.openAt;
     pub const areaPress = pointer_controls.press;
+    /// What a press on a `drag_window` area asked of the window, once: the
+    /// host moves the window or does what a double click on its title bar
+    /// does while it delivers the press.
+    pub fn takeWindowGesture(self: *View) ?pointer_controls.WindowGesture {
+        defer self.window_gesture = null;
+        return self.window_gesture;
+    }
     pub const areaRelease = pointer_controls.release;
     pub const areaCancel = pointer_controls.cancel;
     pub const pressedAt = pointer_controls.pressedAt;
@@ -3834,13 +3853,18 @@ pub const View = struct {
     /// is built with (`Theme.tooltip_delay`, `Options.tooltip_delay`),
     /// and is announced as its description. A press or Escape hides it until
     /// the pointer or focus moves to another control. After `comboBox` and
-    /// its options, it describes the combo box.
+    /// its options, it describes the combo box, and after a menu or a
+    /// popover (`popoverMenuButton`, `popoverMenu`, `popover`) and its
+    /// `end`, the node it opens from. While a node's menu, popover or list
+    /// shows, its tip does not, nor as the pointer comes back to it then or
+    /// the focus comes back to it as that closes, until the pointer and the
+    /// focus leave it.
     pub fn tooltip(self: *View, value: []const u8) Error!void {
         if (self.depth == 0) return error.UnbalancedContainer;
         const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
         if (parent.last_child == none) return error.NotContainer;
         var target = &self.buffers.nodes[parent.last_child];
-        if (target.kind == .popup) target = &self.buffers.nodes[target.anchor];
+        if ((target.kind == .popup or target.kind == .popover or target.kind == .menu) and target.anchor != none) target = &self.buffers.nodes[target.anchor];
         target.tooltip = try self.copy(value);
     }
 
@@ -5388,6 +5412,13 @@ pub const View = struct {
             };
         };
         const target: ?u64 = if (candidate == none) null else all[candidate].id;
+        // The nodes whose menu, popover or list shows in this pass.
+        var popped: [TooltipState.max_popped]u64 = undefined;
+        var popped_len: usize = 0;
+        for (all) |*node| if ((node.kind == .menu or node.kind == .popover or node.kind == .popup) and node.checked and node.anchor != none and popped_len < popped.len) {
+            popped[popped_len] = all[node.anchor].id;
+            popped_len += 1;
+        };
         if (self.tip.showing) self.tip.last_shown = self.now;
         self.tip.showing = false;
         if (!std.meta.eql(target, self.tip.target)) {
@@ -5395,6 +5426,15 @@ pub const View = struct {
             self.tip.since = self.now;
             self.tip.dismissed = false;
         }
+        // A node whose menu or popover shows, in this pass or the last one,
+        // shows no tip: the pointer coming back to a menu button while its
+        // menu shows, or the focus coming back to it as the menu closes,
+        // leaves it hidden until they leave it.
+        if (target) |id| if (std.mem.indexOfScalar(u64, popped[0..popped_len], id) != null or std.mem.indexOfScalar(u64, self.tip.popped[0..self.tip.popped_len], id) != null) {
+            self.tip.dismissed = true;
+        };
+        @memcpy(self.tip.popped[0..popped_len], popped[0..popped_len]);
+        self.tip.popped_len = popped_len;
         if (candidate == none or self.tip.dismissed) return;
         const timing = self.tooltipTiming(all[candidate].theme);
         const warm = if (self.tip.last_shown) |at| self.tip.since -| at <= timing.warm else false;
@@ -6121,7 +6161,7 @@ pub const View = struct {
             if (node.kind == .menu or node.kind == .menu_item) menu_controls.record(self, node);
             switch (node.kind) {
                 .pointer_area => if (node.style.enabled and overlay.area_count < max_pointer_areas) if (self.visible(node)) |rect| {
-                    overlay.areas[overlay.area_count] = .{ .id = node.id, .index = @intCast(index), .bounds = node.bounds, .rect = rect, .track = node.track, .observe = node.observe };
+                    overlay.areas[overlay.area_count] = .{ .id = node.id, .index = @intCast(index), .bounds = node.bounds, .rect = rect, .track = node.track, .observe = node.observe, .drag_window = node.drag_window, .window_double_click = node.window_double_click };
                     overlay.area_count += 1;
                 },
                 .embed => if (node.embed.?.input != null and node.style.enabled and overlay.embed_count < max_interactive_embeds) if (self.visible(node)) |rect| {
@@ -8963,7 +9003,15 @@ pub const Host = struct {
                 };
                 // Where no control lies, a pointer area learns of it; the
                 // Context still sees a press on nothing, which clears focus.
-                if (hit == null) _ = self.deliverArea(self.view.areaPress(point, .primary, press.modifiers, self.time()));
+                if (hit == null) {
+                    _ = self.deliverArea(self.view.areaPress(point, .primary, press.modifiers, self.time()));
+                    // A drag handle's press is the window's, as it is
+                    // delivered.
+                    if (self.view.takeWindowGesture()) |gesture| if (self.context.window) |window| switch (gesture) {
+                        .move => window.startMove() catch {},
+                        .title_bar_double_click => window.titleBarDoubleClick() catch {},
+                    };
+                }
                 return false;
             },
             .pointer_up => |release| {
@@ -10321,6 +10369,11 @@ test "estimate measures wide codepoints wider" {
     try std.testing.expectEqual(Measurer.line_height, wide.height);
 }
 
+fn buttonId(v: *const View) u64 {
+    for (v.nodes()) |*node| if (node.kind == .button) return node.id;
+    unreachable;
+}
+
 test "open lists and toasts paint after the tree and tooltips paint last" {
     var storage: Storage(32, 512) = .{};
     var view = View.init(storage.buffers());
@@ -10335,12 +10388,13 @@ test "open lists and toasts paint after the tree and tooltips paint last" {
         _ = try view.comboOption(u8, &font, 0, "Serif", .{});
         _ = try view.comboOption(u8, &font, 1, "Sans", .{});
         try view.end();
-        try view.tooltip("Typeface");
         _ = try view.button("Apply", .{});
+        try view.tooltip("Apply the font");
         _ = try view.toasts(&queue, .{});
-        // Open the list and focus the combo box for the second pass.
+        // Open the list and focus the button for the second pass: a combo
+        // box shows no tip of its own while its list shows.
         view.popup.open = view.nodes()[1].id;
-        view.focus = view.nodes()[1].id;
+        view.focus = buttonId(&view);
         try view.finish();
     }
     try std.testing.expectEqual(@as(?u64, 1000 + view.tooltip_delay), view.wake);
@@ -10352,10 +10406,10 @@ test "open lists and toasts paint after the tree and tooltips paint last" {
     _ = try view.comboOption(u8, &font, 0, "Serif", .{});
     _ = try view.comboOption(u8, &font, 1, "Sans", .{});
     try view.end();
-    try view.tooltip("Typeface");
     _ = try view.button("Apply", .{});
+    try view.tooltip("Apply the font");
     _ = try view.toasts(&queue, .{});
-    view.focus = view.nodes()[1].id;
+    view.focus = buttonId(&view);
     try view.finish();
     try view.arrange(.{ .x = 0, .y = 0, .width = 640, .height = 480 }, .{}, .{});
     var recorder: Recorder = .{};
@@ -10372,7 +10426,7 @@ test "open lists and toasts paint after the tree and tooltips paint last" {
         else => {},
     };
     try std.testing.expect(popup_at.? > 1 and toast_at.? > popup_at.?);
-    try std.testing.expectEqual(tooltipId(view.nodes()[1].id), recorder.tooltip_id);
+    try std.testing.expectEqual(tooltipId(buttonId(&view)), recorder.tooltip_id);
     try std.testing.expectEqual(Kind.text, calls[calls.len - 1].kind);
     try std.testing.expectEqual(@as(usize, 0), recorder.clip_depth);
 }
