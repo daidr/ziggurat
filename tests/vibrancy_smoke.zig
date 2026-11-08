@@ -84,8 +84,10 @@ const State = struct {
         self.caps = caps;
         try std.testing.expectEqual(z.Vibrancy.sidebar, try window.vibrancy());
         if (windows) {
+            // The window asked for transparency, which it has without a
+            // material too (before Windows 11 22H2).
             try std.testing.expectEqual(backdropsAvailable(), caps.vibrancy);
-            try std.testing.expectEqual(caps.vibrancy, caps.transparent);
+            try std.testing.expect(caps.transparent);
         } else {
             // GTK has no materials; frames keep alpha with an RGBA visual.
             try std.testing.expect(!caps.vibrancy);
@@ -128,9 +130,10 @@ const State = struct {
         });
         if (windows) {
             const hwnd: c.HWND = @ptrCast(window.nativeHandle().?);
-            // A window that shows a material has no menu bar.
-            try std.testing.expectEqual(caps.vibrancy, c.GetMenu(hwnd) == null);
-            if (caps.vibrancy) {
+            // A window without a redirection bitmap (transparent, with or
+            // without a material) has no menu bar.
+            try std.testing.expectEqual(caps.transparent, c.GetMenu(hwnd) == null);
+            if (caps.transparent) {
                 // F10 opens the menus in a popup, a native menu loop in
                 // which App tasks keep running.
                 _ = c.PostMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_KEYMENU, 0);
