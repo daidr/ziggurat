@@ -1115,6 +1115,12 @@ test "an animated PNG decodes into premultiplied BGRA frames and tells its lengt
     try std.testing.expectEqual(@as(?u64, null), try source.next(source.context, &pixels));
     try source.rewind(source.context);
     try std.testing.expectEqual(@as(?u64, 30 * ms), try source.next(source.context, &pixels));
+    // A player of it reports the length its decoder tells.
+    try source.rewind(source.context);
+    var host = hostless();
+    var player = try Player.init(std.testing.allocator, &host, source);
+    defer player.deinit();
+    try std.testing.expectEqual(@as(u64, 130 * ms), player.duration());
 }
 
 test "a decoder's video seeks, reports its position and length, and plays at another rate" {
