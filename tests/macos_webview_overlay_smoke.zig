@@ -154,6 +154,11 @@ const State = struct {
         const native = self.page.native orelse return false;
         return zwk_has_focus(native) != 0;
     }
+    /// The backend's window state, which the zlm_test_* hooks take (the
+    /// native handle is the NSWindow).
+    fn windowState(self: *State) *anyopaque {
+        return self.app.windows.get(self.window.key).?.native.native.?;
+    }
     fn step(self: *State) !void {
         if (self.host.last_error) |err| return err;
         if (self.web_views.takeError()) |err| return err;
@@ -254,7 +259,7 @@ const State = struct {
             },
             .glass => {
                 const places = self.host.context.nativeGlassPlaces();
-                if (places.len != 1 or zlm_test_glass_count(native) != 1) return;
+                if (places.len != 1 or zlm_test_glass_count(self.windowState()) != 1) return;
                 const clip = places[0].clip;
                 const button = self.buttonBox("Inside") orelse return error.NoButton;
                 const scale = zwo_scale(native);
@@ -264,21 +269,21 @@ const State = struct {
                 if (!try self.pageShows(clip.x + 4, clip.y + 4)) return;
                 if (!try self.pageShows(button.x + button.width / 2, button.y + button.height / 2)) return error.PageCutUnderGlass;
                 if (try self.pageAt(button.x + button.width / 2, button.y + button.height / 2)) return error.PageTookButton;
-                const alpha = zlm_test_overlay_alpha(native, @intFromFloat((button.x + button.width / 2) * scale), @intFromFloat((button.y + button.height / 2) * scale));
+                const alpha = zlm_test_overlay_alpha(self.windowState(), @intFromFloat((button.x + button.width / 2) * scale), @intFromFloat((button.y + button.height / 2) * scale));
                 if (alpha <= 0) {
                     std.debug.print("overlay alpha over the button: {d}\n", .{alpha});
                     return error.OverlayEmpty;
                 }
                 const leaf_box = self.leaf() orelse return error.NoLeaf;
-                if (zlm_test_overlay_alpha(native, @intFromFloat((leaf_box.x + 20) * scale), @intFromFloat((leaf_box.y + leaf_box.height - 10) * scale)) != 0) return error.OverlayOutsideGlass;
-                if (zlm_test_glass_passes(native, button.x + button.width / 2, button.y + button.height / 2) != 1) return error.GlassTookPointer;
+                if (zlm_test_overlay_alpha(self.windowState(), @intFromFloat((leaf_box.x + 20) * scale), @intFromFloat((leaf_box.y + leaf_box.height - 10) * scale)) != 0) return error.OverlayOutsideGlass;
+                if (zlm_test_glass_passes(self.windowState(), button.x + button.width / 2, button.y + button.height / 2) != 1) return error.GlassTookPointer;
                 self.glass = false;
                 self.window.invalidate();
                 self.next(.unglass);
             },
             .unglass => {
-                if (self.host.context.nativeGlassPlaces().len != 0 or zlm_test_glass_count(native) != 0) return;
-                if (zlm_test_overlay_alpha(native, 0, 0) != -1) return error.OverlayKept;
+                if (self.host.context.nativeGlassPlaces().len != 0 or zlm_test_glass_count(self.windowState()) != 0) return;
+                if (zlm_test_overlay_alpha(self.windowState(), 0, 0) != -1) return error.OverlayKept;
                 self.glass_checked = true;
                 self.next(.done);
                 self.app.quit();
