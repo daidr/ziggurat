@@ -170,7 +170,11 @@ const State = struct {
         const state = &self.host.context.input_state;
         if (self.ticks > self.since + 400) {
             const visible = if (self.item.region) |region| if (region.snapshot()) |snapshot| snapshot.viewport.visible else |_| false else false;
-            std.debug.print("loaded={} visible={} key={?} page keyboard={} element={s} control={?d} wanted={?d}\n", .{ self.loaded, visible, self.key, self.pageHasKeyboard(), self.focused[0..self.focused_len], state.focused, self.control(2) });
+            var at: ?usize = null;
+            for (0..4) |index| if (state.focused != null and self.control(index) == state.focused) {
+                at = index;
+            };
+            std.debug.print("{s}: loaded={} visible={} key={?} page keyboard={} element={s} control={?d} (focusable #{?d}) wanted={?d}\n", .{ @tagName(self.phase), self.loaded, visible, self.key, self.pageHasKeyboard(), self.focused[0..self.focused_len], state.focused, at, self.control(2) });
             return error.TimedOut;
         }
         switch (self.phase) {
