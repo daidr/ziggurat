@@ -303,7 +303,13 @@ uint64_t zv_avf_interval(void *p) {
     if (e->interval == 0) {
         @autoreleasepool {
             e->interval = 1000000000ull / 60;
+            /* The asset loaded its tracks before its first picture: the
+               synchronous accessor, deprecated for assets not yet loaded,
+               answers at once. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
             NSArray<AVAssetTrack *> *tracks = [e->item.asset tracksWithMediaType:AVMediaTypeVideo];
+#pragma clang diagnostic pop
             float fps = tracks.count > 0 ? tracks.firstObject.nominalFrameRate : 0;
             /* Asked for twice as often, so that a frame shows at the
                refresh after it came due, not up to one later. */
