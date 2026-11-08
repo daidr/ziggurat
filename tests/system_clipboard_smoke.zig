@@ -13,9 +13,15 @@ const text = "héllo 世界 😀";
 const html = "<b>粗体</b> & <i>x</i>";
 const custom: clipboard.Format = .{ .kind = .custom, .name = "application/x-ziggurat-smoke" };
 const custom_bytes = "\x00\x01\x02binary\xff";
+const concealed_mark: clipboard.Format = .{ .kind = .custom, .name = switch (builtin.os.tag) {
+    .macos => clipboard.concealed_marks.macos,
+    .windows => clipboard.concealed_marks.windows,
+    else => clipboard.concealed_marks.linux,
+} };
+extern fn zsc_test_last_host_only() c_int;
 const files = if (builtin.os.tag == .windows) "C:\\Windows\\a b.txt\x00C:\\Windows\\文件.txt" else "/tmp/a b.txt\x00/tmp/文件.txt";
 
-const Step = enum { formats, text, html, png, custom, files, capacity, missing, lazy, replace, revoked, done };
+const Step = enum { formats, text, html, png, custom, files, capacity, missing, concealed, lazy, replace, revoked, done };
 const Script = struct {
     app: *z.App,
     board: clipboard.Board = undefined,
@@ -129,6 +135,22 @@ const Script = struct {
             },
             .missing => {
                 try std.testing.expect(value == .unavailable);
+                // A concealed write carries the platform's mark next to its
+                // content: KDE's hint with "secret" on Linux, the empty
+                // ConcealedType on every item on macOS, written for this host.
+                try self.board.writeWith(&.{.{ .format = .{ .kind = .text }, .data = "hunter2" }}, .{ .concealed = true });
+                self.step = .concealed;
+                try self.read(concealed_mark, &self.buffer);
+            },
+            .concealed => {
+                switch (builtin.os.tag) {
+                    .linux => try expectData(value, clipboard.concealed_marks.linux_value),
+                    .macos => {
+                        try expectData(value, "");
+                        try std.testing.expectEqual(@as(c_int, 1), zsc_test_last_host_only());
+                    },
+                    else => try std.testing.expect(value == .data),
+                }
                 self.step = .lazy;
                 try self.board.offer(.{ .context = self, .render = render, .released = release }, &.{ .{ .kind = .text }, custom });
                 try std.testing.expect(self.board.offering());
@@ -140,6 +162,7 @@ const Script = struct {
                 try std.testing.expect(self.renders >= 1 and self.released == 0);
                 // An eager write replaces the offer and releases its provider once.
                 try self.board.write(&.{.{ .format = .{ .kind = .text }, .data = "eager" }});
+                if (builtin.os.tag == .macos) try std.testing.expectEqual(@as(c_int, 0), zsc_test_last_host_only());
                 try std.testing.expectEqual(@as(u32, 1), self.released);
                 try std.testing.expect(!self.board.offering());
                 self.step = .replace;

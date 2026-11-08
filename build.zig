@@ -575,7 +575,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_images", .module = images }, .{ .name = "ziggurat_image_drawing", .module = image_drawing },
         });
     }
-    const system = b.addModule("ziggurat_system", .{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    const system = b.addModule("ziggurat_system", .{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_i18n", .module = i18n } } });
     // The file watcher uses FSEvents on macOS; menus, status items, the Dock
     // and dialogs are AppKit's.
     if (target.result.os.tag == .macos) {
@@ -740,7 +740,7 @@ pub fn build(b: *std.Build) void {
         system.link_libc = true;
     }
     addSystemIntegrationNative(b, system, target, optimize);
-    const system_unit_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} }) });
+    const system_unit_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_i18n", .module = i18n } } }) });
     addSystemIntegrationNative(b, system_unit_tests.root_module, target, optimize);
     if (target.result.os.tag == .windows) {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| system_unit_tests.root_module.linkSystemLibrary(library, .{});
@@ -909,6 +909,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_view_video", .module = view_video },
         .{ .name = "ziggurat_video", .module = system_video },
     });
+    // An app's own frames of video, in BGRA, NV12 and I420, drawn and read
+    // back each frame: `-- [frames]`.
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        _ = addSmokeExecutable(b, "benchmark-video-frames", "tests/video_frame_benchmark.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_view", .module = declarative_view },
+        });
+    }
     const view_timer = b.addModule("ziggurat_view_timer", .{ .root_source_file = b.path("src/view/timer.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },      .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_wake", .module = wake },

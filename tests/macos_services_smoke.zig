@@ -55,9 +55,32 @@ fn roundTrip() !void {
 fn checkPower() !void {
     var system_sleep = try system.power.Assertion.acquire(.{ .reason = "ziggurat smoke" });
     var display_sleep = try system.power.Assertion.acquire(.{ .kind = .display, .reason = "ziggurat smoke display" });
+    // Keeping App Nap off while the Mac may sleep, next to the others.
+    var running = try system.power.Assertion.acquire(.{ .kind = .running, .reason = "ziggurat smoke serving" });
     display_sleep.release();
     display_sleep.release();
     system_sleep.release();
+    running.release();
+    running.release();
+}
+
+/// The language the app chose is kept as the app's own AppleLanguages, read
+/// back by the next launch's Choice, and forgotten again.
+fn checkLocale() !void {
+    var buffer: [32]u8 = undefined;
+    {
+        var choice = try system.locale.Choice.init(.{ .environment = .none });
+        choice.start();
+        try choice.set("de_CH");
+    }
+    {
+        var next = try system.locale.Choice.init(.{ .environment = .none });
+        try std.testing.expectEqualStrings("de-CH", next.chosenTag(&buffer));
+        next.start();
+        try next.set("");
+    }
+    var last = try system.locale.Choice.init(.{ .environment = .none });
+    try std.testing.expectEqualStrings("", last.chosenTag(&buffer));
 }
 
 fn checkDirectories() !void {
@@ -214,6 +237,7 @@ pub fn main() !void {
 
     try checkSecrets();
     try checkPower();
+    try checkLocale();
     try checkDirectories();
     // Shell workers refuse the UI thread.
     var shell_result: anyerror!void = {};

@@ -11,6 +11,13 @@ enum { STATUS_DATA, STATUS_UNAVAILABLE, STATUS_MALFORMED, STATUS_TOO_MANY_FILES,
 enum { FLAG_TEXT = 1, FLAG_HTML = 2, FLAG_PNG = 4, FLAG_FILES = 8 };
 #define MAX_FILES 1024
 #define GNOME_VARIANT 0x10000u
+/* The info of the target that marks a concealed write: KDE's
+ * x-kde-passwordManagerHint, whose value "secret" asks the clipboard
+ * managers that read it (Klipper, CopyQ, GPaste) to treat the content as
+ * confidential. */
+#define CONCEALED_TARGET 0x20000u
+#define CONCEALED_NAME "x-kde-passwordManagerHint"
+#define CONCEALED_VALUE "secret"
 
 typedef struct ZscItem { int kind; const char *name; size_t name_len; const uint8_t *data; size_t len; } ZscItem;
 typedef struct ZscCallbacks {
@@ -76,6 +83,10 @@ static void sink_into(GtkSelectionData *selection, int kind, guint variant, cons
 static void offer_get(GtkClipboard *clipboard, GtkSelectionData *selection, guint info, gpointer data) {
     (void)clipboard;
     ZscOffer *offer = data;
+    if (info == CONCEALED_TARGET) {
+        gtk_selection_data_set(selection, gtk_selection_data_get_target(selection), 8, (const guchar *)CONCEALED_VALUE, (gint)strlen(CONCEALED_VALUE));
+        return;
+    }
     size_t index = info & 0xffffu;
     if (index >= offer->count) return;
     ZscEntry *entry = &offer->entries[index];
@@ -110,7 +121,7 @@ int zsc_sink_set(void *sink, const uint8_t *data, size_t len) {
 
 /* Copies eager data first; set_with_data then calls the previous offer's
  * clear function, which may end a live lazy offer through callbacks.lost. */
-static int publish(ZscBoard *board, const ZscItem *items, size_t count, gboolean lazy) {
+static int publish(ZscBoard *board, const ZscItem *items, size_t count, gboolean lazy, int concealed) {
     ZscOffer *offer = g_try_new0(ZscOffer, 1);
     if (!offer) return 0;
     g_atomic_int_inc(&resources);
@@ -136,6 +147,7 @@ static int publish(ZscBoard *board, const ZscItem *items, size_t count, gboolean
         }
         }
     }
+    if (concealed) gtk_target_list_add(list, gdk_atom_intern_static_string(CONCEALED_NAME), 0, CONCEALED_TARGET);
     gint n = 0;
     GtkTargetEntry *targets = gtk_target_table_new_from_list(list, &n);
     gtk_target_list_unref(list);
@@ -145,8 +157,8 @@ static int publish(ZscBoard *board, const ZscItem *items, size_t count, gboolean
     board->current = offer;
     return 1;
 }
-int zsc_board_write(ZscBoard *board, const ZscItem *items, size_t count) { return publish(board, items, count, FALSE); }
-int zsc_board_offer(ZscBoard *board, const ZscItem *items, size_t count) { return publish(board, items, count, TRUE); }
+int zsc_board_write(ZscBoard *board, const ZscItem *items, size_t count, int concealed) { return publish(board, items, count, FALSE, concealed); }
+int zsc_board_offer(ZscBoard *board, const ZscItem *items, size_t count, int concealed) { return publish(board, items, count, TRUE, concealed); }
 void zsc_board_revoke(ZscBoard *board) {
     if (board->current && board->current->lazy) gtk_clipboard_clear(board->clipboard);
 }

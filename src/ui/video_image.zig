@@ -11,6 +11,7 @@
 //! them draws it, and only then, so a window the GPU draws never converts.
 const std = @import("std");
 const drawing = @import("ziggurat_drawing_resources");
+const yuv_image = @import("yuv.zig");
 
 /// Main-thread only. Keep it at a stable address while committed.
 pub const VideoImage = struct {
@@ -27,6 +28,9 @@ pub const VideoImage = struct {
     /// The identity the renderers hold, once a commit uploaded it.
     committed: ?u64 = null,
     source: drawing.VideoSource = .{ .picture = .{ .width = 0, .height = 0 }, .convert = convertSource },
+    /// The chroma of the last I420 frame, interleaved as NV12's
+    /// (`commitYuv`).
+    chroma: []u8 = &.{},
 
     pub fn init(allocator: std.mem.Allocator) VideoImage {
         return .{ .allocator = allocator, .lease = drawing.Lease.init(std.Thread.getCurrentId()) };
@@ -35,6 +39,7 @@ pub const VideoImage = struct {
     /// shows the picture.
     pub fn deinit(self: *VideoImage) void {
         for (self.buffers) |buffer| if (buffer.len != 0) self.allocator.free(buffer);
+        if (self.chroma.len != 0) self.allocator.free(self.chroma);
         self.* = undefined;
     }
 
@@ -75,6 +80,33 @@ pub const VideoImage = struct {
         } else try context.uploadDynamicImage(next);
         self.committed = identity;
         self.back ^= 1;
+    }
+
+    /// Shows a frame of video in Y′CbCr, as a decoder of the app's own (such
+    /// as FFmpeg) gives it, without converting it: `commit` of its planes,
+    /// NV12's as they are and I420's Cb and Cr interleaved into a plane of
+    /// NV12's chroma the image keeps. The GPU renderers upload the planes
+    /// and convert them as they sample them; the software renderers, and
+    /// captures, convert the frame as they draw it. The planes are taken
+    /// without a copy, but for I420's chroma: keep them as they are until
+    /// the next commit. The frame shows at its size, which the GPU scales
+    /// as it samples it, without the halved copies of an image shown much
+    /// smaller: have the decoder give the size it shows at, where it can.
+    /// Panics on a frame its planes cannot hold (`YuvImage.check`).
+    pub fn commitYuv(self: *VideoImage, context: anytype, image: yuv_image.YuvImage) !void {
+        var old: []u8 = &.{};
+        const previous = self.chroma;
+        const picture = try image.picture(self.allocator, &self.chroma, &old);
+        self.commit(context, picture) catch |err| {
+            // The renderers still show the frame before, whose chroma is
+            // the buffer replaced.
+            if (old.len != 0 or (previous.len == 0 and self.chroma.len != 0)) {
+                self.allocator.free(self.chroma);
+                self.chroma = previous;
+            }
+            return err;
+        };
+        if (old.len != 0) self.allocator.free(old);
     }
 
     /// Keeps the committed picture as BGRA of the image's own, for its
@@ -293,4 +325,209 @@ test "a video image takes turns between two buffers and converts when asked" {
     try std.testing.expectEqual(@as(usize, 2), context.uploads);
     image.release(&context);
     try std.testing.expect(context.held == null and image.view() == null);
+}
+
+/// A w×h picture of bars in NV12, and the same picture in I420, every
+/// plane in rows padded past their samples, as decoders pad them.
+const Frames = struct {
+    luma: []u8,
+    nv12_chroma: []u8,
+    u: []u8,
+    v: []u8,
+    nv12: yuv_image.YuvImage,
+    i420: yuv_image.YuvImage,
+
+    fn init(allocator: std.mem.Allocator, w: u32, h: u32, matrix: yuv_image.YuvMatrix) !Frames {
+        const cw = (w + 1) / 2;
+        const ch = (h + 1) / 2;
+        const ls = w + 3;
+        const ns = 2 * cw + 6;
+        const cs = cw + 5;
+        const luma = try allocator.alloc(u8, ls * h);
+        const nv12_chroma = try allocator.alloc(u8, ns * ch);
+        const u = try allocator.alloc(u8, cs * ch);
+        const v = try allocator.alloc(u8, cs * ch);
+        @memset(luma, 0xee);
+        @memset(nv12_chroma, 0xee);
+        @memset(u, 0xee);
+        @memset(v, 0xee);
+        for (0..h) |y| for (0..w) |x| {
+            luma[y * ls + x] = @intCast(16 + (x * 219) / w);
+        };
+        for (0..ch) |y| for (0..cw) |x| {
+            const cb: u8 = @intCast(16 + (x * 224) / cw);
+            const cr: u8 = @intCast(240 - (y * 224) / ch);
+            nv12_chroma[y * ns + 2 * x] = cb;
+            nv12_chroma[y * ns + 2 * x + 1] = cr;
+            u[y * cs + x] = cb;
+            v[y * cs + x] = cr;
+        };
+        return .{
+            .luma = luma,
+            .nv12_chroma = nv12_chroma,
+            .u = u,
+            .v = v,
+            .nv12 = .{ .format = .nv12, .width = w, .height = h, .matrix = matrix, .planes = .{ luma, nv12_chroma, &.{} }, .strides = .{ ls, ns, 0 } },
+            .i420 = .{ .format = .i420, .width = w, .height = h, .matrix = matrix, .planes = .{ luma, u, v }, .strides = .{ ls, cs, cs } },
+        };
+    }
+    fn deinit(self: Frames, allocator: std.mem.Allocator) void {
+        for ([_][]u8{ self.luma, self.nv12_chroma, self.u, self.v }) |bytes| allocator.free(bytes);
+    }
+};
+
+const TestUploads = struct {
+    held: ?u64 = null,
+    uploads: usize = 0,
+    fn uploadDynamicImage(self: *@This(), next: drawing.ImageView) !void {
+        try next.validate();
+        self.held = next.identity;
+        self.uploads += 1;
+    }
+    fn updateImage(self: *@This(), old: u64, next: drawing.ImageView) !void {
+        if (self.held != old) return error.ImageNotUploaded;
+        self.held = next.identity;
+    }
+    fn releaseImage(self: *@This(), identity: u64) !bool {
+        if (self.held != identity) return false;
+        self.held = null;
+        return true;
+    }
+};
+
+fn drawn(allocator: std.mem.Allocator, image: *VideoImage) ![]u8 {
+    const shown = image.view().?;
+    try std.testing.expect(shown.video.?.ensure(shown));
+    return allocator.dupe(u8, shown.levels[0].pixels[0..shown.levels[0].byte_len]);
+}
+
+test "frames in NV12 and I420 show the pixels their planes convert to, NV12's without a copy" {
+    const allocator = std.testing.allocator;
+    const w = 37;
+    const h = 21;
+    const frames = try Frames.init(allocator, w, h, .bt709);
+    defer frames.deinit(allocator);
+    var image = VideoImage.init(allocator);
+    defer image.deinit();
+    var context: TestUploads = .{};
+
+    try image.commitYuv(&context, frames.nv12);
+    const picture = image.source.picture;
+    try std.testing.expectEqual(drawing.VideoFormat.nv12, picture.format);
+    try std.testing.expectEqual(drawing.VideoMatrix.bt709, picture.matrix);
+    try std.testing.expectEqual(@as(?[*]const u8, frames.luma.ptr), picture.planes[0]);
+    try std.testing.expectEqual(@as(?[*]const u8, frames.nv12_chroma.ptr), picture.planes[1]);
+    try std.testing.expectEqual(@as(usize, 0), image.chroma.len);
+    const want = try drawn(allocator, &image);
+    defer allocator.free(want);
+
+    try image.commitYuv(&context, frames.i420);
+    const interleaved = image.source.picture;
+    try std.testing.expectEqual(@as(?[*]const u8, frames.luma.ptr), interleaved.planes[0]);
+    try std.testing.expectEqual(@as(u32, 2 * ((w + 1) / 2)), interleaved.strides[1]);
+    try std.testing.expectEqual(@as(?[*]const u8, image.chroma.ptr), interleaved.planes[1]);
+    const got = try drawn(allocator, &image);
+    defer allocator.free(got);
+    try std.testing.expectEqualSlices(u8, want, got);
+    // The next I420 frame interleaves into the same plane, and the frames
+    // of one size are one image, which the renderers update in place.
+    const chroma = image.chroma.ptr;
+    try image.commitYuv(&context, frames.i420);
+    try std.testing.expectEqual(chroma, image.chroma.ptr);
+    try std.testing.expectEqual(@as(usize, 1), context.uploads);
+
+    // Another size is another image; its chroma plane grows.
+    const big = try Frames.init(allocator, 64, 48, .bt601);
+    defer big.deinit(allocator);
+    try image.commitYuv(&context, big.i420);
+    try std.testing.expectEqual(@as(usize, 2), context.uploads);
+    try std.testing.expect(image.chroma.len >= 64 * 24);
+    image.release(&context);
+}
+
+test "a frame's matrix and range reach the renderers" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { matrix: yuv_image.YuvMatrix, full: bool, want: drawing.VideoMatrix }{
+        .{ .matrix = .bt601, .full = false, .want = .bt601 },
+        .{ .matrix = .bt709, .full = false, .want = .bt709 },
+        .{ .matrix = .bt2020, .full = false, .want = .bt2020 },
+        .{ .matrix = .bt601, .full = true, .want = .bt601_full },
+        .{ .matrix = .bt709, .full = true, .want = .bt709_full },
+        .{ .matrix = .bt2020, .full = true, .want = .bt2020_full },
+    };
+    var chroma: []u8 = &.{};
+    defer if (chroma.len != 0) allocator.free(chroma);
+    for (cases) |case| {
+        const frames = try Frames.init(allocator, 4, 4, case.matrix);
+        defer frames.deinit(allocator);
+        var image = frames.nv12;
+        image.full_range = case.full;
+        var old: []u8 = &.{};
+        try std.testing.expectEqual(case.want, (try image.picture(allocator, &chroma, &old)).matrix);
+    }
+    // The full range converts otherwise than video's: black at 16 is gray.
+    const luma: [4]u8 = @splat(16);
+    const neutral: [2]u8 = @splat(128);
+    var pixels: [16]u8 = undefined;
+    try std.testing.expect(toBgra(.{ .width = 2, .height = 2, .matrix = .bt709_full, .planes = .{ &luma, &neutral }, .strides = .{ 2, 2 } }, &pixels, 8));
+    try std.testing.expectEqual(@as(u8, 16), pixels[0]);
+    try std.testing.expect(toBgra(.{ .width = 2, .height = 2, .matrix = .bt709, .planes = .{ &luma, &neutral }, .strides = .{ 2, 2 } }, &pixels, 8));
+    try std.testing.expectEqual(@as(u8, 0), pixels[0]);
+}
+
+test "a frame whose planes do not hold its picture is refused" {
+    const allocator = std.testing.allocator;
+    const frames = try Frames.init(allocator, 9, 7, .bt709);
+    defer frames.deinit(allocator);
+    const Change = *const fn (*yuv_image.YuvImage) void;
+    const changes = [_]struct { err: yuv_image.YuvError, change: Change }{
+        .{ .err = error.InvalidSize, .change = struct {
+            fn f(m: *yuv_image.YuvImage) void {
+                m.width = 0;
+            }
+        }.f },
+        .{ .err = error.PlaneTooSmall, .change = struct {
+            fn f(m: *yuv_image.YuvImage) void {
+                m.planes[0] = m.planes[0][0 .. m.strides[0] * (m.height - 1) + m.width - 1];
+            }
+        }.f },
+        .{ .err = error.PlaneTooSmall, .change = struct {
+            fn f(m: *yuv_image.YuvImage) void {
+                m.strides[0] = m.width - 1;
+            }
+        }.f },
+        .{ .err = error.PlaneTooSmall, .change = struct {
+            fn f(m: *yuv_image.YuvImage) void {
+                m.planes[1] = m.planes[1][0 .. m.strides[1] * (m.chromaHeight() - 1) + 2 * m.chromaWidth() - 1];
+            }
+        }.f },
+        .{ .err = error.PlaneTooSmall, .change = struct {
+            fn f(m: *yuv_image.YuvImage) void {
+                m.format = .i420;
+                m.planes[2] = &.{};
+            }
+        }.f },
+        .{ .err = error.OddChromaStride, .change = struct {
+            fn f(m: *yuv_image.YuvImage) void {
+                m.strides[1] -= 1;
+            }
+        }.f },
+        .{ .err = error.InvalidMatrix, .change = struct {
+            fn f(m: *yuv_image.YuvImage) void {
+                m.matrix = @fromBackingInt(@intCast(3));
+            }
+        }.f },
+        .{ .err = error.InvalidFormat, .change = struct {
+            fn f(m: *yuv_image.YuvImage) void {
+                m.format = @fromBackingInt(@intCast(2));
+            }
+        }.f },
+    };
+    try frames.nv12.check();
+    try frames.i420.check();
+    for (changes) |case| {
+        var image = frames.nv12;
+        case.change(&image);
+        try std.testing.expectError(case.err, image.check());
+    }
 }

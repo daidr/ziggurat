@@ -512,6 +512,25 @@ if (try v.slider(&at, .{ .minimum = 0, .maximum = @max(length, 0.001), .step = 0
 - `GifDecoder` 解码动画 GIF：每帧画在前面各帧留下的画面之上，并按帧的处置方式（保留、清为透明背景、恢复为绘制前）处理，与浏览器一致；10 ms 及以下的帧显示 100 ms。循环与否只看 `setLoop`，不看 GIF 自带的循环次数。
 - `ApngDecoder` 解码动画 PNG：每帧按处置方式（保留、清为透明、恢复为绘制前的画面）和混合方式（替换、叠加）画在前面各帧留下的画面上，与浏览器一致；10 ms 及以下的帧显示 100 ms，不是动画的 PNG 是只有一帧的视频。每一帧保持压缩，播放到它时才解码；`duration()` 给出动画总长。循环与否只看 `setLoop`，不看 PNG 自带的播放次数。解码在 `ziggurat_apng` 模块（`src/images/apng.zig`），PNG 本身由 `ziggurat_png` 解码，终端的 Kitty 图片也用它。
 - 其他格式实现自己的 `Decoder`：`next(context, pixels)` 把下一帧以预乘 BGRA、自上而下的行写入 `width * height * 4` 字节并返回显示时长（纳秒，0 表示 100 ms），最后一帧之后返回 null；`rewind(context)` 回到第一帧之前；可选的 `duration` 给出总长，`duration()` 由它报告（GIF 与 APNG 的有）。
+- 应用自己解码（例如用 FFmpeg）的直播流或视频不必走 `Decoder` 的 BGRA：把每帧的 Y′CbCr 平面交给 `ui.VideoImage.commitYuv(&host.context, frame)`，在构建里 `v.image(image.view().?, …)` 显示（见下文“应用自己的 YUV 画面”）。
+
+应用自己的 YUV 画面：
+
+`ui.YuvImage` 是一帧 4:2:0 的 Y′CbCr 画面，正如视频解码器给出的那样：`format` 为 `.nv12`（亮度一个平面，Cb 与 Cr 交织的色度一个平面，硬件解码器 VideoToolbox、Direct3D、VA-API 留下的样子）或 `.i420`（亮度、Cb、Cr 各一个平面，软件解码器如 FFmpeg 的 YUV420P）；`width`、`height` 是像素尺寸，色度宽高各为一半（向上取整）；`planes` 与 `strides` 是各平面及其行长（字节，可以比样本长，解码器会填充）；`matrix` 选 `.bt601`（标清与 JPEG）、`.bt709`（高清，多数流、摄像头与录屏）或 `.bt2020`（超高清，只用它的矩阵，HDR 按 SDR 的传递函数显示）；`full_range` 表示样本取满 0～255，而不是视频的 16～235（亮度）与 16～240（色度）。
+
+```zig
+// 在绘制之外，每来一帧：
+try picture.commitYuv(&host.context, .{
+    .format = .nv12, .width = 1920, .height = 1080,
+    .planes = .{ luma, chroma, &.{} }, .strides = .{ luma_stride, chroma_stride, 0 },
+    .matrix = .bt709,
+});
+if (host.context.window) |window| window.invalidate();
+// 构建里：
+if (picture.view()) |shown| try v.image(shown, .{ .fit = .contain }, .{ .grow = 1 });
+```
+
+GPU 渲染器上传这些平面（每像素 1.5 字节，BGRA 要 4 字节），在着色器里边采样边转换，CPU 不做任何转换，而转换本是显示一帧的大部分开销；软件渲染器和截图在绘制时才转换。NV12 的平面原样交给渲染器，不复制；I420 的 Cb 与 Cr 交织进图像自留的一个 NV12 色度平面（画面字节数的四分之一），这样渲染器和着色器只认一种平面布局。平面不复制，所以到下一次提交前保持不变（I420 的色度除外）。平面装不下画面时（尺寸为 0、行长短于样本、平面字节不够、NV12 色度行长为奇数、未知格式或矩阵）`commitYuv` panic，而不是让渲染器越界读；`YuvImage.check()` 先返回同样的判断供测试或校验。画面按自己的尺寸显示，由 GPU 在采样时缩放，不像缩小很多显示的图片那样生成减半的副本：解码器能给出显示尺寸的画面时就让它给。`zig build benchmark-video-frames -Dgpu=true -- [帧数]` 在真实窗口里每帧提交一张新的 1920×1080 画面并显示为 1280×720：CPU 转成 BGRA 再上传、NV12 平面、I420 平面三种，有限与全范围各一遍，每帧读回窗口中心并核对颜色（OpenGL 在 llvmpipe 上需 `ZIGGURAT_GL=on`）；Linux 的 llvmpipe 上 Debug 构建 NV12 约 20 ms 一帧，BGRA 约 240 ms。
 
 系统视频（`ziggurat_video`）：
 
