@@ -300,6 +300,9 @@ void zv_avf_unlock(void *buffer) { CVPixelBufferUnlockBaseAddress((CVPixelBuffer
 
 uint64_t zv_avf_interval(void *p) {
     ZigVideoEngine *e = engine_of(p);
+    /* Until the item is ready its tracks may still load, which the
+       synchronous accessor would wait for. */
+    if (e->interval == 0 && e->item.status != AVPlayerItemStatusReadyToPlay) return 1000000000ull / 60;
     if (e->interval == 0) {
         @autoreleasepool {
             e->interval = 1000000000ull / 60;
