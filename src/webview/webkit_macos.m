@@ -3620,6 +3620,14 @@ static id session_state_of(const void *data,size_t length) {
 static BOOL window_on_screen(NSWindow *window) {
     return window && (window.occlusionState&NSWindowOcclusionStateVisible)!=0;
 }
+/* Test hook: whether some of the page's window shows on screen, as the
+   window server says: 1 when it does, 0 when it is covered or the display
+   sleeps, -1 when the page is gone. */
+int zwk_test_on_screen(ZwkState *state) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->view) return -1;
+    return window_on_screen(s->view.window)?1:0;
+}
 /* WebKit puts a page that scrolled before its window first came on screen
  * back at the top when the window does: in a window made hidden, and in one
  * shown as it opens when the page loads before the window server puts the
