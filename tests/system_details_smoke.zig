@@ -217,7 +217,7 @@ fn shownIcons(owner: *system.Owner, ids: [4]u64) ![4]bool {
     }
     return shown;
 }
-fn itemBitmap(owner: *system.Owner, id: u64) ?c.HBITMAP {
+fn itemBitmap(owner: *system.Owner, id: u64) c.HBITMAP {
     for (owner.entries[0..owner.entry_count]) |entry| if (entry.id == id) {
         var info = std.mem.zeroes(c.MENUITEMINFOW);
         info.cbSize = @sizeOf(c.MENUITEMINFOW);
