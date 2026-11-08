@@ -14,8 +14,8 @@ const Callbacks = extern struct {
 };
 extern fn zsc_board_create(owner: *anyopaque, callbacks: *const Callbacks) ?*anyopaque;
 extern fn zsc_board_destroy(board: *anyopaque) void;
-extern fn zsc_board_write(board: *anyopaque, items: [*]const Item, count: usize) c_int;
-extern fn zsc_board_offer(board: *anyopaque, items: [*]const Item, count: usize) c_int;
+extern fn zsc_board_write(board: *anyopaque, items: [*]const Item, count: usize, concealed: c_int) c_int;
+extern fn zsc_board_offer(board: *anyopaque, items: [*]const Item, count: usize, concealed: c_int) c_int;
 extern fn zsc_board_revoke(board: *anyopaque) void;
 extern fn zsc_board_clear(board: *anyopaque) void;
 extern fn zsc_read_start(board: *anyopaque, request: *anyopaque, formats: c_int, kind: c_int, name: [*]const u8, name_len: usize) ?*anyopaque;
@@ -67,17 +67,17 @@ fn items(storage: *[api.max_formats]Item, formats: []const api.Format, entries: 
     }
     return storage[0..formats.len];
 }
-pub fn write(owner: *api.Board, entries: []const api.Entry) !void {
+pub fn write(owner: *api.Board, entries: []const api.Entry, concealed: bool) !void {
     var formats: [api.max_formats]api.Format = undefined;
     for (entries, 0..) |entry, index| formats[index] = entry.format;
     var storage: [api.max_formats]Item = undefined;
     const list = items(&storage, formats[0..entries.len], entries);
-    if (zsc_board_write(owner.native.handle.?, list.ptr, list.len) == 0) return error.ClipboardWriteFailed;
+    if (zsc_board_write(owner.native.handle.?, list.ptr, list.len, @intFromBool(concealed)) == 0) return error.ClipboardWriteFailed;
 }
-pub fn offer(owner: *api.Board, formats: []const api.Format) !void {
+pub fn offer(owner: *api.Board, formats: []const api.Format, concealed: bool) !void {
     var storage: [api.max_formats]Item = undefined;
     const list = items(&storage, formats, null);
-    if (zsc_board_offer(owner.native.handle.?, list.ptr, list.len) == 0) return error.ClipboardWriteFailed;
+    if (zsc_board_offer(owner.native.handle.?, list.ptr, list.len, @intFromBool(concealed)) == 0) return error.ClipboardWriteFailed;
 }
 pub fn clear(owner: *api.Board) !void {
     zsc_board_clear(owner.native.handle.?);

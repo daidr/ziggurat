@@ -111,6 +111,17 @@ void *zsm_power_begin(int display, const char *reason) {
         return token ? (__bridge_retained void *)token : NULL;
     }
 }
+/* Keeps App Nap off and lets the Mac sleep when idle: an activity of the
+   user's without NSActivityIdleSystemSleepDisabled
+   (NSActivityUserInitiatedAllowingIdleSystemSleep). The system does not
+   suppress the app once none of its windows shows, and it shows in no
+   pmset -g assertions. Ended by zsm_power_end. */
+void *zsm_power_begin_running(const char *reason) {
+    @autoreleasepool {
+        id token = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep reason:ztext(reason) ?: @"application"];
+        return token ? (__bridge_retained void *)token : NULL;
+    }
+}
 void zsm_power_end(void *token) {
     @autoreleasepool {
         id activity = (__bridge_transfer id)token;

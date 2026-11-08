@@ -240,6 +240,29 @@ pub const Provider = struct {
     render: *const fn (*anyopaque, Format, *Sink) anyerror!void,
     released: ?*const fn (*anyopaque) void = null,
 };
+/// How a write or an offer is marked for other apps.
+/// The marks of a concealed write (`WriteOptions.concealed`), by platform.
+pub const concealed_marks = struct {
+    pub const macos = "org.nspasteboard.ConcealedType";
+    pub const linux = "x-kde-passwordManagerHint";
+    pub const linux_value = "secret";
+    pub const windows = "ExcludeClipboardContentFromMonitorProcessing";
+};
+pub const WriteOptions = struct {
+    /// Marks the content as confidential, such as a password, for the
+    /// clipboard managers that read the platform's mark; what they do with
+    /// it, such as leaving it out of their histories or showing it as a
+    /// password, is theirs. macOS adds nspasteboard.org's
+    /// `org.nspasteboard.ConcealedType` to every item and writes for the
+    /// current host only (`NSPasteboardContentsCurrentHostOnly`), which keeps
+    /// the content off Universal Clipboard; Windows adds the
+    /// `ExcludeClipboardContentFromMonitorProcessing` format, which keeps it
+    /// out of the clipboard history and off the user's other devices; Linux
+    /// (X11 and Wayland) offers KDE's `x-kde-passwordManagerHint` target,
+    /// `secret`. Browsers have no such mark. The content stays on the
+    /// clipboard until the app replaces or clears it.
+    concealed: bool = false,
+};
 pub const BoardOptions = struct {
     context: ?*anyopaque = null,
     /// Any clipboard owner change, including this Board's own writes. Query
@@ -311,6 +334,10 @@ pub const Board = struct {
     /// Busy fails with ClipboardBusy and last_error; retry scheduling is the
     /// caller's explicit choice.
     pub fn write(self: *Board, entries: []const Entry) !void {
+        return self.writeWith(entries, .{});
+    }
+    /// `write` with options, such as a concealed write of a password.
+    pub fn writeWith(self: *Board, entries: []const Entry, options: WriteOptions) !void {
         try self.require();
         if (entries.len == 0 or entries.len > max_formats) return error.InvalidEntries;
         for (entries, 0..) |entry, index| {
@@ -319,12 +346,17 @@ pub const Board = struct {
             for (entries[0..index]) |earlier| if (earlier.format.eql(entry.format)) return error.DuplicateFormat;
         }
         self.last_error = 0;
-        try native.write(self, entries);
+        try native.write(self, entries, options.concealed);
         self.endOffer();
     }
     /// Announces formats now and renders them only when requested. The formats
     /// and custom names are copied; the provider context follows Provider rules.
     pub fn offer(self: *Board, provider: Provider, announced: []const Format) !void {
+        return self.offerWith(provider, announced, .{});
+    }
+    /// `offer` with options; a concealed offer carries the mark eagerly,
+    /// next to its announced formats.
+    pub fn offerWith(self: *Board, provider: Provider, announced: []const Format, options: WriteOptions) !void {
         try self.require();
         if (announced.len == 0 or announced.len > max_formats) return error.InvalidEntries;
         for (announced, 0..) |item, index| {
@@ -338,7 +370,7 @@ pub const Board = struct {
             copied[index] = item;
         }
         self.last_error = 0;
-        try native.offer(self, copied[0..announced.len]);
+        try native.offer(self, copied[0..announced.len], options.concealed);
         self.endOffer();
         self.provider = provider;
         self.offered_names = names;

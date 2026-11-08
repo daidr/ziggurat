@@ -167,7 +167,24 @@ int zsc_sink_set(void *sink, const uint8_t *data, size_t len) {
     return 1;
 }
 
-static int publish(ZscBoard *board, const ZscItem *items, size_t count, int lazy) {
+/* nspasteboard.org's mark of confidential content, for the clipboard
+   managers that read it: on every item of a concealed write, with no data. */
+static NSString *const concealed_type = @"org.nspasteboard.ConcealedType";
+/* How the last write took the pasteboard: 1 for the current host only,
+   which a concealed write does to keep off Universal Clipboard. */
+static int last_host_only = -1;
+int zsc_test_last_host_only(void) { return last_host_only; }
+
+/* Takes the pasteboard for new contents, as clearContents does; concealed
+   contents stay on this host (NSPasteboardContentsCurrentHostOnly) until the
+   next write. */
+static void prepare(NSPasteboard *pasteboard, int concealed) {
+    last_host_only = concealed ? 1 : 0;
+    if (concealed) [pasteboard prepareForNewContentsWithOptions:NSPasteboardContentsCurrentHostOnly];
+    else [pasteboard clearContents];
+}
+
+static int publish(ZscBoard *board, const ZscItem *items, size_t count, int lazy, int concealed) {
     @autoreleasepool {
         if (count > MAX_ITEMS) return 0;
         ZscOffer *offer = [ZscOffer new];
@@ -210,9 +227,10 @@ static int publish(ZscBoard *board, const ZscItem *items, size_t count, int lazy
         NSPasteboard *pasteboard = board_pasteboard();
         /* Ends the previous offer: its provider hears it is finished. */
         board->current = nil;
-        [pasteboard clearContents];
+        prepare(pasteboard, concealed);
         NSMutableArray *objects = [NSMutableArray arrayWithObject:first];
         [objects addObjectsFromArray:more];
+        if (concealed) for (NSPasteboardItem *item in objects) [item setData:[NSData data] forType:concealed_type];
         if (![pasteboard writeObjects:objects]) {
             [live_offers removeObject:offer];
             return 0;
@@ -222,8 +240,8 @@ static int publish(ZscBoard *board, const ZscItem *items, size_t count, int lazy
         return 1;
     }
 }
-int zsc_board_write(ZscBoard *board, const ZscItem *items, size_t count) { return publish(board, items, count, 0); }
-int zsc_board_offer(ZscBoard *board, const ZscItem *items, size_t count) { return publish(board, items, count, 1); }
+int zsc_board_write(ZscBoard *board, const ZscItem *items, size_t count, int concealed) { return publish(board, items, count, 0, concealed); }
+int zsc_board_offer(ZscBoard *board, const ZscItem *items, size_t count, int concealed) { return publish(board, items, count, 1, concealed); }
 /* Empties the pasteboard when this Board's lazy offer still owns it. */
 void zsc_board_revoke(ZscBoard *board) {
     @autoreleasepool {

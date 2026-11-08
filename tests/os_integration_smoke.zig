@@ -531,6 +531,9 @@ fn power(require_dbus: bool) !void {
         return;
     }
     try std.testing.expectError(error.ServiceUnavailable, system.power.Assertion.acquire(.{ .reason = "before service", .timeout_ms = 2000 }));
+    // Keeping the app running asks nothing of logind: only macOS naps apps.
+    var running = try system.power.Assertion.acquire(.{ .kind = .running, .reason = "before service", .timeout_ms = 2000 });
+    running.release();
     if (probe.probe_start(1) != 0) return error.ProbeUnavailable;
     defer probe.probe_stop();
     var what: [256]u8 = undefined;

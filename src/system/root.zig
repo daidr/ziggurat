@@ -41,6 +41,7 @@ pub const identity = @import("identity.zig");
 pub const instance = @import("instance.zig");
 pub const integration = @import("integration.zig");
 pub const power = @import("power.zig");
+pub const locale = @import("locale.zig");
 pub const taskbar = @import("taskbar.zig");
 pub const dock = @import("dock.zig");
 pub const Dock = dock.Dock;
@@ -118,6 +119,7 @@ test {
     _ = instance;
     _ = integration;
     _ = power;
+    _ = locale;
     _ = dock;
     _ = @import("tray_icon.zig");
     _ = now_playing;

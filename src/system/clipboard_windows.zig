@@ -70,10 +70,27 @@ pub fn close(board: *api.Board, render_on_stop: bool) void {
     release();
 }
 
-pub fn write(board: *api.Board, entries: []const api.Entry) !void {
+/// Marks the open clipboard's content confidential: while the format is on
+/// the clipboard, with any data, Windows keeps every format out of the
+/// clipboard history and off the cloud clipboard. Set with data, not
+/// delayed, so a render-all at stop keeps it.
+fn conceal(board: *api.Board, block: c.HGLOBAL) !void {
+    const id = try registered(board, std.unicode.utf8ToUtf16LeStringLiteral(api.concealed_marks.windows));
+    if (c.SetClipboardData(id, block) == null) return failed(board, error.ClipboardWriteFailed);
+}
+fn concealBlock(board: *api.Board, concealed: bool) !c.HGLOBAL {
+    if (!concealed) return null;
+    return c.GlobalAlloc(c.GMEM_MOVEABLE | c.GMEM_ZEROINIT, 4) orelse return failed(board, error.ClipboardAllocationFailed);
+}
+
+pub fn write(board: *api.Board, entries: []const api.Entry, concealed: bool) !void {
     var blocks: [api.max_formats]c.HGLOBAL = undefined;
     var ids: [api.max_formats]c.UINT = undefined;
     var built: usize = 0;
+    var mark = try concealBlock(board, concealed);
+    defer if (mark != null) {
+        _ = c.GlobalFree(mark);
+    };
     defer for (blocks[0..built]) |block| if (block != null) {
         _ = c.GlobalFree(block);
     };
@@ -95,9 +112,20 @@ pub fn write(board: *api.Board, entries: []const api.Entry) !void {
         }
         blocks[index] = null;
     }
+    if (concealed) {
+        conceal(board, mark) catch |err| {
+            _ = c.EmptyClipboard();
+            return err;
+        };
+        mark = null;
+    }
 }
-pub fn offer(board: *api.Board, formats: []const api.Format) !void {
+pub fn offer(board: *api.Board, formats: []const api.Format, concealed: bool) !void {
     var ids: [api.max_formats]c.UINT = undefined;
+    var mark = try concealBlock(board, concealed);
+    defer if (mark != null) {
+        _ = c.GlobalFree(mark);
+    };
     for (formats, 0..) |item, index| ids[index] = try formatId(board, item);
     try openClipboard(board);
     defer _ = c.CloseClipboard();
@@ -113,6 +141,13 @@ pub fn offer(board: *api.Board, formats: []const api.Format) !void {
             _ = c.EmptyClipboard();
             return error.ClipboardWriteFailed;
         }
+    }
+    if (concealed) {
+        conceal(board, mark) catch |err| {
+            _ = c.EmptyClipboard();
+            return err;
+        };
+        mark = null;
     }
     @memcpy(board.native.ids[0..formats.len], ids[0..formats.len]);
 }

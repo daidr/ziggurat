@@ -7,10 +7,10 @@ pub fn open(_: *api.Board) !void {
     return error.UnsupportedCapability;
 }
 pub fn close(_: *api.Board, _: bool) void {}
-pub fn write(_: *api.Board, _: []const api.Entry) !void {
+pub fn write(_: *api.Board, _: []const api.Entry, _: bool) !void {
     return error.UnsupportedCapability;
 }
-pub fn offer(_: *api.Board, _: []const api.Format) !void {
+pub fn offer(_: *api.Board, _: []const api.Format, _: bool) !void {
     return error.UnsupportedCapability;
 }
 pub fn clear(_: *api.Board) !void {

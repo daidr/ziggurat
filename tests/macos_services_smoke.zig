@@ -55,9 +55,13 @@ fn roundTrip() !void {
 fn checkPower() !void {
     var system_sleep = try system.power.Assertion.acquire(.{ .reason = "ziggurat smoke" });
     var display_sleep = try system.power.Assertion.acquire(.{ .kind = .display, .reason = "ziggurat smoke display" });
+    // Keeping App Nap off while the Mac may sleep, next to the others.
+    var running = try system.power.Assertion.acquire(.{ .kind = .running, .reason = "ziggurat smoke serving" });
     display_sleep.release();
     display_sleep.release();
     system_sleep.release();
+    running.release();
+    running.release();
 }
 
 fn checkDirectories() !void {

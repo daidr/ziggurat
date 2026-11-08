@@ -142,6 +142,9 @@ pub const cache = @import("cache.zig");
 pub const Cache = cache.Cache;
 pub const PixelImage = @import("pixel_image.zig").PixelImage;
 pub const VideoImage = @import("video_image.zig").VideoImage;
+pub const YuvImage = @import("yuv.zig").YuvImage;
+pub const YuvFormat = @import("yuv.zig").YuvFormat;
+pub const YuvMatrix = @import("yuv.zig").YuvMatrix;
 pub const video_image = @import("video_image.zig");
 pub const frame_stats = @import("frame_stats.zig");
 pub const FrameStats = frame_stats.Stats;
@@ -5299,6 +5302,7 @@ test {
     _ = cache;
     _ = @import("pixel_image.zig");
     _ = @import("video_image.zig");
+    _ = @import("yuv.zig");
     _ = frame_stats;
     _ = input;
     _ = layout;

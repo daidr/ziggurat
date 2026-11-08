@@ -27,14 +27,15 @@ pub fn open(board: *api.Board) !void {
 pub fn close(board: *api.Board, _: bool) void {
     if (active == board) active = null;
 }
-pub fn write(_: *api.Board, entries: []const api.Entry) !void {
+/// Browsers have no mark of concealed content: `concealed` is ignored.
+pub fn write(_: *api.Board, entries: []const api.Entry, _: bool) !void {
     for (entries) |entry| if (entry.format.kind == .text) {
         zw_clipboard_write(entry.data.ptr, @intCast(entry.data.len));
         return;
     };
     zw_clipboard_write("", 0);
 }
-pub fn offer(_: *api.Board, _: []const api.Format) !void {}
+pub fn offer(_: *api.Board, _: []const api.Format, _: bool) !void {}
 pub fn clear(_: *api.Board) !void {
     zw_clipboard_write("", 0);
 }

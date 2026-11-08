@@ -98,6 +98,15 @@ _ = try system.integration.register(allocator, app, .{});
 - **Linux**：在 system bus 上调用 systemd-logind `Inhibit`，`what` 为 `sleep` 或 `sleep:idle`，mode 为 `block`；返回的文件描述符就是 inhibitor，release 关闭它。这是一次阻塞调用，受 `timeout_ms`（默认 1000）约束；不能接受这段延迟时在 worker 上获取。错误区分 `ServiceUnavailable`（无 bus 或无 logind）、`AccessDenied`、`Timeout` 与其他失败。桌面是否因 `idle` inhibitor 停止熄屏取决于桌面环境。
 - **macOS**：`NSProcessInfo beginActivityWithOptions:reason:`，选项为 `NSActivityIdleSystemSleepDisabled`（display 另加 `NSActivityIdleDisplaySleepDisabled`），reason 显示在 `pmset -g assertions`；release 调用 `endActivity:`。不阻塞，可在任意线程。
 
+`.kind = .running` 让应用在没有窗口可见时保持全速，并允许电脑空闲时睡眠：
+
+```zig
+var running = try power.Assertion.acquire(.{ .kind = .running, .reason = "为手机提供服务" });
+defer running.release();
+```
+
+macOS 会在应用的窗口全部隐藏、最小化、被遮住或锁屏一分钟内让它进入 App Nap：降低优先级、合并定时器、限制 I/O，后台提供网络服务、串流或同步的应用会因此变慢。托盘图标在菜单栏显示它时算作可见的窗口。`.running` 在释放前关闭 App Nap，同时让电脑照常空闲睡眠，适合整天待在菜单栏里的应用：macOS 上它是 `NSActivityUserInitiatedAllowingIdleSystemSleep` 活动（不含 `NSActivityIdleSystemSleepDisabled`），系统不再在窗口都不可见时挂起应用，也不出现在 `pmset -g assertions` 里；`.system` 与 `.display` 同样关闭 App Nap，但也让电脑保持唤醒。其他系统对 `.running` 什么都不做：获取不调用系统、不阻塞，返回可释放的断言（`power.capabilities.keep_running` 为 false）。它与 `.system`/`.display` 断言互不影响，可以同时持有。Windows 的电源节流（EcoQoS）尚未处理。
+
 ## 任务栏与 dock
 
 `taskbar.Taskbar.init(id)` 在 App owner 线程创建，所有方法和 `deinit` 都在该线程。
