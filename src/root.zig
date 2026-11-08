@@ -67,6 +67,20 @@ pub const Rect = struct {
     }
 };
 pub const Size = struct { width: u32, height: u32, scale: f32 };
+/// Where a frame shows the system's glass (`Window.placeNativeGlass`), in
+/// the content's DIPs from its top left.
+pub const NativeGlass = struct {
+    /// The glass's box, and the part of it that shows, as the clips around
+    /// it cut it.
+    frame: Rect,
+    clip: Rect,
+    /// The radius of its corners.
+    radius: f32 = 0,
+    /// NSGlassEffectView's style.
+    style: enum(u8) { regular, clear } = .regular,
+    /// Colors the glass, null for none.
+    tint: ?Rgba = null,
+};
 /// The range of `Window.setZoom`.
 pub const min_zoom: f32 = 0.25;
 pub const max_zoom: f32 = 5;
@@ -631,6 +645,11 @@ pub const WindowOptions = struct {
     /// its tint color. Other materials and platforms ignore it. See
     /// `Window.setVibrancyTint`.
     vibrancy_tint: ?Rgba = null,
+    /// The tint while the window draws dark (the app's or the system's
+    /// dark appearance), as CSS's `light-dark()`: `vibrancy_tint` is then
+    /// the light one. Null keeps `vibrancy_tint` in both. The window
+    /// follows its appearance as it changes. See `Window.setVibrancyTints`.
+    vibrancy_tint_dark: ?Rgba = null,
     /// Rounds the corners of a `.borderless` or `.custom` window, in DIP: on
     /// macOS its content and material are cut to them, a continuous curve
     /// of this radius, and its shadow follows them; Windows 11 gives it its
@@ -861,7 +880,7 @@ pub const App = struct {
             self.allocator.free(title);
             return err;
         };
-        record.* = .{ .window = .{ .app = self, .key = key }, .options = options, .vibrancy = options.vibrancy, .vibrancy_tint = options.vibrancy_tint, .next = self.first, .pins = 1, .title = title };
+        record.* = .{ .window = .{ .app = self, .key = key }, .options = options, .vibrancy = options.vibrancy, .vibrancy_tint = options.vibrancy_tint, .vibrancy_tint_dark = options.vibrancy_tint_dark, .next = self.first, .pins = 1, .title = title };
         if (owner) |parent| record.linkOwner(parent);
         if (self.first) |first| first.previous = record;
         self.first = record;
@@ -1612,16 +1631,32 @@ pub const Window = struct {
     /// ignore it, and a material set later takes the tint kept. See
     /// `WindowOptions.vibrancy_tint`.
     pub fn setVibrancyTint(self: Window, tint: ?Rgba) !void {
+        return self.setVibrancyTints(tint, null);
+    }
+    /// Tints the window's material with `light` while it draws light and
+    /// `dark` while it draws dark, following its appearance as it changes,
+    /// as CSS's `light-dark()`; a null `dark` keeps `light` in both, and a
+    /// null `light` removes the tint. See `setVibrancyTint`.
+    pub fn setVibrancyTints(self: Window, light: ?Rgba, dark: ?Rgba) !void {
         const scope = try self.beginUpdate();
         defer endUpdate(scope);
-        scope.record.vibrancy_tint = tint;
-        if (comptime @hasDecl(backend, "setVibrancyTint")) backend.setVibrancyTint(scope.record, tint);
+        scope.record.vibrancy_tint = light;
+        scope.record.vibrancy_tint_dark = if (light != null) dark else null;
+        if (comptime @hasDecl(backend, "setVibrancyTint")) backend.setVibrancyTint(scope.record, light, scope.record.vibrancy_tint_dark);
     }
-    /// The window's material tint (`setVibrancyTint`).
+    /// The window's material tint (`setVibrancyTint`), its light one with
+    /// `setVibrancyTints`.
     pub fn vibrancyTint(self: Window) !?Rgba {
         const record = self.resolve() orelse return error.Closed;
         if (record.phase != .open) return error.Closed;
         return record.vibrancy_tint;
+    }
+    /// The tint while the window draws dark (`setVibrancyTints`), null when
+    /// it keeps the light one.
+    pub fn vibrancyTintDark(self: Window) !?Rgba {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        return record.vibrancy_tint_dark;
     }
     /// Keeps the window drawn as active, as the key window of the app in
     /// front is, while another window or app has the keyboard: its controls
@@ -2063,6 +2098,43 @@ pub const Window = struct {
         record.frame_requested = true;
         backend.invalidate(record);
     }
+    /// Whether the window draws the system's glass under its content where
+    /// a frame leaves a hole (`placeNativeGlass`): macOS 26 and later,
+    /// which have NSGlassEffectView.
+    pub fn nativeGlassSupported(self: Window) bool {
+        const record = self.resolve() orelse return false;
+        if (record.phase != .open) return false;
+        if (comptime @hasDecl(backend, "nativeGlassSupported")) return backend.nativeGlassSupported(record);
+        return false;
+    }
+    /// Shows the system's glass where the last frame shows it, in paint
+    /// order, and removes the rest: under the content's surface drawn after
+    /// it (`beginOverlay`) and over the window's embedded native views,
+    /// such as web views' pages, which it samples with what is under the
+    /// window. The glass takes no pointer and no keyboard. An empty list
+    /// removes it all; where it is unsupported this does nothing.
+    pub fn placeNativeGlass(self: Window, places: []const NativeGlass) !void {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        if (comptime @hasDecl(backend, "placeNativeGlass")) try backend.placeNativeGlass(record, places, record.zoom);
+    }
+    /// A drawing context for the window's overlay, the content drawn over
+    /// its native glass and embedded views, of `width` by `height` pixels
+    /// at `scale` (the paint's): a CGContext on macOS, y-down in DIPs and
+    /// cleared, which `commitOverlay` shows. Null where the window has none.
+    pub fn beginOverlay(self: Window, size: Size) ?*anyopaque {
+        const record = self.resolve() orelse return null;
+        if (record.phase != .open) return null;
+        if (comptime @hasDecl(backend, "beginOverlay")) return backend.beginOverlay(record, size);
+        return null;
+    }
+    /// Shows what was drawn since `beginOverlay`, or hides the overlay when
+    /// `shown` is false.
+    pub fn commitOverlay(self: Window, shown: bool) void {
+        const record = self.resolve() orelse return;
+        if (record.phase != .open) return;
+        if (comptime @hasDecl(backend, "commitOverlay")) backend.commitOverlay(record, shown);
+    }
     /// True while the content asked for a frame, through `invalidate` or
     /// `invalidateRect`, that the window has not painted yet. A hidden or
     /// minimized window paints nothing, so it has none pending.
@@ -2244,6 +2316,7 @@ pub const WindowRecord = struct {
     native: backend.WindowData = .{},
     vibrancy: Vibrancy = .none,
     vibrancy_tint: ?Rgba = null,
+    vibrancy_tint_dark: ?Rgba = null,
     background: ?u32 = null,
     pointer_state: ?*PointerState = null,
     /// The device and pressure of the latest pointer event; see `notePointer`.

@@ -70,7 +70,7 @@ enum { MEDIA_AUDIO_MUTED=1, MEDIA_CAPTURE_DEVICES_MUTED=2 };
 
 static atomic_uint live_states, live_callbacks, live_views, live_compiles;
 /* Boxes of the native UI over a region's page (composition.max_covers). */
-enum { ZWK_MAX_COVERS=16 };
+enum { ZWK_MAX_COVERS=16, ZWK_MAX_GLASS=16 };
 
 static uint32_t domain_code(NSString *domain) {
     /* FNV-1a over the domain name: stable and never zero. */
@@ -204,6 +204,11 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     BOOL shaped;
     NSRect shape_clip, shape_covers[ZWK_MAX_COVERS];
     uint32_t shape_count;
+    /* Where the system's glass shows over the page (zwk_see_through): the
+       page shows there under the native UI, which the window draws over
+       the glass, though the native UI keeps the pointer. */
+    NSRect see_through[ZWK_MAX_GLASS];
+    uint32_t see_count;
     double shape_radii[4], present_radii[4];
     CAShapeLayer *shape_mask;
     /* The load the engine is still ending became a download: it no longer
@@ -3390,7 +3395,16 @@ static void shape_view(ZwkPage *s) {
     if (!host || !s->shaped) return;
     const NSRect frame=view.frame;
     const NSRect visible=NSIntersectionRect(frame,s->shape_clip);
-    const BOOL whole=s->shape_count==0 && NSMinX(visible)<=NSMinX(frame)+0.01 && NSMinY(visible)<=NSMinY(frame)+0.01 &&
+    /* The covers the page is cut away under: not where it shows through
+       the glass. */
+    NSRect covers[256]; uint32_t cover_count=0;
+    for (uint32_t i=0;i<s->shape_count;i++) {
+        uint32_t used=0;
+        if (!subtract_boxes(s->shape_covers[i],s->see_through,s->see_count,covers+cover_count,&used,256-cover_count)) { covers[cover_count]=s->shape_covers[i]; used=1; }
+        cover_count+=used;
+        if (cover_count>=256) break;
+    }
+    const BOOL whole=cover_count==0 && NSMinX(visible)<=NSMinX(frame)+0.01 && NSMinY(visible)<=NSMinY(frame)+0.01 &&
         NSMaxX(visible)>=NSMaxX(frame)-0.01 && NSMaxY(visible)>=NSMaxY(frame)-0.01;
     if (whole) {
         if (s->shape_mask) round_view(s,s->present_radii);
@@ -3400,7 +3414,7 @@ static void shape_view(ZwkPage *s) {
     CALayer *layer=view.layer;
     if (!layer) return;
     NSRect pieces[256]; uint32_t count=0;
-    if (!subtract_boxes(visible,s->shape_covers,s->shape_count,pieces,&count,256)) {
+    if (!subtract_boxes(visible,covers,cover_count,pieces,&count,256)) {
         /* Too many pieces: the page shows in its clip, under the covers. */
         pieces[0]=visible; count=visible.size.width>0 && visible.size.height>0?1:0;
     }
@@ -3441,6 +3455,20 @@ int zwk_shape(ZwkState *state,const double clip[4],const double radii[4],const d
     }
     return live(s)?ZWK_OK:ZWK_CLOSED;
 }
+/* Where the system's glass shows over the page, in its window's device
+   pixels: count boxes of four doubles, applied by the next zwk_shape. */
+int zwk_see_through(ZwkState *state,const double *boxes,uint32_t count) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->region_mode || !s->view) return ZWK_CLOSED;
+    if (count>ZWK_MAX_GLASS || (count && !boxes)) return ZWK_INVALID;
+    for (uint32_t i=0;i<4*count;i++) if (!isfinite(boxes[i])) return ZWK_INVALID;
+    @autoreleasepool {
+        const CGFloat scale=view_scale(s->view);
+        s->see_count=count;
+        for (uint32_t i=0;i<count;i++) s->see_through[i]=NSMakeRect(boxes[4*i]/scale,boxes[4*i+1]/scale,MAX(boxes[4*i+2],0)/scale,MAX(boxes[4*i+3],0)/scale);
+    }
+    return ZWK_OK;
+}
 /* Test hook: whether the page takes the pointer at a point of its window's
    content, in pixels, and shows there: 1 when it does, 0 when the native UI
    does, -1 when the page is gone. */
@@ -3462,6 +3490,22 @@ int zwk_test_page_at(ZwkState *state,int32_t x,int32_t y) {
         shows=CGPathContainsPoint(mask.path,NULL,CGPointMake(local.x-bounds.origin.x,local.y-bounds.origin.y),false);
     }
     return takes && shows?1:0;
+}
+/* Test hook: whether the page shows at a point of its window's content, in
+   pixels, whoever takes the pointer there: 1 when it does, 0 when it is cut
+   away, -1 when the page is gone. */
+int zwk_test_page_shows(ZwkState *state,int32_t x,int32_t y) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->view || !s->view.superview) return -1;
+    NSView *host=s->view.superview;
+    const CGFloat scale=view_scale(host);
+    const NSPoint point=NSMakePoint(x/scale,y/scale);
+    if (s->view.hidden || !NSPointInRect(point,s->view.frame)) return 0;
+    CAShapeLayer *mask=s->shape_mask;
+    if (!mask || s->view.layer.mask!=mask) return 1;
+    const NSPoint local=[s->view convertPointToLayer:[s->view convertPoint:point fromView:host]];
+    const CGRect bounds=s->view.layer.bounds;
+    return CGPathContainsPoint(mask.path,NULL,CGPointMake(local.x-bounds.origin.x,local.y-bounds.origin.y),false)?1:0;
 }
 /* Test hook: the zoom WebKit has, and the corner radius the view shows. */
 double zwk_test_present(ZwkState *state,double corners[4]) {

@@ -11,6 +11,7 @@ extern fn zlm_test_material(*anyopaque, *c_int, *f64) c_int;
 extern fn zlm_test_container_radius(*anyopaque) f64;
 extern fn zlm_test_window_opaque(*anyopaque) c_int;
 extern fn zlm_test_tint(*anyopaque) f64;
+extern fn zlm_test_appearance(*anyopaque, c_int) void;
 extern fn zlm_test_buttons_hidden(*anyopaque) c_int;
 extern fn zlm_test_titled(*anyopaque) c_int;
 extern fn zlm_test_press(*anyopaque, f64, f64, c_int) void;
@@ -201,8 +202,19 @@ pub fn main() !void {
         try std.testing.expectEqual(@as(f64, -1), zlm_test_tint(framed.native()));
         try framed.window.setVibrancy(.glass);
         try std.testing.expectApproxEqAbs(@as(f64, 128.0 / 255.0), zlm_test_tint(framed.native()), 0.01);
+        // A tint for each appearance follows the window's as it changes.
+        try framed.window.setVibrancyTints(.{ .r = 0, .g = 0, .b = 255, .a = 64 }, .{ .r = 255, .g = 255, .b = 0, .a = 192 });
+        zlm_test_appearance(framed.native(), 0);
+        try std.testing.expectApproxEqAbs(@as(f64, 64.0 / 255.0), zlm_test_tint(framed.native()), 0.01);
+        zlm_test_appearance(framed.native(), 1);
+        try std.testing.expectApproxEqAbs(@as(f64, 192.0 / 255.0), zlm_test_tint(framed.native()), 0.01);
+        zlm_test_appearance(framed.native(), 0);
+        try std.testing.expectApproxEqAbs(@as(f64, 64.0 / 255.0), zlm_test_tint(framed.native()), 0.01);
+        zlm_test_appearance(framed.native(), -1);
+        try std.testing.expect((try framed.window.vibrancyTintDark()) != null);
         try framed.window.setVibrancyTint(null);
         try std.testing.expectEqual(@as(f64, -1), zlm_test_tint(framed.native()));
+        try std.testing.expect((try framed.window.vibrancyTintDark()) == null);
         try framed.window.setVibrancy(.none);
         // A rounded window stays clear after the glass goes.
         try plain.window.setVibrancy(.glass);

@@ -107,6 +107,10 @@ pub const CustomMaterial = struct {
     name: []const u8 = "custom",
 };
 pub const loading = commands.loading;
+/// Native glass panes one frame can show (`Glass.native`); more draw as
+/// without.
+pub const max_native_glass = 16;
+
 pub const BackdropEffectStats = struct {
     workspace: backdrop_effects.Stats = .{},
     /// Effects drawn as their opaque fill because no workspace was prepared.
@@ -638,6 +642,16 @@ pub const Context = struct {
     /// The masks of the rounded, gradient and path clips frames cut to,
     /// made the first time a frame asks for one; see `clip_mask`.
     clip_masks: ?*clip_mask.Masks = null,
+    /// Whether the frame being drawn may ask for the system's glass
+    /// (`Glass.native`), and where it does, in paint order; whether the
+    /// last frame showed some.
+    native_glass_allowed: bool = false,
+    native_glass: [max_native_glass]z.NativeGlass = undefined,
+    native_holes: [max_native_glass]backdrop_effects.Hole = undefined,
+    native_glass_len: usize = 0,
+    native_glass_shown: bool = false,
+    /// Frames drawn with the system's glass.
+    native_glass_frames: u64 = 0,
 
     pub fn init(state: *anyopaque, draw: *const fn (*anyopaque, *Frame) void, on_action: *const fn (*anyopaque, u64) void) Context {
         return .{ .state = state, .draw = draw, .on_action = on_action };
@@ -2760,6 +2774,8 @@ pub const Context = struct {
     }
     fn software(self: *Context, paint: z.Paint) !void {
         errdefer self.damage_tracker.invalidate();
+        // The plane held the overlay over the glass: draw it whole again.
+        if (self.native_glass_len != 0 or self.native_glass_shown) self.damage_tracker.invalidate();
         try self.renderer.begin(paint);
         errdefer self.renderer.abort();
         try self.renderer.residentFrame(&self.command_buffer);
@@ -2772,12 +2788,69 @@ pub const Context = struct {
             try self.renderer.replayDamage(&self.command_buffer, &region, paint.transparent);
             self.last_damage = region;
         } else try self.renderer.replayBuffer(&self.command_buffer);
+        // Under the glass the surface shows what is under it.
+        if (comptime @hasDecl(gdi.Renderer, "maskHoles")) if (self.native_glass_len != 0) try self.renderer.maskHoles(self.nativeGlassHoles(), .inside);
         const restore_gpu = if (build_options.gpu) self.gpu_renderer.suspendSurface() else false;
         errdefer if (build_options.gpu and restore_gpu) self.gpu_renderer.restoreSurface();
         try self.renderer.endChecked(paint);
         self.damage_tracker.commit();
         if (!self.last_damage.full) self.partial_frames += 1;
         self.gdi_frames += 1;
+    }
+    fn nativeGlassHoles(self: *const Context) []const backdrop_effects.Hole {
+        return self.native_holes[0..self.native_glass_len];
+    }
+    /// After a frame was presented: shows the system's glass where it left
+    /// holes and, over the glass, what it painted after each glass inside
+    /// it, drawn again on the software plane into the window's overlay; or
+    /// removes the glass and the overlay the last frame showed.
+    fn presentNativeGlass(self: *Context, window: z.Window, paint: z.Paint) void {
+        if (self.native_glass_len == 0) {
+            if (!self.native_glass_shown) return;
+            self.native_glass_shown = false;
+            window.placeNativeGlass(&.{}) catch {};
+            window.commitOverlay(false);
+            return;
+        }
+        if (comptime !@hasDecl(gdi.Renderer, "maskHoles")) return;
+        self.native_glass_shown = true;
+        self.native_glass_frames += 1;
+        self.overlay(window, paint) catch |err| {
+            window.commitOverlay(false);
+            window.report(.{ .severity = .warning, .domain = .renderer, .operation = .paint, .err = err });
+        };
+        window.placeNativeGlass(self.native_glass[0..self.native_glass_len]) catch |err| window.report(.{ .severity = .warning, .domain = .renderer, .operation = .paint, .err = err });
+    }
+    /// Draws the frame again on a clear plane and keeps what it painted
+    /// inside the glass, which the window shows over the glass.
+    fn overlay(self: *Context, window: z.Window, paint: z.Paint) !void {
+        const destination = window.beginOverlay(paint.size) orelse return error.UnsupportedCapability;
+        var over = paint;
+        over.native_context = destination;
+        over.transparent = true;
+        // A clear plane, not the one kept for damage.
+        const keep = if (comptime @hasField(gdi.Renderer, "keep_plane")) self.renderer.keep_plane else false;
+        if (comptime @hasField(gdi.Renderer, "keep_plane")) self.renderer.keep_plane = false;
+        defer if (comptime @hasField(gdi.Renderer, "keep_plane")) {
+            self.renderer.keep_plane = keep;
+        };
+        try self.renderer.begin(over);
+        errdefer self.renderer.abort();
+        try self.renderer.replayBuffer(&self.command_buffer);
+        try self.renderer.maskHoles(self.nativeGlassHoles(), .outside);
+        try self.renderer.endChecked(over);
+        // The next frame draws the window's plane whole, from its color.
+        self.damage_tracker.invalidate();
+        if (!paint.transparent) self.renderer.resetOpaque();
+        window.commitOverlay(true);
+    }
+    /// Frames drawn with the system's glass (`Glass.native`).
+    pub fn nativeGlassFrames(self: *const Context) u64 {
+        return self.native_glass_frames;
+    }
+    /// Where the last frame showed the system's glass.
+    pub fn nativeGlassPlaces(self: *const Context) []const z.NativeGlass {
+        return self.native_glass[0..self.native_glass_len];
     }
     /// Replays the frame on the GPU renderer: only its damage over the frame
     /// the renderer kept, where it keeps one.
@@ -3123,6 +3196,10 @@ pub const Context = struct {
                 };
                 if (self.clip_masks) |masks| masks.beginPaint(self.clipMaskRelease());
                 var frame: Frame = .{ .context = self, .size = paint.size, .transforms = transform_workspace };
+                // The system's glass is drawn on the software planes, which
+                // the window shows under it and over it.
+                self.native_glass_len = 0;
+                self.native_glass_allowed = window.nativeGlassSupported();
                 self.frame_accessibility_source = self.accessibility_source_state.currentGeneration();
                 self.accessibility_source_state.beginFrame() catch |err| {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
@@ -3196,6 +3273,12 @@ pub const Context = struct {
                 // Backdrop effects, loading indicators and shader effects the
                 // GPU cannot run draw on the software planes: replay this
                 // frame there without reporting a device failure.
+                // The system's glass shows between two software planes.
+                if (build_options.gpu and using_gpu and self.native_glass_len != 0) {
+                    self.gpu_renderer.discard();
+                    using_gpu = false;
+                    clock.software = true;
+                }
                 if (build_options.gpu and using_gpu and !self.gpu_renderer.prepareEffects(&self.command_buffer)) {
                     self.gpu_renderer.discard();
                     using_gpu = false;
@@ -3236,6 +3319,7 @@ pub const Context = struct {
                     if (rendered) {
                         // The software plane no longer shows the window.
                         self.damage_tracker.invalidate();
+                        self.presentNativeGlass(window, paint);
                         self.commitFrame(window);
                         self.gpu_frames += 1;
                         self.frames += 1;
@@ -3243,7 +3327,10 @@ pub const Context = struct {
                     }
                 }
                 if (self.live(window)) {
-                    if (self.software(paint)) self.commitFrame(window) else |err| window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
+                    if (self.software(paint)) {
+                        self.presentNativeGlass(window, paint);
+                        if (self.live(window)) self.commitFrame(window);
+                    } else |err| window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                 }
                 if (build_options.gpu and upload_gpu and self.live(window)) self.gpu_renderer.residentFrame(&self.command_buffer) catch |err| self.gpuFailure(window, err);
                 self.frames += 1;
@@ -4586,6 +4673,26 @@ pub const Frame = struct {
         }
         try self.context.command_buffer.backdropShader(entry);
     }
+    /// Leaves a hole for the system's glass of `glass` over `box` and notes
+    /// where it shows, when the window draws it there: not under Reduce
+    /// Transparency, for an interactive glass, inside a transform, group or
+    /// effect, past `max_native_glass`, or clipped away.
+    fn nativeGlass(self: *Frame, box: Rect, radius: f32, glass: backdrop_effects.Glass, under: u32) !bool {
+        const context = self.context;
+        if (!context.native_glass_allowed or context.backdrop_preferences.opaqueFill()) return false;
+        if (glass.press != 0 or glass.hover != 0) return false;
+        if (self.group_depth != 0 or self.effect_depth != 0 or self.cache_depth != 0) return false;
+        if (self.transforms) |workspace| if (workspace.depth != 0) return false;
+        if (context.native_glass_len == max_native_glass) return false;
+        const clip = if (self.clipBounds()) |bounds| layout.intersect(bounds, box) else box;
+        if (clip.width <= 0 or clip.height <= 0) return true;
+        const corner = @min(radius, @min(box.width, box.height) / 2);
+        try context.command_buffer.backdropEffect(.{ .bounds = box, .radius = corner, .kind = .hole, .fallback = .{ .r = 0, .g = 0, .b = 0, .a = 0 } });
+        context.native_glass[context.native_glass_len] = .{ .frame = .{ .x = box.x, .y = box.y, .width = box.width, .height = box.height }, .clip = .{ .x = clip.x, .y = clip.y, .width = clip.width, .height = clip.height }, .radius = corner, .style = if (glass.style == .clear) .clear else .regular, .tint = if (glass.tint) |tint| .{ .r = tint.r, .g = tint.g, .b = tint.b, .a = tint.a } else null };
+        context.native_holes[context.native_glass_len] = .{ .bounds = box, .radius = corner, .clip = clip, .under = .rgb(under) };
+        context.native_glass_len += 1;
+        return true;
+    }
     fn recordBackdrop(self: *Frame, bounds: Rect, radius: f32, effect: BackdropEffect) !void {
         const palette = self.currentTheme().palette;
         const preferences = self.context.backdrop_preferences;
@@ -4622,6 +4729,7 @@ pub const Frame = struct {
                 const dy = 0.45 * grow;
                 const box: layout.Rect = .{ .x = absolute_bounds.x - dx, .y = absolute_bounds.y - dy, .width = absolute_bounds.width + 2 * dx, .height = absolute_bounds.height + 2 * dy };
                 const corner = if (radius > 0) radius + dy else radius;
+                if (glass.native and try self.nativeGlass(absolute_bounds, radius, glass, palette.background)) return;
                 if (opaque_fill) {
                     try buffer.roundedRect(box, corner, fallback);
                     if (preferences.high_contrast) try buffer.strokeRect(box, corner, 1, .rgb(palette.border));

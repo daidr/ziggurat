@@ -3,6 +3,7 @@
    event wire as the GTK adapter; the kinds are documented in macos.zig.
    Compiled without ARC: objects are retained and released explicitly. */
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
 #include <stdatomic.h>
@@ -117,8 +118,9 @@ typedef struct NativeWindow {
        glass to go. */
     int glass_clear;NSColor *backing;
     /* The glass's tint (retained), nil for none: only NSGlassEffectView
-       takes one. */
-    NSColor *tint;
+       takes one; tint_dark (retained) is the one while the window draws
+       dark, nil for the same in both. */
+    NSColor *tint,*tint_dark;
     /* The popup this window is modal to (retained): it shows as the
        popup's child window at its level, not as a sheet, which would hang
        from the popup, no wider than it. */
@@ -129,8 +131,15 @@ typedef struct NativeWindow {
        region_next; ignoring is whether the window lets the mouse through,
        as either set it last. */
     int ignore_mouse,ignoring,has_region;double *region;size_t region_count;struct NativeWindow *region_next;
+    /* The system's glass a frame shows (zlm_window_place_glass): hosts
+       (retained, each clipping one NSGlassEffectView) above the content
+       view, in paint order, and the overlay (retained) above them, which
+       shows what the frame paints over the glass from overlay_context, a
+       bitmap of overlay_width by overlay_height pixels. */
+    NSMutableArray *glass_hosts;NSView *overlay;CGContextRef overlay_context;uint32_t overlay_width,overlay_height;double overlay_scale;
 } NativeWindow;
 static void region_follow(NativeWindow *s);static void region_unlist(NativeWindow *s);static void region_watch(void);
+static void apply_tint(NativeWindow *s);static void drop_native_glass(NativeWindow *s);
 enum {POPUP=1,POPUP_FOCUSABLE=2,POPUP_TOPMOST=4};
 
 static void retain_window(NativeWindow *s){s->refs++;}
@@ -268,6 +277,8 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 - (void)resetCursorRects{NativeWindow *s=native;if(s&&s->cursor)[self addCursorRect:[self bounds] cursor:s->cursor];}
 - (void)setFrameSize:(NSSize)size{[super setFrameSize:size];if(native){native->shadow_stale=1;notify_size(native);}}
 - (void)viewDidChangeBackingProperties{[super viewDidChangeBackingProperties];if(native)notify_size(native);}
+/* A tint for the dark appearance follows the window's as it changes. */
+- (void)viewDidChangeEffectiveAppearance{[super viewDidChangeEffectiveAppearance];if(native&&!native->destroyed&&native->tint_dark)apply_tint(native);}
 - (void)updateTrackingAreas{
     for(NSTrackingArea *area in [self trackingAreas])[self removeTrackingArea:area];
     /* A window with an input region follows the pointer's moves over it
@@ -664,7 +675,8 @@ int zlm_window_destroy(NativeWindow *s){
         [window orderOut:nil];[window close];
         if(s->over_popup){release_window(s->over_popup);s->over_popup=NULL;}
         if(s->has_region){s->has_region=0;region_unlist(s);region_watch();}
-        [s->view release];[s->delegate release];[s->effect release];[s->container release];[s->backing release];s->backing=nil;[s->tint release];s->tint=nil;[window release];
+        drop_native_glass(s);
+        [s->view release];[s->delegate release];[s->effect release];[s->container release];[s->backing release];s->backing=nil;[s->tint release];s->tint=nil;[s->tint_dark release];s->tint_dark=nil;[window release];
         s->view=nil;s->delegate=nil;s->effect=nil;s->container=nil;s->window=nil;
     }
     if(owner){NativeEvent event={0};event.kind=11;s->emit(owner,&event);}
@@ -1071,17 +1083,203 @@ static void restore_backing(NativeWindow *s){
 - (void)setTintColor:(NSColor *)color;
 - (NSColor *)tintColor;
 @end
-static void apply_tint(NativeWindow *s){
-    if(s->effect&&s->glass&&[s->effect respondsToSelector:@selector(setTintColor:)])[s->effect setTintColor:s->tint];
+/* Whether the view draws in a dark appearance. */
+static int view_dark(NSView *view){
+    NSAppearanceName match=[[view effectiveAppearance] bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua,NSAppearanceNameDarkAqua]];
+    return [match isEqualToString:NSAppearanceNameDarkAqua];
 }
-/* Tints the glass, `has` false removing the tint; other materials take
-   none, and keep it for when the glass shows. */
-void zlm_window_tint(NativeWindow *s,int has,double r,double g,double b,double a){
+/* The tint of the window's appearance now. */
+static NSColor *current_tint(NativeWindow *s){
+    return s->tint_dark&&s->view&&view_dark(s->view)?s->tint_dark:s->tint;
+}
+static void apply_tint(NativeWindow *s){
+    if(s->effect&&s->glass&&[s->effect respondsToSelector:@selector(setTintColor:)])[s->effect setTintColor:current_tint(s)];
+}
+/* Tints the glass, `has` false removing the tint, with `dark` while the
+   window draws dark when has_dark; other materials take none, and keep it
+   for when the glass shows. */
+void zlm_window_tint(NativeWindow *s,int has,const double light[4],int has_dark,const double dark[4]){
     if(s->destroyed)return;
     @autoreleasepool{
-        [s->tint release];
-        s->tint=has?[[NSColor colorWithSRGBRed:r green:g blue:b alpha:a] retain]:nil;
+        [s->tint release];[s->tint_dark release];
+        s->tint=has?[[NSColor colorWithSRGBRed:light[0] green:light[1] blue:light[2] alpha:light[3]] retain]:nil;
+        s->tint_dark=has&&has_dark?[[NSColor colorWithSRGBRed:dark[0] green:dark[1] blue:dark[2] alpha:dark[3]] retain]:nil;
         apply_tint(s);
+    }
+}
+/* ---- The system's glass under the content ----
+   A frame that asks for native glass leaves holes through itself; the
+   content view draws it as usual, under the window's web views, and the
+   system's NSGlassEffectView shows above them, each clipped by a host, with
+   an overlay above it all showing what the frame painted over the glass.
+   The glass samples what is under it in the window: the pages, the
+   content view's holes, the window's material. Hosts and the overlay take
+   no pointer, so the pages and the content keep it, and are no
+   accessibility elements. */
+@interface ZigPassView : NSView
+@end
+@implementation ZigPassView
+- (NSView *)hitTest:(NSPoint)point{(void)point;return nil;}
+- (BOOL)isFlipped{return YES;}
+- (BOOL)acceptsFirstResponder{return NO;}
+- (BOOL)isAccessibilityElement{return NO;}
+- (NSArray *)accessibilityChildren{return @[];}
+@end
+@interface NSView (ZigguratNativeGlass)
+- (void)setStyle:(NSInteger)style;
+- (void)setCornerRadius:(CGFloat)radius;
+@end
+/* A glass the frame shows, in DIPs of the content's top left: its box, the
+   part of it that shows, its corners, its tint (straight sRGB from 0 to 1)
+   and NSGlassEffectView's style. */
+typedef struct ZlmGlass {double frame[4],clip[4],radius,tint[4];int style,has_tint;} ZlmGlass;
+static Class native_glass_class(void){
+    static int looked;static Class kind;
+    if(!looked){looked=1;kind=NSClassFromString(@"NSGlassEffectView");}
+    return kind;
+}
+int zlm_glass_supported(void){return native_glass_class()!=nil;}
+/* Puts view in the container right above below, unless it is there. */
+static void stack_above(NSView *container,NSView *view,NSView *below){
+    NSArray *subviews=[container subviews];
+    NSUInteger at=[subviews indexOfObjectIdenticalTo:view],under=[subviews indexOfObjectIdenticalTo:below];
+    if(at!=NSNotFound&&under!=NSNotFound&&at==under+1)return;
+    [view retain];
+    if(at!=NSNotFound)[view removeFromSuperview];
+    [container addSubview:view positioned:NSWindowAbove relativeTo:below];
+    [view release];
+}
+/* The hosts in paint order over the content view, the overlay over them. */
+static void stack_native(NativeWindow *s){
+    NSView *below=s->view;
+    for(NSView *host in s->glass_hosts){stack_above(s->container,host,below);below=host;}
+    if(s->overlay&&![s->overlay isHidden])stack_above(s->container,s->overlay,below);
+}
+/* The content view's frame in the container. */
+static NSRect content_frame(NativeWindow *s){return [s->view frame];}
+static NSRect content_rect(NativeWindow *s,const double r[4]){
+    return [s->container convertRect:NSMakeRect(r[0],r[1],fmax(r[2],0),fmax(r[3],0)) fromView:s->view];
+}
+static void drop_native_glass(NativeWindow *s){
+    for(NSView *host in s->glass_hosts)[host removeFromSuperview];
+    [s->glass_hosts release];s->glass_hosts=nil;
+    if(s->overlay){[s->overlay removeFromSuperview];[s->overlay release];s->overlay=nil;}
+    if(s->overlay_context){CGContextRelease(s->overlay_context);s->overlay_context=NULL;}
+}
+/* Shows count glasses, in paint order, reusing the views of the last
+   frame's, and removes the rest. Returns 1 where the system has no glass. */
+int zlm_window_place_glass(NativeWindow *s,const ZlmGlass *places,size_t count){
+    if(s->destroyed)return 0;
+    Class kind=native_glass_class();
+    if(!kind)return count?1:0;
+    @autoreleasepool{
+        [CATransaction begin];[CATransaction setDisableActions:YES];
+        if(!s->glass_hosts)s->glass_hosts=[[NSMutableArray alloc] init];
+        while([s->glass_hosts count]>count){NSView *host=[s->glass_hosts lastObject];[host removeFromSuperview];[s->glass_hosts removeLastObject];}
+        for(size_t i=0;i<count;i++){
+            const ZlmGlass *g=&places[i];
+            ZigPassView *host;NSView *glass;
+            if(i<[s->glass_hosts count]){host=[s->glass_hosts objectAtIndex:i];glass=[[host subviews] firstObject];}
+            else{
+                host=[[ZigPassView alloc] initWithFrame:NSZeroRect];
+                [host setWantsLayer:YES];[[host layer] setMasksToBounds:YES];
+                glass=[[kind alloc] initWithFrame:NSZeroRect];
+                if(glass){[glass setAccessibilityElement:NO];[host addSubview:glass];[glass release];}
+                [s->glass_hosts addObject:host];[host release];
+            }
+            /* The host is the part that shows; the glass its whole box. */
+            const NSRect clip=content_rect(s,g->clip);
+            [host setFrame:clip];
+            [host setHidden:clip.size.width<=0||clip.size.height<=0];
+            if(!glass)continue;
+            const NSRect box=content_rect(s,g->frame);
+            [glass setFrame:NSMakeRect(box.origin.x-clip.origin.x,box.origin.y-clip.origin.y,box.size.width,box.size.height)];
+            if([glass respondsToSelector:@selector(setStyle:)])[glass setStyle:g->style];
+            if([glass respondsToSelector:@selector(setCornerRadius:)])[glass setCornerRadius:g->radius];
+            if([glass respondsToSelector:@selector(setTintColor:)])[glass setTintColor:g->has_tint?[NSColor colorWithSRGBRed:g->tint[0] green:g->tint[1] blue:g->tint[2] alpha:g->tint[3]]:nil];
+        }
+        stack_native(s);
+        [CATransaction commit];
+    }
+    return 0;
+}
+/* A cleared bitmap of width by height pixels for the overlay, y-down in
+   DIPs at scale; zlm_window_overlay_commit shows it. */
+void *zlm_window_overlay_begin(NativeWindow *s,uint32_t width,uint32_t height,double scale){
+    if(s->destroyed||!width||!height||width>32768||height>32768||!(scale>0))return NULL;
+    if(s->overlay_context&&(s->overlay_width!=width||s->overlay_height!=height)){CGContextRelease(s->overlay_context);s->overlay_context=NULL;}
+    if(!s->overlay_context){
+        CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        s->overlay_context=CGBitmapContextCreate(NULL,width,height,8,0,space,(CGBitmapInfo)kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little);
+        CGColorSpaceRelease(space);
+        if(!s->overlay_context)return NULL;
+        s->overlay_width=width;s->overlay_height=height;
+        CGContextSaveGState(s->overlay_context);
+    }
+    CGContextRef c=s->overlay_context;
+    /* Back to the bitmap's own space, unclipped. */
+    CGContextRestoreGState(c);CGContextSaveGState(c);
+    CGContextClearRect(c,CGRectMake(0,0,width,height));
+    CGContextTranslateCTM(c,0,height);CGContextScaleCTM(c,1,-1);CGContextScaleCTM(c,scale,scale);
+    s->overlay_scale=scale;
+    return c;
+}
+/* Shows what was drawn in the overlay's bitmap over the glass, or hides
+   the overlay. */
+void zlm_window_overlay_commit(NativeWindow *s,int shown){
+    if(s->destroyed)return;
+    @autoreleasepool{
+        [CATransaction begin];[CATransaction setDisableActions:YES];
+        if(!shown||!s->overlay_context){
+            if(s->overlay){[s->overlay setHidden:YES];[[s->overlay layer] setContents:nil];}
+        }else{
+            if(!s->overlay){
+                s->overlay=[[ZigPassView alloc] initWithFrame:NSZeroRect];
+                /* Layer-hosting: the overlay's layer shows the bitmap as it is. */
+                CALayer *layer=[CALayer layer];
+                [layer setContentsGravity:kCAGravityResize];
+                [s->overlay setLayer:layer];[s->overlay setWantsLayer:YES];
+                [s->overlay setAutoresizingMask:NSViewWidthSizable|NSViewHeightSizable];
+            }
+            CGImageRef image=CGBitmapContextCreateImage(s->overlay_context);
+            [s->overlay setFrame:content_frame(s)];
+            [[s->overlay layer] setContentsScale:s->overlay_scale];
+            [[s->overlay layer] setContents:(id)image];
+            if(image)CGImageRelease(image);
+            [s->overlay setHidden:NO];
+            stack_native(s);
+        }
+        [CATransaction commit];
+    }
+}
+/* Test hooks: how many glass views show, and the alpha (0 to 255) the
+   overlay shows at a pixel of the content, -1 without an overlay. */
+int zlm_test_glass_count(NativeWindow *s){
+    int shown=0;
+    for(NSView *host in s->glass_hosts)if(![host isHidden]&&[[host subviews] count]&&[host superview]==s->container)shown++;
+    return shown;
+}
+int zlm_test_overlay_alpha(NativeWindow *s,uint32_t x,uint32_t y){
+    if(!s->overlay||[s->overlay isHidden]||!s->overlay_context||x>=s->overlay_width||y>=s->overlay_height)return -1;
+    const uint8_t *pixels=CGBitmapContextGetData(s->overlay_context);
+    return pixels[(size_t)y*CGBitmapContextGetBytesPerRow(s->overlay_context)+(size_t)x*4+3];
+}
+/* Test hook: whether the views over the content, the glass and overlay,
+   leave the pointer at a point of the content (DIPs) to what is under
+   them: 1 when the window's hit test finds the content view or a view in
+   it, such as a page. */
+int zlm_test_glass_passes(NativeWindow *s,double x,double y){
+    NSView *root=s->container;
+    NSPoint point=[s->view convertPoint:NSMakePoint(x,y) toView:[root superview]];
+    NSView *found=[root hitTest:point];
+    return found&&(found==s->view||[found isDescendantOf:s->view]);
+}
+/* Test hook: gives the window the dark (1), light (0) or the app's (-1)
+   appearance and lets AppKit tell its views. */
+void zlm_test_appearance(NativeWindow *s,int dark){
+    @autoreleasepool{
+        s->window.appearance=dark<0?nil:[NSAppearance appearanceNamed:dark?NSAppearanceNameDarkAqua:NSAppearanceNameAqua];
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     }
 }
 /* Test hook: the alpha of the glass's tint, or -1 without one. */

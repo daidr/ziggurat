@@ -782,6 +782,8 @@ pub const GlassInteraction = struct {
     /// `base` pressed and hovered as of this pass.
     pub fn glass(self: *GlassInteraction, v: *View, base: ui.backdrop_effects.Glass) Error!ui.backdrop_effects.Glass {
         var result = base;
+        // An interactive glass is drawn, as it grows and lights.
+        result.native = false;
         result.press = @floatCast(try sample(&self.press, v));
         result.hover = @floatCast(try sample(&self.hover, v));
         if (self.moving()) v.wakeAt(v.now + v.frameStep());
