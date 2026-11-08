@@ -1155,7 +1155,7 @@ pub const Editor = struct {
             frame.roundedRect(.{ .x = bounds.x + 1, .y = bounds.y + 1, .width = @max(0, bounds.width - 2), .height = @max(0, bounds.height - 2) }, 3, ui.Color.rgb(theme.palette.inset));
         }
         if (self.token) |token| try frame.textField(token, bounds, true);
-        try frame.semantic(.{ .id = id, .role = .text_box, .name = self.options.name, .value = self.value.items, .bounds = bounds, .focused = focused, .read_only = self.options.read_only or self.token == null, .selection_start = self.valueByte(self.selection()[0]), .selection_end = self.valueByte(self.selection()[1]) });
+        try frame.semantic(.{ .id = id, .role = .text_box, .name = self.options.name, .value = self.value.items, .bounds = bounds, .focused = focused, .read_only = self.options.read_only or self.token == null, .multi_line = true, .selection_start = self.valueByte(self.selection()[0]), .selection_end = self.valueByte(self.selection()[1]) });
         if (self.paras.items.len == 0 or self.laid_look == null) return;
         defer self.checkBoxes();
         try frame.pushClip(bounds);

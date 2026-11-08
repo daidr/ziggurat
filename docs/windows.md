@@ -201,7 +201,7 @@ macOS 上任何窗口都能随时显示材质：内容视图里、绘制视图�
 
 macOS 上 `.borderless` 与 `.custom` 窗口保留标题栏样式（`NSWindowStyleMaskTitled` 加 `FullSizeContentView`），标题栏透明、标题与三个按钮隐藏，内容铺满整个窗口：窗口因此有系统阴影、圆角和缩放边缘，也能成为 key 窗口。隐藏标题栏里的按下交给内容，由命中回调决定是否拖动。`WindowOptions.corner_radius` 把这样的窗口连同材质裁成该半径的连续曲线圆角（玻璃自己按圆角画边缘），窗口改为非不透明（`isOpaque` 为 false）、背景 clear，阴影随圆角重新生成；不透明的帧仍画白底，只是四角被裁掉。Windows 11 上 `corner_radius` 大于 0 的无边框窗口改用系统自己的圆角（`DWMWA_WINDOW_CORNER_PREFERENCE`），与半径无关；其他平台忽略它。
 
-macOS 上拖动区（`.caption` 命中或按下处理中调用 `startMove`）优先交给窗口服务器（`performWindowDragWithEvent:`），它能把窗口带到别的 Space 并参与平铺；但指针在按下后已经移动时窗口服务器可能不开始拖动。因此按下之后的拖动事件先经过一个本地事件监视器：请求拖动时指针已移动 1 点以上，或者窗口服务器被请求后指针移动超过 3 点、窗口仍未动，就由框架自己移动窗口，让按下的点始终在指针下，窗口顶边不进入菜单栏；窗口服务器发出 `windowWillMove:` 或窗口位置偏离框架摆放处超过 2 点，就认为窗口服务器接手了。无论哪种，按下的拖动事件都属于窗口而不再交给内容。双击 `.caption` 按系统设置“连按窗口标题栏以”执行缩放、最小化或不操作。
+macOS 上拖动区（`.caption` 命中或按下处理中调用 `startMove`）优先交给窗口服务器（`performWindowDragWithEvent:`），它能把窗口带到别的 Space 并参与平铺；但指针在按下后已经移动时窗口服务器可能不开始拖动。因此按下之后的拖动事件先经过一个本地事件监视器：请求拖动时指针已移动 1 点以上，或者窗口服务器被请求后指针移动超过 3 点、窗口仍未动，就由框架自己移动窗口，让按下的点始终在指针下，窗口顶边不进入菜单栏；窗口服务器发出 `windowWillMove:` 或窗口位置偏离框架摆放处超过 2 点，就认为窗口服务器接手了。无论哪种，按下的拖动事件都属于窗口而不再交给内容。双击 `.caption` 按系统设置“连按窗口标题栏以”执行缩放、最小化或不操作。声明式视图的拖动把手（`AreaOptions.drag_window`）在按下时调用 `startMove`，双击调用 `Window.titleBarDoubleClick()`，同样按这项系统设置执行（`z.titleBarAction()` 读出它；其他平台总是最大化或还原）；把手设了 `window_double_click` 时双击交给应用，窗口不动，见[声明式视图](view.md#指针区域与指针形状)。
 
 GTK 没有材质。`transparent` 在屏幕提供 RGBA visual 时给窗口换上该 visual 并取消背景绘制，Cairo 渲染器每帧先清成透明再以 SOURCE 方式贴到窗口，留空处由合成器透出桌面；没有合成器时透明处显示为黑色。`capabilities().transparent` 为 true 时 `Paint.transparent` 也为 true，表示帧从透明开始。
 

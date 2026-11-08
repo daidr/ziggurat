@@ -360,8 +360,20 @@ const zig_lexer = Lexer{ .line_comments = &slash_comments, .strings = &.{ cStrin
 }), .calls = true, .capital_types = true, .decorator = '@', .operators = c_operators };
 pub const zig = Language{ .name = "Zig", .extensions = &.{ ".zig", ".zon" }, .line_comment = "//", .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = zig_lexer.tokenizer() };
 
+// Nix. ''…'' strings lex without their escapes, ''$, ''' and ''\, which
+// end them early: an escape here is one byte.
+const nix_lexer = Lexer{ .line_comments = &hash_comments, .block_comments = &c_block, .strings = &.{
+    .{ .open = "\"", .close = "\"", .escape = '\\', .multiline = true, .interp_open = "${", .interp_close = "}" },
+    .{ .open = "''", .close = "''", .multiline = true, .interp_open = "${", .interp_close = "}" },
+}, .words = words(.{
+    .keyword,  "assert else if in inherit let or rec then with",
+    .constant, "true false null builtins",
+    .function, "import abort throw derivation toString map removeAttrs baseNameOf dirOf isNull fetchTarball fetchGit",
+}), .ident_chars = "-", .assign_keys = true, .operators = "+-*/=<>!&|?:@" };
+pub const nix = Language{ .name = "Nix", .extensions = &.{".nix"}, .line_comment = "#", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq, .word_chars = "-", .tab_size = 2, .tokenizer = nix_lexer.tokenizer() };
+
 /// Every known language, in the order lookups try them.
-pub const all = [_]*const Language{ &go, &javascript, &typescript, &json, &python, &rust, &c, &cpp, &java, &kotlin, &scala, &swift, &dart, &csharp, &shell, &yaml, &toml, &sql, &r, &ruby, &lua, &php, &css, &html, &xml, &markdown, &diff, &dockerfile, &makefile, &protobuf, &graphql, &zig };
+pub const all = [_]*const Language{ &go, &javascript, &typescript, &json, &python, &rust, &c, &cpp, &java, &kotlin, &scala, &swift, &dart, &csharp, &shell, &yaml, &toml, &sql, &r, &ruby, &lua, &php, &css, &html, &xml, &markdown, &diff, &dockerfile, &makefile, &protobuf, &graphql, &zig, &nix };
 
 /// The language of a file by its name, as "main.go" or "Makefile", or null.
 /// A full file name match wins over an extension.

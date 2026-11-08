@@ -114,6 +114,11 @@ pub const Harness = struct {
     /// What presses, set with `usePointer`.
     pointer_device: z.PointerDevice = .mouse,
     pointer_pressure: ?f32 = null,
+    /// What presses on `drag_window` areas asked of the window, as a
+    /// window's host would do them: moves, and double clicks left to the
+    /// title bar's action.
+    window_moves: usize = 0,
+    title_bar_double_clicks: usize = 0,
     /// The clipboard `clipboard` gives: the text last written, and the
     /// error `failClipboard` set.
     board: [4096]u8 = undefined,
@@ -942,7 +947,12 @@ pub const Harness = struct {
         _ = self.view.pointerMoved(.{ .x = x, .y = y });
         const node = self.at(x, y) orelse {
             // Where no control lies, a pointer area takes the press.
-            if (self.view.areaPress(.{ .x = x, .y = y }, .primary, modifiers, self.clock)) |event| return self.deliver(event);
+            const event = self.view.areaPress(.{ .x = x, .y = y }, .primary, modifiers, self.clock);
+            if (self.view.takeWindowGesture()) |gesture| switch (gesture) {
+                .move => self.window_moves += 1,
+                .title_bar_double_click => self.title_bar_double_clicks += 1,
+            };
+            if (event) |value| return self.deliver(value);
             return self.render();
         };
         _ = self.view.controlPressed(node.id);

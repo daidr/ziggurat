@@ -47,7 +47,7 @@ typedef struct Node {
     double range_minimum, range_maximum, range_small_change, range_large_change;
     uint32_t position, set_size, level;
     /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED,
-       VERTICAL, SEARCH and HORIZONTAL, then the popup kind (bits 8 to 10), current (11 to 13),
+       VERTICAL, SEARCH, HORIZONTAL and MULTI_LINE, then the popup kind (bits 8 to 10), current (11 to 13),
        sort (14, 15) and autocomplete (16, 17). */
     uint32_t states;
     uint32_t role_description_start, role_description_len, key_shortcuts_start, key_shortcuts_len;
@@ -64,7 +64,7 @@ typedef struct Node {
     uint64_t described_by, error_message;
 } Node;
 _Static_assert(sizeof(Node) == 208, "semantic node ABI");
-enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16, SEARCH = 32, HORIZONTAL = 64 };
+enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16, SEARCH = 32, HORIZONTAL = 64, MULTI_LINE = 128 };
 enum { POPUP_NONE, POPUP_MENU, POPUP_LIST_BOX, POPUP_TREE, POPUP_GRID, POPUP_DIALOG };
 enum { CURRENT_NONE, CURRENT_ITEM, CURRENT_PAGE, CURRENT_STEP, CURRENT_LOCATION, CURRENT_DATE, CURRENT_TIME };
 enum { SORT_NONE, SORT_ASCENDING, SORT_DESCENDING, SORT_OTHER };
@@ -591,6 +591,9 @@ static BSTR aria_properties(const State *s, const Node *n) {
     }
     if (n->states & VERTICAL) aria_add(out, &used, "orientation", "vertical", NULL, 0);
     else if (n->states & HORIZONTAL) aria_add(out, &used, "orientation", "horizontal", NULL, 0);
+    /* UI Automation has no property for these; ARIA's say them. */
+    if (n->role == ROLE_TEXT_BOX && (n->states & MULTI_LINE)) aria_add(out, &used, "multiline", "true", NULL, 0);
+    if (n->role == ROLE_TEXT_BOX && (n->flags & READ_ONLY)) aria_add(out, &used, "readonly", "true", NULL, 0);
     return used ? SysAllocStringLen(out, (UINT)used) : NULL;
 }
 static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *iface, PROPERTYID id, VARIANT *out) {

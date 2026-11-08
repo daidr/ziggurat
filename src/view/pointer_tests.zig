@@ -363,3 +363,48 @@ test "content of a row observing the pointer shows the row's hover and press, an
     try h.clickAt(third.x + 2, third.y + third.height / 2);
     try testing.expectEqual(@as(usize, 2), app.chosen);
 }
+
+const HandleApp = struct {
+    takes: bool,
+    doubles: usize = 0,
+    clicks: usize = 0,
+    button_presses: usize = 0,
+    fn build(self: *HandleApp, v: *View) anyerror!void {
+        const handle = try v.pointerArea(.{ .drag_window = true, .window_double_click = self.takes }, .{ .width = 200, .height = 100 });
+        if (try v.button("Close", .{})) self.button_presses += 1;
+        try v.end();
+        if (handle.window_double_clicked) self.doubles += 1;
+        if (handle.clicked) self.clicks += 1;
+    }
+};
+
+test "a drag_window handle's double click goes to the window unless the view takes it with window_double_click" {
+    for ([_]bool{ false, true }) |takes| {
+        var storage: Storage = .{};
+        var app: HandleApp = .{ .takes = takes };
+        var h = Harness.init(&app, HandleApp.build, storage.buffers(), .{});
+        try h.render();
+        const bounds = (try h.find(.{ .kind = .pointer_area })).bounds;
+        const x = bounds.x + bounds.width - 10;
+        const y = bounds.y + bounds.height - 10;
+        // A single press moves the window either way, and clicks nothing.
+        try h.press(x, y, .{});
+        try h.release(x, y);
+        try testing.expectEqual(@as(usize, 1), h.window_moves);
+        try h.press(x, y, .{});
+        try h.release(x, y);
+        try testing.expectEqual(@as(usize, if (takes) 1 else 0), app.doubles);
+        try testing.expectEqual(@as(usize, if (takes) 0 else 1), h.title_bar_double_clicks);
+        try testing.expectEqual(@as(usize, 1), h.window_moves);
+        try testing.expectEqual(@as(usize, 0), app.clicks);
+        // A third press, no double click, moves the window again.
+        try h.press(x, y, .{});
+        try h.release(x, y);
+        try testing.expectEqual(@as(usize, 2), h.window_moves);
+        // A control on the handle keeps its presses.
+        h.clock += view.double_press_time + 1;
+        try h.click(.{ .text = "Close" });
+        try testing.expectEqual(@as(usize, 1), app.button_presses);
+        try testing.expectEqual(@as(usize, 2), h.window_moves);
+    }
+}

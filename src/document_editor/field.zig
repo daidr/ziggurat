@@ -235,7 +235,7 @@ pub fn Field(comptime Private: type) type {
             const selected = try self.document.selection();
             // A password reports neither its value nor a selection in it.
             const password = self.masked();
-            try frame.semantic(.{ .id = token.key.id, .role = .text_box, .name = name, .value = if (password) "" else self.value[0..self.value_len], .description = about.description, .invalid = about.invalid, .required = about.required, .password = password, .bounds = self.bounds, .enabled = self.options.policy.enabled, .read_only = self.options.policy.read_only, .focused = frame.context.input_state.focused == token.key.id, .selection_start = if (password) 0 else selected.range().start, .selection_end = if (password) 0 else selected.range().end });
+            try frame.semantic(.{ .id = token.key.id, .role = .text_box, .name = name, .value = if (password) "" else self.value[0..self.value_len], .description = about.description, .invalid = about.invalid, .required = about.required, .password = password, .multi_line = self.options.multiline, .bounds = self.bounds, .enabled = self.options.policy.enabled, .read_only = self.options.policy.read_only, .focused = frame.context.input_state.focused == token.key.id, .selection_start = if (password) 0 else selected.range().start, .selection_end = if (password) 0 else selected.range().end });
         }
         /// What the field holds as its last frame showed it, for automation:
         /// the text and the selection's byte range, borrowed until the next

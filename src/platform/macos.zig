@@ -240,6 +240,15 @@ pub fn setSkipTaskbar(_: *core.WindowRecord, _: bool) !void {
 pub fn setBackdrop(_: *core.WindowRecord, _: core.WindowBackdrop) !void {
     return error.UnsupportedCapability;
 }
+extern fn zlmw_double_click_action() c_int;
+/// As System Settings sets a title bar's double click.
+pub fn titleBarAction() core.TitleBarAction {
+    return switch (zlmw_double_click_action()) {
+        0 => .maximize,
+        1 => .minimize,
+        else => .none,
+    };
+}
 pub fn startMove(record: *core.WindowRecord) !void {
     try checkUpdate(zlm_window_interaction(record.native.native.?, -1));
 }

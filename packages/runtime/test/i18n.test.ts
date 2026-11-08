@@ -142,3 +142,15 @@ test("message functions follow the page's language", () => {
     holder[shared] = saved;
   }
 });
+
+test("message functions keep a placeholder named __proto__", () => {
+  const catalog = createCatalog({
+    source: "en",
+    messages: { en: { keyword: "{constructor} {toString} {__proto__} {p}" }, de: { keyword: "{p} {__proto__} {toString} {constructor}" } },
+    params: { keyword: ["constructor", "toString", "__proto__", "p"] },
+  });
+  const messages = catalog.messages<{ keyword(a: string, b: string, c: string, d: string): string }>();
+  expect(catalog.messagesIn<typeof messages>("en").keyword("x", "y", "z", "w")).toBe("x y z w");
+  expect(catalog.messagesIn<typeof messages>("de").keyword("x", "y", "z", "w")).toBe("w z y x");
+  expect(catalog.localizer("en").format("keyword", JSON.parse('{"constructor":"a","toString":"b","__proto__":"c","p":"d"}'))).toBe("a b c d");
+});

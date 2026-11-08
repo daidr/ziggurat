@@ -77,6 +77,7 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 - 角色：`role` 让容器或文本在辅助技术面前不只是分组或一段文字：`.region`（地标区域，用 `name` 命名）、`.navigation`、`.article`、`.group`、`.log`（聊天记录，新增的内容会被礼貌地读出）、`.timer`、`.alert`（出现或改变的内容立即打断朗读）、`.status`（状态信息，如“已选 3 行”“已保存”：其中的文字改变时整段礼貌地读出，如 aria-atomic；状态按元素 ID 与上一帧对照，前面会增删兄弟节点时给它 `key`，ID 变了视为新出现，不读；辅助技术刚接入时与状态第一次出现时不读；在 log、alert 或另一个 status 之内的只作为它们的一部分）、`.separator`、`.heading`（级别取自字体：`Font.heading1` 为 1 级，依此类推）、`.grid`（单元格接收焦点与方向键的表格，如应用自绘的电子表格）、`.tree_grid`（行可展开的网格）、`.row` 与 `.cell`（这类表格的行与单元格）、`.deletion` 与 `.insertion`（差异视图里删去与加入的行、划掉的旧价格）。带角色的容器里的文本节点作为文本进入可访问性树，供实时区域朗读。
 - 表格与集合的位置：`row_count`、`column_count`（aria-rowcount/aria-colcount，表头行计入，0 表示按已构建的数）放在表格或网格上，`row_index`、`column_index`（aria-rowindex/aria-colindex，从 1 起）放在行或单元格上，供只构建可见部分的表格读出“第 41 行，共 1000 行”；`position_in_set` 与 `set_size`（aria-posinset/aria-setsize，从 1 起，0 不设）放在自建的列表、列表框、树、菜单或标签列表的条目上，优先于内置集合按已构建的条目数出的位置。虚拟表格自己报出全部行数、列数和行、列头的索引。`multiselectable`（aria-multiselectable）声明自建的列表框、网格、树或树网格可以多选；`access_selected`（aria-selected）把标签、选项、行、单元格或树条目报为选中或未选中，而不画内置选中行的强调色，供用自己方式显示选择的条目使用。
 - 校验、方向与搜索：`invalid`（aria-invalid）把值标为不合法而不带消息，例如失焦时仍为空的必填字段；`orientation`（`.horizontal` 或 `.vertical`，aria-orientation）告诉辅助技术自建的滑块、分隔线、分栏、工具栏、标签列表或菜单朝哪个方向排列，不设时平台按形状猜；`search`（role=searchbox）让文本输入成为搜索框，`search` 区域里的输入自动如此。
+- 自绘文本框：应用自己绘制并处理按键的文本框（嵌入叶子用 `frame.semantic` 记录 `.text_box` 节点）用 `read_only` 与 `multi_line`（aria-readonly、aria-multiline）告诉辅助技术它只读、可多行；其他角色忽略 `multi_line`，只读的文本框不接受辅助技术改值。框架自带的编辑器自己决定：多行的 `TextField`（`ziggurat_document_editor.Field` 的 `multiline`）与富文本编辑器报告多行。Linux ATK 报 multi-line 而不是 single-line 状态，macOS 报 AXTextArea 角色而不是 AXTextField，Windows 在 AriaProperties 里给出 `multiline=true` 与 `readonly=true`。
 - ARIA 属性：`role_description`（aria-roledescription）、`key_shortcuts`（aria-keyshortcuts，如 "Control+S"）、`value_text`（aria-valuetext，如 "5 星中的 3 星"）、`busy`（aria-busy）、`current`（aria-current）、`popup`（aria-haspopup，给自己构建弹出内容的按钮）、`sort`（aria-sort）、`auto_complete`（aria-autocomplete）。三个平台分别映射到 ATK 的状态与对象属性、NSAccessibility 的属性（含旧 API 的 AXEnabled 等）与 UI Automation 的属性（LocalizedControlType、AriaProperties、AcceleratorKey、LiveSetting、LandmarkType、HeadingLevel）。
 - 标签与控制关系：`v.labelledBy(control, label)` 用视图自己画出的标签文字给控件命名，代替控件自己的名称，如同 aria-labelledby；点击标签会把点击交给控件，如同 HTML 的 `<label for>`：聚焦它（或组里选中的那一项），并点击复选框、开关或单选按钮。`v.controls(control, controlled)` 声明一个节点控制另一个（aria-controls），例如按钮与它展开的面板。两者都在两个节点建好之后调用，id 由 `lastNode().id` 取得。`v.describedBy(control, hint)`（aria-describedby）让视图画出的提示或帮助文字在控件的名称和值之后读出，即使提示本身对辅助技术隐藏；`v.errorMessage(control, message)`（aria-errormessage）指出保存错误消息的节点：控件不合法（`Style.invalid` 或所在字段的错误）期间，消息先于提示读出，辅助技术也能跳到它。两者同样在节点建好之后调用。
 
@@ -235,7 +236,7 @@ try v.end();
 
 ### 提示、通知、导航按钮与头像
 
-- `tooltip(text)` 给刚加入的节点（在组合框选项列表 `end` 之后则是组合框）加提示。指针停在控件上或控件持有焦点超过提示延迟后，提示出现在控件下方（下方放不下时在上方），悬停优先于焦点。延迟取控件构建时所在主题的 `Theme.tooltip_delay`（纳秒）：0 表示用 `Options.tooltip_delay`（默认 600 ms），负数表示立即显示；所以用 `themed` 包住一个工具栏就能给它单独的延迟。一个提示消失后，在延迟的三分之二（默认 400 ms）内移到另一个有提示的控件会立即显示，像指针沿工具栏移动时那样。按下或 Escape 会隐藏它，直到指针或焦点移到另一个控件；窗口失去焦点时也会隐藏。提示文字同时作为控件的可访问说明（已有字段说明时保留字段说明）。没有前一个节点时返回 `NotContainer`。
+- `tooltip(text)` 给刚加入的节点（在组合框选项列表 `end` 之后则是组合框，在菜单或浮层 `end` 之后则是它们依附的节点）加提示。指针停在控件上或控件持有焦点超过提示延迟后，提示出现在控件下方（下方放不下时在上方），悬停优先于焦点。延迟取控件构建时所在主题的 `Theme.tooltip_delay`（纳秒）：0 表示用 `Options.tooltip_delay`（默认 600 ms），负数表示立即显示；所以用 `themed` 包住一个工具栏就能给它单独的延迟。一个提示消失后，在延迟的三分之二（默认 400 ms）内移到另一个有提示的控件会立即显示，像指针沿工具栏移动时那样。按下或 Escape 会隐藏它，直到指针或焦点移到另一个控件；窗口失去焦点时也会隐藏。在菜单或浮层（`popoverMenuButton`、`popoverMenu`、`popover`）的 `end` 之后调用时，提示加给它们依附的节点。节点的菜单、浮层或下拉列表显示时（无论由按下、Down/Enter/Space 还是右键打开），它的提示不显示；显示期间指针回到节点、关闭后焦点回到节点也不再显示，直到指针和焦点都离开它。提示文字同时作为控件的可访问说明（已有字段说明时保留字段说明）。没有前一个节点时返回 `NotContainer`。
 - `view.Toasts(capacity)` 是应用持有的固定消息队列：`show(message, .{ .action, .duration })` 复制文本并返回 id，队列满时先移除最早的消息，文本过长返回 `TextTooLong`；`dismiss(id)` 移除一条。`toasts(&queue, style)` 把队列画成窗口底部居中的一叠消息，每条带可选的动作按钮和名为 "Dismiss" 的关闭按钮。时长从第一次显示的那一遍开始计算，0 表示一直显示；指针停在通知上或键盘焦点在通知里（窗口有键盘时）时，通知的时间暂停；窗口处于后台或隐藏时时间照走，因为通知讲的是会过时的消息（如托盘应用窗口隐藏时下载完成）：时间在此期间用完的消息在下一遍构建时直接移除，不会显示。动作按钮移除消息并让 `toasts` 返回它的 id 一次。每条消息是礼貌型（Polite）实时区域，出现时由读屏播报。
 - `navButton(direction, style)` 是画着朝 `direction`（back/forward/up/down）的箭头的方形按钮，激活的那一遍返回 true；名称取 `Style.name`，默认是英文的 "Back"/"Forward"/"Up"/"Down"。
 - `avatar(name, picture, style)` 显示 `picture`（`ImageView`，按 cover 裁剪）或 `name` 前两个词的首字母，圆底颜色取 `Style.background`，否则由名称稳定派生。默认 32 DIP 见方，不接收输入，作为以 `name` 命名的图像暴露。
@@ -561,6 +562,14 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 - 这些事件各自在单独的一遍交付，和控件返回 true 一样，应用在那一遍里处理；之后的绘制遍只保留 `hovered`、`pressed`、`position` 与 `bounds`。`bounds` 是上一次排列的窗口边界，第一帧之前为 null。
 - 按下先交给控件：落在区域内按钮上的按下属于按钮，副键与中键在控件上也不交给区域。最内层的区域得到按下。窗口失去焦点或捕获被取消时按下作废，不计为单击。禁用的区域只报告 `bounds`。
 - `AreaOptions.observe` 让区域只观察指针，不参与按下的路由：按下照常落到它里面的控件和其他区域上，它仍报告 `hovered` 与 `position`，并在里面的控件被按住期间报告 `pressed`，例如聊天行在按住其中的按钮时画出按下的样子。
+- `AreaOptions.drag_window` 把区域变成拖动窗口的把手，给自绘标题栏的窗口（`.custom` 或 `.borderless` 装饰）用：区域里没有控件的地方主键按下交给窗口（Host 在交付这次按下时调用 `Window.startMove`），区域不报告主键的按下与单击；双击做系统标题栏双击做的事（`Window.titleBarDoubleClick`：macOS 按“连按窗口标题栏以”缩放、最小化或不操作，Windows 与 Linux 最大化或还原，不可最大化的窗口不变）。把手的双击另有含义时（例如侧栏空白处双击新建一项），再设 `AreaOptions.window_double_click`：双击在 `PointerArea.window_double_clicked` 报告给应用，窗口不再缩放，单击仍拖动窗口（普通区域的 `double_clicked` 做不到这一点，因为它不拖窗口）。第三次连击重新拖动窗口。Harness 用 `window_moves` 与 `title_bar_double_clicks` 记下把手交给窗口的拖动与双击：
+
+```zig
+const side = try v.pointerArea(.{ .drag_window = true, .window_double_click = true }, .{ .grow = 1 });
+// …侧栏内容…
+try v.end();
+if (side.window_double_clicked) self.newItem();
+```
 - 区域在指针进入和离开时重绘；`AreaOptions.track` 让它随指针移动重绘，使 `position` 跟随。每遍最多 `max_pointer_areas`（32）个区域参与路由。
 
 `Style.cursor`（`view.Cursor`，即 `z.Cursor`）设置指针在节点及其后代上的形状，除箭头、文本、指针、移动、缩放与禁止等之外还有 `progress`、`wait`、`help`、`cell`、`zoom_in`、`zoom_out`、`all_scroll` 与 `no_drop`（Linux 与浏览器用 CSS 名字，macOS 用系统光标，没有对应的回退到相近的形状，Windows 用系统光标）。Host 从指针下最内层的节点向外找：第一个设置了形状的节点决定形状；先遇到没有设置形状的控件则显示默认箭头，因此按钮里不会出现外层的形状。链接默认显示 `pointer`，分栏的分隔条显示 `resize_ew`（左右排列）或 `resize_ns`（上下排列），`Embed.cursor` 回调让嵌入叶子按点回答（`ziggurat_view_text` 的文本字段显示 `text`，虚拟表格在列头右缘显示 `resize_ew`）。按下期间保持按下时的形状，松开后更新。Host 在指针移动、松开和每帧之后通过 `Window.setCursor` 设置，形状不变时不调用原生接口；Harness 用 `cursor()` 返回当前指针位置的形状。
