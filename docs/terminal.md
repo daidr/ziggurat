@@ -130,7 +130,7 @@ var tv = terminal_view.TerminalView.init(&host, allocator, &terminal, .{ .theme 
 ## 链接、右键与复制
 
 - 按住 Ctrl 时，指针下的链接加下划线（Ctrl 的按下与松开由按键与按键释放得知），`hoveredLink()` 给出链接、是否文件路径及其相对视图的格子矩形，供应用显示预览；`pointerShape(shift)` 给出指针形状：链接上为手形，程序用 OSC 22 指定的形状，程序跟踪鼠标时为箭头（按住 Shift 选择时为 I 形），否则为 I 形。Ctrl+点击在程序跟踪鼠标时也会打开链接，这次按下的移动与松开都不再交给别人。
-- 链接来自 OSC 8，或文本中的 `http(s)`、`ftp`、`file` 地址与 `mailto:`（去掉末尾的标点与不配对的括号）。设置 `Hooks.open_link` 后还识别文本中的文件路径（`/abs/path`、`~/notes.md`、`./a.go`、`src/app.go:12:3`、`main.go:250`，以及带扩展名的裸文件名如 `notes.md`；`1.2.3` 这类不含字母的点分数字不算）。钩子未接手的超链接与地址经 `Notice.open` 由应用交给系统打开，文件路径则不打开。
+- 链接来自 OSC 8，或文本中的 `http(s)`、`ftp`、`file` 地址与 `mailto:`（去掉末尾的标点与不配对的括号；URL 里不是 ASCII 的字符要编码，所以地址在第一个非 ASCII 字符处结束，紧跟其后的中日文或全角标点不算进去）。设置 `Hooks.open_link` 后还识别文本中的文件路径（`/abs/path`、`~/notes.md`、`./a.go`、`src/app.go:12:3`、`main.go:250`，以及带扩展名的裸文件名如 `notes.md`；`1.2.3` 这类不含字母的点分数字不算）。钩子未接手的超链接与地址经 `Notice.open` 由应用交给系统打开，文件路径则不打开。
 - `right_click` 决定副键点击：`.context_menu`（默认）发出 `Notice.context_menu`，应用在该点弹出 `contextMenu()` 给出的 Copy、Paste、Select All、Clear（Clear 前有分隔线，各项带绑定的快捷键，无选区时 Copy 不可用，全屏程序上 Clear 不可用）并把选中项交给 `choose`；`.paste`、`.copy`、`.copy_or_paste`（有选区复制，否则粘贴）、`.ignore`。复制会放开选区。程序跟踪鼠标时仍收到点击，除非按住 Shift。
 - `Hooks.paste` 在剪贴板粘贴（粘贴键、菜单、副键粘贴）交给程序之前看到剪贴板文字，返回 true 表示接手，程序什么也收不到，例如应用把复制的内容上传到远端程序所在的机器，再用 `pasteText` 粘贴那边的路径。
 - 拖入文件：应用把终端的叶子放进接受文件的 `View.dropTarget`，把落下的 `Dropped.files`（NUL 分隔的绝对路径）交给 `dropFiles`。它先问 `Hooks.drop`，接手则什么也不发送（如上传文件给远端程序后粘贴远端路径）；否则把每个路径按 shell 转义（POSIX 用反斜杠转义特殊字符，含控制字符时用 `$'…'`；Windows 用 PowerShell 的单引号，单引号加倍），以空格连接后粘贴，括号粘贴模式照常生效。`quote`/`quotedSize` 公开同样的转义。

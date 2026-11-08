@@ -185,3 +185,55 @@ test "a secondary click on a row without a menu of its own opens the menu of its
     try h.click(.{ .text = "Rename" });
     try testing.expectEqual(@as(usize, 1), app.renamed);
 }
+
+const Paragraph = struct {
+    covered: bool = false,
+    link: usize = 0,
+    cover: usize = 0,
+    open: bool = true,
+    fn build(self: *Paragraph, v: *View) anyerror!void {
+        // A paragraph of prose whose only inline link has its text.
+        try v.column(.{ .width = 200, .height = 80 });
+        try v.text("Artist", .{});
+        if (try v.link("Artist", .{})) self.link += 1;
+        try v.end();
+        if (self.covered) {
+            if (try v.popover(&self.open, .{ .gap = 0 }, .{})) try v.spacer(.{ .width = 200, .height = 160 });
+            try v.end();
+        }
+    }
+};
+
+test "a named click reaches the inline link that shares its paragraph's text, unless covered" {
+    var storage: Storage = .{};
+    var app: Paragraph = .{};
+    var h = Harness.init(&app, Paragraph.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 200, .height = 200 } });
+    try h.render();
+    try testing.expectEqual(@as(usize, 2), h.count(.{ .text = "Artist" }));
+    try h.click(.{ .text = "Artist" });
+    try testing.expectEqual(@as(usize, 1), app.link);
+    // Covered, every candidate is refused with the first one's error and
+    // nothing is sent.
+    app.covered = true;
+    try h.render();
+    const frames = h.frames;
+    try testing.expectError(error.NotActivatable, h.click(.{ .text = "Artist" }));
+    try testing.expectEqual(@as(usize, 1), app.link);
+    try testing.expectEqual(frames, h.frames);
+    // Two controls a press reaches are still ambiguous.
+    try testing.expectError(error.Ambiguous, twoTargets());
+}
+
+fn twoTargets() !void {
+    const Two = struct {
+        fn build(_: *@This(), v: *View) anyerror!void {
+            _ = try v.button("Same", .{});
+            _ = try v.button("Same", .{});
+        }
+    };
+    var storage: Storage = .{};
+    var app: Two = .{};
+    var h = Harness.init(&app, Two.build, storage.buffers(), .{});
+    try h.render();
+    try h.click(.{ .text = "Same" });
+}

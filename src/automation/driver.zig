@@ -243,6 +243,9 @@ pub const Driver = struct {
             tree: protocol.Tree = undefined,
             fn run(state: *@This(), window: z.Window, shown: u64) Error!void {
                 const host = try hostOf(state.arena, window, shown, state.failure);
+                // In a window out of sight, the frame waiting to build is
+                // built first, as the window may paint none until it shows.
+                _ = host.settle();
                 if (!host.arranged and !state.anyway) {
                     state.unarranged = true;
                     window.invalidate();
@@ -297,6 +300,9 @@ pub const Driver = struct {
             fn run(state: *@This(), window: z.Window, shown: u64) Error!void {
                 const host = try hostOf(state.arena, window, shown, state.failure);
                 const element = state.request.id;
+                // In a window out of sight, the frame that takes the action
+                // builds at once.
+                defer _ = host.settle();
                 host.perform(element, state.action) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.NoElement => fail(state.failure, state.arena, .no_element, "window {d} shows no element {d}", .{ shown, element }),
@@ -323,7 +329,13 @@ pub const Driver = struct {
             failure: *Failure,
             events: []const protocol.InputEvent,
             fn run(state: *@This(), window: z.Window, shown: u64) Error!void {
-                if (targetOf(window) == .page) return fail(state.failure, state.arena, .unsupported, "window {d} shows a web page: use eval", .{shown});
+                const target = targetOf(window);
+                if (target == .page) return fail(state.failure, state.arena, .unsupported, "window {d} shows a web page: use eval", .{shown});
+                // In a window out of sight, the frame that takes the events
+                // builds at once.
+                defer if (target == .host) {
+                    _ = target.host.settle();
+                };
                 for (state.events) |event| {
                     deliver(window, event) catch |err| return fail(state.failure, state.arena, .failed, "window {d}: {s}", .{ shown, @errorName(err) });
                 }
@@ -375,6 +387,11 @@ pub const Driver = struct {
             failure: *Failure,
             image: z.Capture = undefined,
             fn run(state: *@This(), window: z.Window, shown: u64) Error!void {
+                // A window out of sight shows what it shows now.
+                switch (targetOf(window)) {
+                    .host => |host| _ = host.settle(),
+                    else => {},
+                }
                 state.image = window.capture(state.arena) catch |err| switch (@as(anyerror, err)) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.UnsupportedCapability => return fail(state.failure, state.arena, .unsupported, "this platform cannot capture window {d}", .{shown}),
@@ -454,12 +471,19 @@ pub const Driver = struct {
             fn run(state: *@This(), window: z.Window, _: u64) Error!void {
                 state.page = false;
                 switch (targetOf(window)) {
-                    .host => |host| state.pending = window.framePending() or (!host.arranged and host.context.window != null),
+                    .host => |host| {
+                        // In a window out of sight, only the frame waiting
+                        // to build there is pending, and it builds now.
+                        _ = host.settle();
+                        state.pending = window.framePending() or (!host.arranged and host.context.window != null);
+                    },
                     .page => |page| {
                         state.page = true;
                         state.pending = if (comptime options.webview) page.isLoading() else false;
                     },
-                    .other => state.pending = window.framePending(),
+                    // Nothing builds the frames of other content for a
+                    // window out of sight, which paints them once it shows.
+                    .other => state.pending = window.framePending() and !window.outOfSight(),
                 }
             }
         };

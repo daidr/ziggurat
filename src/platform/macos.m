@@ -727,6 +727,12 @@ uint32_t zlm_window_state(NativeWindow *s){
     return ([window isVisible]?1u:0u)|([window isMiniaturized]?2u:0u)|(!fullscreen&&[window isZoomed]?4u:0u)|([window isKeyWindow]?8u:0u)|(s->enabled?16u:0u)|
         (fullscreen?32u:0u)|(s->fullscreen_requested?64u:0u)|(topmost?128u:0u)|(s->topmost_requested?256u:0u);
 }
+/* 1 while none of the window shows on screen: other windows cover it, or
+   the screen is locked, where its view draws no frame until it shows. */
+int zlm_window_occluded(NativeWindow *s){
+    if(s->destroyed)return 0;
+    return ([s->window occlusionState]&NSWindowOcclusionStateVisible)==0?1:0;
+}
 uint32_t zlm_window_capabilities(NativeWindow *s){return 1u|2u|4u|8u|16u|64u|128u|256u|1024u|2048u|(s->clear?4096u:0u)|8192u;}
 static double primary_height(void){NSArray<NSScreen *> *screens=[NSScreen screens];return [screens count]?[[screens objectAtIndex:0] frame].size.height:0;}
 void zlm_window_bounds(NativeWindow *s,NativeBounds *out){

@@ -667,14 +667,8 @@ pub const Harness = struct {
     /// pressed at another, uncovered point; `find` still returns it and
     /// `clickAt` presses wherever it is told.
     pub fn click(self: *Harness, query: Query) anyerror!void {
-        const node = try self.find(query);
-        if (isRow(node.kind)) return self.clickWith(query, .{});
-        // A label (`View.labelledBy`) passes its press to its control.
-        if (self.view.labelPress(node.id) == null) switch (node.kind) {
-            .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text, .menu_item => {},
-            else => return error.NotActivatable,
-        };
-        _ = try self.target(node, .primary);
+        const node = try self.pressTarget(query, .click);
+        if (isRow(node.kind)) return self.clickRow(node, .{});
         try self.activate(node);
     }
 
@@ -684,12 +678,12 @@ pub const Harness = struct {
     /// right end of its shown part, clear of a tree row's triangle.
     /// Renders.
     pub fn clickWith(self: *Harness, query: Query, modifiers: z.KeyModifiers) anyerror!void {
-        const node = try self.find(query);
-        if (!isRow(node.kind)) return error.NotActivatable;
+        try self.clickRow(try self.pressTarget(query, .row), modifiers);
+    }
+    fn clickRow(self: *Harness, node: *const Node, modifiers: z.KeyModifiers) anyerror!void {
         const center = try self.target(node, .primary);
         const rect = self.shown(node).?;
         const point: view.Point = .{ .x = @max(rect.x, rect.x + rect.width - 1), .y = center.y };
-        try self.reaches(node, point, .primary);
         try self.pressRow(node, point, modifiers);
     }
 
@@ -699,9 +693,59 @@ pub const Harness = struct {
     /// element's own, or that of the nearest element around it that has
     /// one. Returns whether a menu or a pointer area took the click.
     pub fn rightClick(self: *Harness, query: Query) anyerror!bool {
-        const node = try self.find(query);
+        const node = try self.pressTarget(query, .secondary);
         const point = try self.target(node, .secondary);
         return self.clickButtonAt(point.x, point.y, .secondary, .{});
+    }
+
+    const Press = enum { click, row, secondary };
+
+    /// The node a press by `query` reaches. A query that matches one node,
+    /// or picks one with `nth`, names it. Several matches are checked one
+    /// by one against the actual input target, since a paragraph can show
+    /// the same text as its only inline link: the one a press reaches is
+    /// used, `Ambiguous` when a press reaches more than one, and the first
+    /// match's error when it reaches none.
+    fn pressTarget(self: *const Harness, query: Query, way: Press) anyerror!*const Node {
+        if (query.nth != null or self.count(query) < 2) {
+            const node = try self.find(query);
+            try self.pressCheck(node, way);
+            return node;
+        }
+        var reached: ?*const Node = null;
+        var first: ?anyerror = null;
+        for (self.view.nodes()) |*node| {
+            if (!query.matches(node)) continue;
+            self.pressCheck(node, way) catch |err| {
+                if (first == null) first = err;
+                continue;
+            };
+            if (reached != null) return error.Ambiguous;
+            reached = node;
+        }
+        return reached orelse first.?;
+    }
+    /// Whether a press of kind `way` on `node` reaches it, as `click`,
+    /// `clickWith` and `rightClick` check their target before any input.
+    fn pressCheck(self: *const Harness, node: *const Node, way: Press) anyerror!void {
+        switch (way) {
+            .secondary => _ = try self.target(node, .secondary),
+            .row => {
+                if (!isRow(node.kind)) return error.NotActivatable;
+                const center = try self.target(node, .primary);
+                const rect = self.shown(node).?;
+                try self.reaches(node, .{ .x = @max(rect.x, rect.x + rect.width - 1), .y = center.y }, .primary);
+            },
+            .click => {
+                if (isRow(node.kind)) return self.pressCheck(node, .row);
+                // A label (`View.labelledBy`) passes its press to its control.
+                if (self.view.labelPress(node.id) == null) switch (node.kind) {
+                    .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text, .menu_item => {},
+                    else => return error.NotActivatable,
+                };
+                _ = try self.target(node, .primary);
+            },
+        }
     }
 
     /// The part of `node` the window shows: its visible rect inside the

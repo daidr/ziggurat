@@ -14,11 +14,13 @@ pub const Found = struct {
     uri: []const u8,
 };
 
-/// A byte of a URL: anything but spaces, quotes, angle brackets, backticks
-/// and controls.
+/// A byte of a URL: anything but spaces, quotes, angle brackets, backticks,
+/// controls and bytes beyond ASCII. A URL sends what is not ASCII encoded,
+/// so it ends at the first such character: the CJK text or full-width
+/// punctuation that often follows one without a space.
 fn urlByte(byte: u8) bool {
     return switch (byte) {
-        0...0x20, 0x7f, '<', '>', '"', '\'', '`' => false,
+        0...0x20, 0x7f...0xff, '<', '>', '"', '\'', '`' => false,
         else => true,
     };
 }
@@ -503,6 +505,27 @@ test "addresses under a column, trimmed of punctuation" {
     // Addresses need not start a word.
     try std.testing.expectEqualStrings("https://no", at(cellsOf("xhttps://no", &cells), 5, &buffer).?.uri);
     try std.testing.expect(at(cellsOf("ssh://host", &cells), 3, &buffer) == null);
+}
+
+test "an address ends at its first character beyond ASCII" {
+    var cells: [128]screen.Cell = undefined;
+    var buffer: [256]u8 = undefined;
+    const cases = [_]struct { line: []const u8, col: u16, uri: []const u8 }{
+        .{ .line = "https://example.com/a的说明", .col = 3, .uri = "https://example.com/a" },
+        .{ .line = "https://example.com/a，然后", .col = 3, .uri = "https://example.com/a" },
+        .{ .line = "见https://example.com/a。", .col = 4, .uri = "https://example.com/a" },
+        .{ .line = "（https://example.com/a）", .col = 4, .uri = "https://example.com/a" },
+        .{ .line = "https://example.com/%E4%BD%A0", .col = 3, .uri = "https://example.com/%E4%BD%A0" },
+        .{ .line = "mailto:me@x.org，谢谢", .col = 3, .uri = "mailto:me@x.org" },
+    };
+    for (cases) |case| {
+        const found = at(cellsOf(case.line, &cells), case.col, &buffer) orelse return error.TestExpectedAddress;
+        try std.testing.expectEqualStrings(case.uri, found.uri);
+    }
+    // Text beyond ASCII after an address is not part of it.
+    const line = cellsOf("https://a.b/c中文", &cells);
+    try std.testing.expectEqual(@as(u16, 13), at(line, 2, &buffer).?.end);
+    try std.testing.expect(at(line, 14, &buffer) == null);
 }
 
 test "file paths under a column" {

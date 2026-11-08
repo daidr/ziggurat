@@ -1,8 +1,8 @@
-//! PNG decoding for the images programs send (Kitty graphics, `f=100`):
-//! every color type and bit depth, interlaced or not, to 8-bit RGBA with
-//! straight alpha. Ancillary chunks are skipped but `tRNS`, which gives a
-//! palette's alpha or the color that is transparent; checksums are not
-//! checked.
+//! PNG decoding: every color type and bit depth, interlaced or not, to
+//! 8-bit RGBA with straight alpha, as the images programs send a terminal
+//! (Kitty graphics, `f=100`) and the frames of animated PNGs need.
+//! Ancillary chunks are skipped but `tRNS`, which gives a palette's alpha
+//! or the color that is transparent; checksums are not checked.
 const std = @import("std");
 const zio = @import("ziggurat_io");
 
