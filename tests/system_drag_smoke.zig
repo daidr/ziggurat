@@ -388,6 +388,9 @@ const Smoke = struct {
                 self.dropped_note_len = 0;
                 self.dropped_text_len = 0;
                 self.round = @fromBackingInt(@intCast(@backingInt(self.round) + 1));
+                // The rounds move the real cursor; name each, so a hang
+                // shows where it stopped.
+                std.debug.print("drag smoke: round {s}\n", .{@tagName(self.round)});
                 if (self.round != .external) return self.to(.settle);
                 // Another process drags into the target with real XDND.
                 const exe = try zio.executablePathAlloc(self.allocator);
@@ -569,6 +572,7 @@ const Other = struct {
         if (self.waited > 400) self.end(error.Timeout);
     }
     fn to(self: *Other, stage: Stage) void {
+        std.debug.print("drag smoke source: stage {s}\n", .{@tagName(stage)});
         self.stage = stage;
         self.waited = 0;
         self.step = 0;
