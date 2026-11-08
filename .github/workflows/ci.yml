@@ -34,6 +34,13 @@ jobs:
       matrix:
         # Pull requests run Debug only; ReleaseSafe runs on main and manual runs.
         optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+    env:
+      # A cold Debug build fills about 24 GB of Zig cache, and the runner's
+      # 60 GB data disk also holds the page file and the runner. Keep the
+      # caches under that between jobs so they stay warm, and start each job
+      # with room for a cold one.
+      ZIGGURAT_CI_CACHE_MAX_MB: 24576
+      ZIGGURAT_CI_CACHE_MIN_FREE_MB: 28672
     defaults:
       run:
         shell: pwsh
