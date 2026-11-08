@@ -103,8 +103,9 @@ pub const YuvImage = struct {
     /// cannot hold the picture (`check`).
     pub fn picture(self: YuvImage, allocator: std.mem.Allocator, chroma: *[]u8, old: *[]u8) !drawing.VideoPicture {
         self.check() catch |err| std.debug.panic("ui: a {d}×{d} {s} YuvImage: {s} (planes of {d}, {d} and {d} bytes in rows of {d}, {d} and {d})", .{
-            self.width, self.height, if (@backingInt(self.format) <= 1) @tagName(self.format) else "unknown", @errorName(err),
-            self.planes[0].len, self.planes[1].len, self.planes[2].len, self.strides[0], self.strides[1], self.strides[2],
+            self.width,         self.height,        if (@backingInt(self.format) <= 1) @tagName(self.format) else "unknown", @errorName(err),
+            self.planes[0].len, self.planes[1].len, self.planes[2].len,                                                      self.strides[0],
+            self.strides[1],    self.strides[2],
         });
         old.* = &.{};
         var result: drawing.VideoPicture = .{ .width = self.width, .height = self.height, .format = .nv12, .matrix = self.videoMatrix(), .planes = .{ self.planes[0].ptr, null }, .strides = .{ self.strides[0], 0 } };

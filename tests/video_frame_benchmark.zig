@@ -197,9 +197,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
             const on_gpu = bench.gpu_frames - gpu_before;
             std.debug.print("video frames: mode={s} range={s} renderer={s} median_ms={d:.2} min_ms={d:.2}\n", .{
-                @tagName(mode),                                                                                   if (full_range) "full" else "limited",
-                if (on_gpu == count) (if (builtin.os.tag == .macos) "metal" else "gl") else if (on_gpu == 0) "software" else "mixed",
-                @as(f64, @floatFromInt(median(times))) / std.time.ns_per_ms,                                      @as(f64, @floatFromInt(times[0])) / std.time.ns_per_ms,
+                @tagName(mode),                                                                                                       if (full_range) "full" else "limited",
+                if (on_gpu == count) (if (builtin.os.tag == .macos) "metal" else "gl") else if (on_gpu == 0) "software" else "mixed", @as(f64, @floatFromInt(median(times))) / std.time.ns_per_ms,
+                @as(f64, @floatFromInt(times[0])) / std.time.ns_per_ms,
             });
         }
     }

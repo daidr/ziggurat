@@ -514,12 +514,12 @@ test "a frame whose planes do not hold its picture is refused" {
         }.f },
         .{ .err = error.InvalidMatrix, .change = struct {
             fn f(m: *yuv_image.YuvImage) void {
-                m.matrix = @enumFromInt(3);
+                m.matrix = @fromBackingInt(@intCast(3));
             }
         }.f },
         .{ .err = error.InvalidFormat, .change = struct {
             fn f(m: *yuv_image.YuvImage) void {
-                m.format = @enumFromInt(2);
+                m.format = @fromBackingInt(@intCast(2));
             }
         }.f },
     };
