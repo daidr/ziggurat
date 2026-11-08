@@ -9,6 +9,10 @@ pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 const linux = builtin.os.tag == .linux;
 /// WebKitGTK and WKWebView: explicit ephemeral storage, no WebView2 folder.
 const webkit = linux or builtin.os.tag == .macos;
+/// Whether some of a page's window shows on screen (WebKit on macOS).
+const macos_hooks = if (builtin.os.tag == .macos) struct {
+    extern fn zwk_test_on_screen(*anyopaque) c_int;
+} else struct {};
 const registrations = [_]web.SchemeRegistration{.{ .name = "asset", .treat_as_secure = true }};
 const start = "<!doctype html><title>start</title><p>start</p>";
 const long = "<!doctype html><title>long</title><div style=\"height:5000px\">long</div><input id=f>";
@@ -128,9 +132,16 @@ const Probe = struct {
             self.tries += 1;
             if (self.tries == 100) {
                 std.debug.print("shown {s}\n", .{result.json});
-                return self.fail(error.WrongRestore);
-            }
-            return;
+                // WebKit reports a page hidden while the window server
+                // says its window is not on screen (covered by another
+                // app's windows, or the display asleep, as on an unattended
+                // runner); the place it keeps is still checked.
+                if (builtin.os.tag == .macos and std.mem.eql(u8, result.json, "\"hidden 1200\"") and
+                    macos_hooks.zwk_test_on_screen(self.views[1].native.?) == 0)
+                {
+                    std.debug.print("session state: the window is not on screen, so its page stays hidden; scroll position kept\n", .{});
+                } else return self.fail(error.WrongRestore);
+            } else return;
         }
         self.step = .back;
         self.views[1].goBack() catch |err| self.fail(err);

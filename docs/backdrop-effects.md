@@ -45,6 +45,16 @@ frame.backdropEffect(edge, 0, .{ .scroll_edge = .{ .hard = true } });
 
 `Glass.hover`（0–1）是指针悬停交互玻璃的程度：边光强度最多加 0.18，亮度映射的 low/high 最多各加 0.02，tint 的 alpha 最多再乘 1.1。`Glass.press`（0–1）是按下的程度：形状左右各外扩 `1.1·press` DIP、上下各外扩 `0.45·press` DIP，圆角加上同样的上下外扩量。两者由调用者给出，视图层的 `view.GlassInteraction` 按 150/120 ms 的补间跟随指针区域。CPU、OpenGL 与 Metal 的玻璃回放都读这些参数（边光宽度经计划的 `line2.w` 传给 GPU 着色器）。
 
+### 系统玻璃（网页上方的 Liquid Glass）
+
+`Glass.native = true` 在窗口支持时（macOS 26 及以上有 `NSGlassEffectView`，`Window.nativeGlassSupported()`）改用系统自己的玻璃：帧在玻璃的圆角矩形处挖一个洞（`backdrop.Kind.hole`，把此前画在那里的东西清掉，透明平面上清成透明），记下它的框、所在裁剪、圆角、style 与 tint（`Context.nativeGlassPlaces()`）。这样的帧总在软件平面上绘制，每帧拆成三层：
+
+1. 绘制层：照常回放整帧，最后把所有洞清成窗口表面之下的颜色（不透明窗口为主题背景色，透明或带材质的窗口为透明），它仍在内嵌网页之下；
+2. 系统玻璃：每块玻璃一个 `NSGlassEffectView`，放在绘制视图（和其中的网页）之上，按绘制顺序叠放，并被一个裁剪视图截到所在裁剪；
+3. 上层绘制：同一帧在透明平面上再回放一遍，只留下各个洞里的内容（洞清掉了玻璃之前画的东西，所以留下的是元素在材质之后画的边框、子元素等），显示在玻璃之上的覆盖视图里。
+
+于是玻璃取样的是它下面窗口里的东西：内嵌网页的页面、窗口的材质或表面之下的颜色，而不是帧自己画的元素，与参考框架一致。玻璃区域里的网页不再被原生控件的遮挡框切掉（`Viewport.see_through`），页面在玻璃下照常显示，但那些控件仍接收指针；玻璃视图和覆盖视图不接收指针、键盘，也不是无障碍元素。减少透明度、交互玻璃（`view.GlassInteraction`）、变换/组/效果/缓存作用域内、一帧超过 `max_native_glass`（16）块，以及其他平台上，玻璃照常由渲染器绘制。不再有系统玻璃的第一帧会移除玻璃视图并隐藏覆盖视图。
+
 ### 玻璃组
 
 `ui.effects.Library.glassGroup(&values, .{ .panes, .radius, .merge, .style, .tint, .clarity, .dark, .high_contrast })` 返回一个背景着色器，把最多 8 个圆角矩形面板画成一片玻璃：各面板的符号距离场以宽 `merge` DIP 的平滑最小值合并，靠近的面板之间搭起桥接，整片只有一圈弧面与边光；并集之外保持背景不变。材质取最短边等于最小面板的玻璃（`PaneMaterial`）：模糊（最多 20 DIP，5×5 采样）、弧面折射、亮度映射、tint（alpha×0.88）与上下边光，高对比度同样加亮加宽边光。它作为普通背景着色器在软件回放、OpenGL、Metal 与 D3D11 上执行。

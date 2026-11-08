@@ -144,6 +144,17 @@ static uint32_t line_at(Layout *s,uint32_t position){
     while(lo<hi){uint32_t mid=lo+(hi-lo)/2;if(s->lines[mid].start<=position)lo=mid+1;else hi=mid;}
     return lo?lo-1:0;
 }
+/* Pango gives a grapheme half the spacing on either side, and the line's
+   first and last ones none past the line's ends: move a cell's edges to
+   where the other engines put them, the whole spacing after the grapheme,
+   so the caret stands after the room of the grapheme before it. */
+static void space_cell(Layout *s,ZtlCell *cell){
+    const ZtlLine *line=&s->lines[cell->line];const float half=s->spacing/2,eps=0.01f;
+    const float start=line->x,end=line->x+line->width-s->spacing;
+    float left=cell->rect.x,right=cell->rect.x+cell->rect.width;
+    left+=left<=start+eps?0:half;right+=right>=end-eps?s->spacing:half;
+    cell->rect.x=left;cell->rect.width=right-left;
+}
 int ztl_cells(void *storage,ZtlCell *cells,uint32_t count,ZtlError *error){
     Layout *s=storage;*error=(ZtlError){0};s->cells=cells;s->cell_count=count;
     PangoLayoutIter *iter=pango_layout_get_iter(s->layout);
@@ -155,7 +166,9 @@ int ztl_cells(void *storage,ZtlCell *cells,uint32_t count,ZtlError *error){
         cells[ci].line=li;cells[ci].rect=(ZtlRect){dip(rect.x),s->lines[li].y,dip(rect.width),s->lines[li].height};
         cells[ci].rtl=run->item->analysis.level&1;cells[ci].valid=1;
     }while(pango_layout_iter_next_char(iter));
-    pango_layout_iter_free(iter);return ZTL_OK;
+    pango_layout_iter_free(iter);
+    if(s->spacing!=0)for(uint32_t i=0;i<count;i++)if(cells[i].valid)space_cell(s,&cells[i]);
+    return ZTL_OK;
 }
 void ztl_finish_snapshot(void *storage){Layout *s=storage;s->cells=NULL;s->cell_count=0;s->lines=NULL;s->line_count=0;}
 int ztl_snapshot_needs(void *storage,uint32_t *clusters,uint32_t *ranges,ZtlError *error){(void)storage;*clusters=0;*ranges=0;*error=(ZtlError){0};return ZTL_OK;}
@@ -165,7 +178,12 @@ int ztl_caret(void *storage,uint32_t position,int trailing,ZtlRect *out,ZtlError
     Layout *s=storage;*error=(ZtlError){0};int line=0,x=0;
     /* index_to_line_x(length) maps to a run's leading edge for RTL. The
        terminal cursor API instead returns the actual paragraph-end edge. */
-    if(position==s->length&&!trailing){PangoRectangle pos;pango_layout_get_cursor_pos(s->layout,(int)position,&pos,NULL);ZtlLine *last=&s->lines[s->line_count-1];*out=(ZtlRect){dip(pos.x),last->y,0,last->height};return ZTL_OK;}
+    if(position==s->length&&!trailing){
+        PangoRectangle pos;pango_layout_get_cursor_pos(s->layout,(int)position,&pos,NULL);ZtlLine *last=&s->lines[s->line_count-1];
+        /* Past the last grapheme's room, as its cell ends. */
+        float x=dip(pos.x);if(s->spacing!=0&&last->end>last->start&&x>last->x+0.01f)x+=s->spacing;
+        *out=(ZtlRect){x,last->y,0,last->height};return ZTL_OK;
+    }
     uint32_t ci=cell_at(s,position);
     if(ci<s->cell_count&&s->cells[ci].position==position&&s->cells[ci].valid){
         ZtlCell *cell=&s->cells[ci];float edge=cell->rect.x+((!!trailing!=!!cell->rtl)?cell->rect.width:0);
@@ -173,7 +191,8 @@ int ztl_caret(void *storage,uint32_t position,int trailing,ZtlRect *out,ZtlError
     }
     pango_layout_index_to_line_x(s->layout,(int)position,trailing,&line,&x);
     if(line<0||(uint32_t)line>=s->line_count)return ZTL_FAILED;
-    *out=(ZtlRect){dip(x)+s->lines[line].x,s->lines[line].y,0,s->lines[line].height};return ZTL_OK;
+    float edge=dip(x)+s->lines[line].x;if(s->spacing!=0&&edge>s->lines[line].x+0.01f)edge+=s->spacing/2;
+    *out=(ZtlRect){edge,s->lines[line].y,0,s->lines[line].height};return ZTL_OK;
 }
 int ztl_spans(void *storage,uint32_t start,uint32_t end,ZtlRect *out,uint32_t capacity,uint32_t *count,ZtlError *error){
     Layout *s=storage;*error=(ZtlError){0};*count=0;

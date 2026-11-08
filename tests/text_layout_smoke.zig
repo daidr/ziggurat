@@ -103,6 +103,32 @@ fn bidiAndSelection(engine: *t.Engine) !void {
     const upstream = try wrap.caret(.{ .byte_offset = offset, .affinity = .upstream });
     const downstream = try wrap.caret(.{ .byte_offset = offset, .affinity = .downstream });
     try expect(upstream.y < downstream.y);
+    try letterSpacedCarets(engine);
+}
+/// Letter spacing goes after each character: the caret after character k
+/// stands k spacings right of where it stands without, past the room of the
+/// character before it, as every engine lays it out.
+fn letterSpacedCarets(engine: *t.Engine) !void {
+    const text = "abcd";
+    const plain = try engine.layout(text, .{});
+    defer plain.close() catch unreachable;
+    for ([_]f32{ 6, -1.5 }) |spacing| {
+        const spaced = try engine.layout(text, .{ .letter_spacing = spacing });
+        defer spaced.close() catch unreachable;
+        for (0..text.len + 1) |k| {
+            const byte: u32 = @intCast(k);
+            const want = (try plain.caret(.{ .byte_offset = byte })).x + @as(f32, @floatFromInt(k)) * spacing;
+            const got = (try spaced.caret(.{ .byte_offset = byte })).x;
+            if (@abs(got - want) > 0.6) {
+                std.debug.print("letter spacing {d}: caret {d} at {d}, wanted {d}\n", .{ spacing, k, got, want });
+                return error.LetterSpacedCaret;
+            }
+            if (k < text.len) {
+                const hit = try spaced.hitTest(.{ .x = want + 0.2, .y = 1 });
+                try std.testing.expectEqual(byte, hit.caret.byte_offset);
+            }
+        }
+    }
 }
 fn multiScalarSelection(engine: *t.Engine) !void {
     // Spacing marks and broken/unsupported shaping clusters can have several

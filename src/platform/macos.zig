@@ -61,7 +61,13 @@ extern fn zlm_window_content_protection(*anyopaque, c_int) void;
 extern fn zlm_window_attention(*anyopaque, c_int) void;
 extern fn zlm_window_chrome(*anyopaque, c_int, f64) void;
 extern fn zlm_window_material(*anyopaque, c_int, c_int) void;
-extern fn zlm_window_tint(*anyopaque, c_int, f64, f64, f64, f64) void;
+extern fn zlm_glass_supported() c_int;
+extern fn zlm_window_place_glass(*anyopaque, [*]const GlassWire, usize) c_int;
+extern fn zlm_window_overlay_begin(*anyopaque, u32, u32, f64) ?*anyopaque;
+extern fn zlm_window_overlay_commit(*anyopaque, c_int) void;
+/// ZlmGlass of macos.m.
+const GlassWire = extern struct { frame: [4]f64, clip: [4]f64, radius: f64, tint: [4]f64, style: c_int, has_tint: c_int };
+extern fn zlm_window_tint(*anyopaque, c_int, *const [4]f64, c_int, *const [4]f64) void;
 extern fn zlm_window_active_appearance(*anyopaque, c_int) void;
 extern fn zlm_window_capture(*anyopaque, *c_int, *c_int, *c_int, *?[*]const u8) ?*anyopaque;
 extern fn zlm_capture_free(*anyopaque) void;
@@ -107,7 +113,7 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
     record.native.native = zlm_window_create(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
     if (options.transparent or options.corner_radius > 0) zlm_window_chrome(record.native.native.?, @intFromBool(options.transparent), options.corner_radius);
-    if (options.vibrancy_tint) |tint| setVibrancyTint(record, tint);
+    if (options.vibrancy_tint) |tint| setVibrancyTint(record, tint, options.vibrancy_tint_dark);
     if (options.vibrancy != .none) setVibrancy(record, options.vibrancy);
     if (options.text_input_mode != .system) {
         zlm_window_text_mode(record.native.native.?, 1);
@@ -159,10 +165,39 @@ pub fn setVibrancy(record: *core.WindowRecord, material: core.Vibrancy) void {
     zlm_window_material(record.native.native.?, value.material, value.glass);
 }
 /// Liquid Glass takes the tint, through NSGlassEffectView's tintColor;
-/// other materials keep it for when the glass shows.
-pub fn setVibrancyTint(record: *core.WindowRecord, tint: ?core.Rgba) void {
-    const color = tint orelse core.Rgba{ .r = 0, .g = 0, .b = 0, .a = 0 };
-    zlm_window_tint(record.native.native.?, @intFromBool(tint != null), @as(f64, @floatFromInt(color.r)) / 255, @as(f64, @floatFromInt(color.g)) / 255, @as(f64, @floatFromInt(color.b)) / 255, @as(f64, @floatFromInt(color.a)) / 255);
+/// other materials keep it for when the glass shows. With a dark tint the
+/// window takes the one of its effective appearance, again as it changes.
+pub fn setVibrancyTint(record: *core.WindowRecord, tint: ?core.Rgba, dark: ?core.Rgba) void {
+    const light = unitColor(tint orelse core.Rgba{ .r = 0, .g = 0, .b = 0, .a = 0 });
+    const night = unitColor(dark orelse core.Rgba{ .r = 0, .g = 0, .b = 0, .a = 0 });
+    zlm_window_tint(record.native.native.?, @intFromBool(tint != null), &light, @intFromBool(tint != null and dark != null), &night);
+}
+fn unitColor(color: core.Rgba) [4]f64 {
+    return .{ @as(f64, @floatFromInt(color.r)) / 255, @as(f64, @floatFromInt(color.g)) / 255, @as(f64, @floatFromInt(color.b)) / 255, @as(f64, @floatFromInt(color.a)) / 255 };
+}
+/// NSGlassEffectView is macOS 26's.
+pub fn nativeGlassSupported(_: *core.WindowRecord) bool {
+    return zlm_glass_supported() != 0;
+}
+/// The glass in the window's DIPs, the content's scaled by its zoom.
+pub fn placeNativeGlass(record: *core.WindowRecord, places: []const core.NativeGlass, zoom: f32) !void {
+    var stack: [16]GlassWire = undefined;
+    const heap = places.len > stack.len;
+    const wires = if (heap) try record.window.app.allocator.alloc(GlassWire, places.len) else stack[0..places.len];
+    defer if (heap) record.window.app.allocator.free(wires);
+    for (places, wires) |place, *wire| {
+        const tint = unitColor(place.tint orelse core.Rgba{ .r = 0, .g = 0, .b = 0, .a = 0 });
+        const frame = core.zoomRect(place.frame, zoom);
+        const clip = core.zoomRect(place.clip, zoom);
+        wire.* = .{ .frame = .{ frame.x, frame.y, frame.width, frame.height }, .clip = .{ clip.x, clip.y, clip.width, clip.height }, .radius = place.radius * zoom, .tint = tint, .style = @backingInt(place.style), .has_tint = @intFromBool(place.tint != null) };
+    }
+    if (zlm_window_place_glass(record.native.native.?, wires.ptr, wires.len) != 0) return error.UnsupportedCapability;
+}
+pub fn beginOverlay(record: *core.WindowRecord, size: core.Size) ?*anyopaque {
+    return zlm_window_overlay_begin(record.native.native.?, size.width, size.height, size.scale);
+}
+pub fn commitOverlay(record: *core.WindowRecord, shown: bool) void {
+    zlm_window_overlay_commit(record.native.native.?, @intFromBool(shown));
 }
 pub fn setActiveAppearance(record: *core.WindowRecord, enabled: bool) void {
     zlm_window_active_appearance(record.native.native.?, @intFromBool(enabled));

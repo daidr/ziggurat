@@ -1618,6 +1618,12 @@ pub const View = struct {
                 var covers: [4 * z.composition.max_covers]f64 = undefined;
                 const list = viewport.coverList();
                 for (list, 0..) |cover, index| covers[4 * index ..][0..4].* = .{ cover.x * to, cover.y * to, cover.width * to, cover.height * to };
+                if (comptime is_macos) {
+                    var glass: [4 * z.composition.max_covers]f64 = undefined;
+                    const through = viewport.seeThroughList();
+                    for (through, 0..) |box, index| glass[4 * index ..][0..4].* = .{ box.x * to, box.y * to, box.width * to, box.height * to };
+                    try webkit.check(webkit.zwk_see_through(native, &glass, @intCast(through.len)));
+                }
                 try webkit.check(webkit.zwk_shape(native, &clip, &corners, &covers, @intCast(list.len)));
                 if (self.attachmentClosed()) return error.Closed;
             }

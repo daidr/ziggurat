@@ -50,6 +50,16 @@ pub const Glass = struct {
     /// rim lights by up to 0.18, its surface lifts by up to 0.02 and its
     /// tint deepens by up to a tenth.
     hover: f32 = 0,
+    /// Asks for the system's glass where the window has it (macOS 26 and
+    /// later, `Window.nativeGlassSupported`): the frame leaves a hole
+    /// through itself and the system's NSGlassEffectView under the content
+    /// shows there, sampling what is under the window's surface, such as an
+    /// embedded web view's page or the window's material, never what the
+    /// frame painted; what the element paints after its material, its
+    /// border and children, shows over the glass. Elsewhere, with Reduce
+    /// Transparency, for an interactive glass (`view.GlassInteraction`)
+    /// and inside a transform, the renderer draws the glass as without.
+    native: bool = false,
 };
 /// Varies a blur along a line by alpha: 255 applies the full radius, 0 none.
 pub const Mask = struct {
@@ -93,7 +103,10 @@ pub const Preferences = struct {
     }
 };
 
-pub const Kind = enum(u8) { blur, glass, edge };
+/// `hole` clears its rounded rectangle to `Entry.fallback`, transparent
+/// on a transparent plane, as the hole a native glass leaves through the
+/// frame (`Glass.native`): what was drawn there before it is gone.
+pub const Kind = enum(u8) { blur, glass, edge, hole };
 /// One recorded effect in absolute DIP; everything that depends on the
 /// target's scale is derived during replay.
 pub const Entry = struct {
@@ -254,6 +267,10 @@ pub fn plan(target: Target, entry: Entry, workspace: ?*Workspace) Plan {
     const fy1 = @min(@min(box.y1, @ceil(clip[3])), height);
     if (!(fx1 > fx0 and fy1 > fy0)) return result;
     result.out = .{ .x0 = @intFromFloat(fx0), .y0 = @intFromFloat(fy0), .x1 = @intFromFloat(fx1), .y1 = @intFromFloat(fy1) };
+    if (entry.kind == .hole) {
+        result.mode = .fill;
+        return result;
+    }
     const out = result.out;
     result.shading = Shading.init(entry, box, s);
     const reach: usize = result.shading.radius + @as(usize, @intFromFloat(@ceil(result.shading.refraction))) + 1;
@@ -287,7 +304,7 @@ pub fn apply(surface: cpu.Surface, transparent: bool, entry: Entry, workspace: ?
     switch (p.mode) {
         .empty => return p.dirty(),
         .fill => {
-            fill(surface, transparent, p.box, p.out, p.fill);
+            if (entry.kind == .hole) clearHole(surface, transparent, p.box, p.out, p.fill) else fill(surface, transparent, p.box, p.out, p.fill);
             return p.dirty();
         },
         .filter => {},
@@ -565,6 +582,8 @@ pub const Shading = struct {
                 result.sigma = hard_edge_blur * s;
                 result.background = toned(rgb(entry.background), 0.947, 0.03);
             },
+            // A hole only clears (`plan`).
+            .hole => {},
         }
         const most = if (result.progressive) |line| line.most else result.sigma;
         result.sigma = @min(result.sigma, @as(f64, max_radius_pixels) / 3);
@@ -577,6 +596,7 @@ pub const Shading = struct {
     fn shade(self: Shading, plane: Plane, x: usize, y: usize, px: f64, py: f64, depth_value: f64, box: Box) u32 {
         switch (self.kind) {
             .blur => return plane.at(x, y),
+            .hole => return 0,
             .edge => {
                 const c = toned(straight(channels(plane.at(x, y))), 0.25, 0.03);
                 var out: [3]f64 = undefined;
@@ -732,6 +752,92 @@ fn fill(surface: cpu.Surface, transparent: bool, box: Box, out: Region, color: C
     };
 }
 
+/// A hole a native glass leaves through a frame (`Glass.native`), in
+/// absolute DIP: its rounded box, the clip it shows in, and the color
+/// under it on an opaque plane, what the window shows under its surface.
+pub const Hole = struct { bounds: Rect, radius: f32 = 0, clip: Rect, under: Color };
+/// `inside` clears every hole of the plane to what is under it, as the
+/// surface under the glass shows it; `outside` clears all but the holes,
+/// leaving what the frame painted inside them, as the surface over the
+/// glass shows it.
+pub const HoleMask = enum { inside, outside };
+fn holePlan(surface: cpu.Surface, hole: Hole) Plan {
+    const s: f64 = surface.scale;
+    const c = hole.clip;
+    const clip: [4]f64 = .{
+        @max(surface.clip[0], @as(f64, c.x) * s + surface.origin[0]),
+        @max(surface.clip[1], @as(f64, c.y) * s + surface.origin[1]),
+        @min(surface.clip[2], (@as(f64, c.x) + c.width) * s + surface.origin[0]),
+        @min(surface.clip[3], (@as(f64, c.y) + c.height) * s + surface.origin[1]),
+    };
+    return plan(.{ .width = surface.width, .height = surface.height, .scale = surface.scale, .origin = surface.origin, .clip = clip }, .{ .bounds = hole.bounds, .radius = hole.radius, .kind = .hole, .fallback = hole.under }, null);
+}
+/// Mask the plane by `holes`, antialiased along their corners and clips.
+pub fn maskHoles(surface: cpu.Surface, holes: []const Hole, mask: HoleMask, transparent: bool) void {
+    switch (mask) {
+        .inside => for (holes) |hole| {
+            const p = holePlan(surface, hole);
+            if (p.mode == .empty) continue;
+            var clipped = surface;
+            clipped.clip = p.clip;
+            clearHole(clipped, transparent, p.box, p.out, if (transparent) .{ .r = 0, .g = 0, .b = 0, .a = 0 } else hole.under);
+        },
+        .outside => {
+            var plans: [32]Plan = undefined;
+            var count: usize = 0;
+            var x0: usize = surface.width;
+            var y0: usize = surface.height;
+            var x1: usize = 0;
+            var y1: usize = 0;
+            for (holes) |hole| {
+                if (count == plans.len) break;
+                const p = holePlan(surface, hole);
+                if (p.mode == .empty) continue;
+                plans[count] = p;
+                count += 1;
+                x0 = @min(x0, p.out.x0);
+                y0 = @min(y0, p.out.y0);
+                x1 = @max(x1, p.out.x1);
+                y1 = @max(y1, p.out.y1);
+            }
+            for (0..surface.height) |y| {
+                const row = surface.pixels[y * surface.stride ..][0..surface.width];
+                if (count == 0 or y < y0 or y >= y1) {
+                    @memset(row, 0);
+                    continue;
+                }
+                @memset(row[0..x0], 0);
+                @memset(row[x1..], 0);
+                for (x0..x1) |x| {
+                    const px = @as(f64, @floatFromInt(x)) + 0.5;
+                    const py = @as(f64, @floatFromInt(y)) + 0.5;
+                    var keep: f64 = 0;
+                    for (plans[0..count]) |p| {
+                        if (x < p.out.x0 or x >= p.out.x1 or y < p.out.y0 or y >= p.out.y1) continue;
+                        keep = @max(keep, std.math.clamp(0.5 - roundedDistance(p.box, px, py), 0, 1) * clipCoverage(p.clip, @floatFromInt(x), @floatFromInt(y)));
+                        if (keep >= 1) break;
+                    }
+                    if (keep < 1) row[x] = lerp(row[x], 0, 1 - keep);
+                }
+            }
+        },
+    }
+}
+
+/// Replace the pixels inside the rounded box with `color`, its alpha
+/// included: transparent, a hole, on a transparent plane.
+fn clearHole(surface: cpu.Surface, transparent: bool, box: Box, out: Region, color: Color) void {
+    const alpha = @as(f64, @floatFromInt(if (transparent) color.a else 255)) / 255;
+    const source = pack(.{ @as(f64, @floatFromInt(color.r)) / 255 * alpha, @as(f64, @floatFromInt(color.g)) / 255 * alpha, @as(f64, @floatFromInt(color.b)) / 255 * alpha }) & 0x00ffffff | @as(u32, @intFromFloat(@round(alpha * 255))) << 24;
+    for (out.y0..out.y1) |y| for (out.x0..out.x1) |x| {
+        const sd = roundedDistance(box, @as(f64, @floatFromInt(x)) + 0.5, @as(f64, @floatFromInt(y)) + 0.5);
+        const amount = std.math.clamp(0.5 - sd, 0, 1) * clipCoverage(surface.clip, @floatFromInt(x), @floatFromInt(y));
+        if (amount == 0) continue;
+        const at = y * surface.stride + x;
+        surface.pixels[at] = composite(surface.pixels[at], source, amount, transparent);
+    };
+}
+
 /// Replace `amount` of the destination with a premultiplied source. Opaque
 /// targets keep full alpha.
 fn composite(destination: u32, source: u32, amount: f64, transparent: bool) u32 {
@@ -814,6 +920,34 @@ fn hash(x: usize, y: usize) f64 {
 
 fn testSurface(pixels: []u32, width: u32, height: u32, scale: f32) cpu.Surface {
     return .{ .pixels = pixels.ptr, .width = width, .height = height, .stride = width, .scale = scale, .clip = .{ 0, 0, @floatFromInt(width), @floatFromInt(height) } };
+}
+
+test "a native glass's hole clears what was drawn before it, and its masks split a plane around it" {
+    var pixels: [16 * 8]u32 = @splat(0xff112233);
+    const surface = testSurface(&pixels, 16, 8, 1);
+    // A hole command clears its box to transparent on a transparent plane.
+    _ = apply(surface, true, .{ .bounds = .{ .x = 2, .y = 2, .width = 4, .height = 4 }, .kind = .hole, .fallback = .{ .r = 0, .g = 0, .b = 0, .a = 0 } }, null);
+    try std.testing.expectEqual(@as(u32, 0), pixels[3 * 16 + 3]);
+    try std.testing.expectEqual(@as(u32, 0xff112233), pixels[3 * 16 + 8]);
+    // Under the glass, an opaque plane shows what is under the surface;
+    // the hole's clip bounds it.
+    @memset(&pixels, 0xff112233);
+    const hole: Hole = .{ .bounds = .{ .x = 2, .y = 2, .width = 8, .height = 4 }, .clip = .{ .x = 0, .y = 0, .width = 6, .height = 8 }, .under = .rgb(0xffffff) };
+    maskHoles(surface, &.{hole}, .inside, false);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), pixels[3 * 16 + 3]);
+    try std.testing.expectEqual(@as(u32, 0xff112233), pixels[3 * 16 + 7]);
+    try std.testing.expectEqual(@as(u32, 0xff112233), pixels[1 * 16 + 3]);
+    // Over it, only what is inside the hole stays.
+    @memset(&pixels, 0xff112233);
+    maskHoles(surface, &.{hole}, .outside, true);
+    try std.testing.expectEqual(@as(u32, 0xff112233), pixels[3 * 16 + 3]);
+    try std.testing.expectEqual(@as(u32, 0), pixels[3 * 16 + 7]);
+    try std.testing.expectEqual(@as(u32, 0), pixels[1 * 16 + 3]);
+    try std.testing.expectEqual(@as(u32, 0), pixels[7 * 16 + 15]);
+    // No hole leaves nothing over the glass.
+    @memset(&pixels, 0xff112233);
+    maskHoles(surface, &.{}, .outside, true);
+    try std.testing.expect(std.mem.allEqual(u32, &pixels, 0));
 }
 
 test "lens bends fully at the edge and not past the bezel" {

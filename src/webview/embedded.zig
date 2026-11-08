@@ -76,7 +76,11 @@ pub const WebViews = struct {
         var changed = false;
         for (self.items) |entry| {
             const item = entry orelse continue;
-            if (item.placed) |*shown| item.cover(shown, hits);
+            if (item.placed) |*shown| {
+                item.cover(shown, hits);
+                // The page shows under the system's glass over it.
+                for (self.host.context.nativeGlassPlaces()) |glass| shown.addSeeThrough(glass.clip);
+            }
             item.wanted = if (item.placed) |shown| shown else hidden;
             // Tab or a request moved the focus to the leaf: the page takes
             // the keyboard.

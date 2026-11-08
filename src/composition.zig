@@ -30,6 +30,13 @@ pub const Viewport = struct {
     /// cuts the region out there.
     covers: [max_covers]z.Rect = @splat(no_rect),
     cover_count: u8 = 0,
+    /// Boxes where the system's glass shows over the region (macOS's
+    /// native glass, `Glass.native`), in the window's DIPs: the region
+    /// shows there under the glass, which samples it, and under what the
+    /// content draws over the glass, though covers there keep the pointer.
+    /// The first `see_count`, the rest zero.
+    see_through: [max_covers]z.Rect = @splat(no_rect),
+    see_count: u8 = 0,
 
     /// The part of the window the region shows in: `bounds` within `clip`.
     pub fn shown(self: Viewport) z.Rect {
@@ -55,6 +62,19 @@ pub const Viewport = struct {
         const x0 = @min(last.x, cut.x);
         const y0 = @min(last.y, cut.y);
         last.* = .{ .x = x0, .y = y0, .width = @max(last.x + last.width, cut.x + cut.width) - x0, .height = @max(last.y + last.height, cut.y + cut.height) - y0 };
+    }
+
+    /// The boxes of `see_through` in use.
+    pub fn seeThroughList(self: *const Viewport) []const z.Rect {
+        return self.see_through[0..@min(self.see_count, max_covers)];
+    }
+    /// Add a box where the system's glass shows over the region, within
+    /// what shows of it; past `max_covers` boxes the rest are dropped.
+    pub fn addSeeThrough(self: *Viewport, box: z.Rect) void {
+        const cut = intersect(box, self.shown());
+        if (cut.width <= 0 or cut.height <= 0 or self.see_count >= max_covers) return;
+        self.see_through[self.see_count] = cut;
+        self.see_count += 1;
     }
 
     /// The size the content lays out at.

@@ -231,6 +231,8 @@ pub extern fn zwk_viewport(*anyopaque, i32, i32, i32, i32, c_int) c_int;
 /// `layout_width` DIPs (0: unscaled), cut to corners of `radii` in its DIPs.
 pub extern fn zwk_present(*anyopaque, f64, *const [4]f64) c_int;
 pub extern fn zwk_shape(*anyopaque, *const [4]f64, *const [4]f64, ?[*]const f64, u32) c_int;
+/// macOS only: where the system's glass shows over a region's page.
+pub extern fn zwk_see_through(*anyopaque, ?[*]const f64, u32) c_int;
 pub extern fn zwk_tab_into(*anyopaque, c_int) c_int;
 pub extern fn zwk_has_focus(*anyopaque) c_int;
 pub extern fn zwk_widget(*anyopaque) ?*anyopaque;

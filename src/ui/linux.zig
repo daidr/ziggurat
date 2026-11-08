@@ -679,6 +679,24 @@ pub const Renderer = struct {
     pub fn planeKept(self: *const Renderer) bool {
         return self.layer_plan == null and self.hasSurface();
     }
+    /// Masks the plane drawn so far by the holes native glass leaves
+    /// (`backdrop.maskHoles`), before `endChecked`.
+    pub fn maskHoles(self: *Renderer, holes: []const commands.backdrop.Hole, mask: commands.backdrop.HoleMask) !void {
+        const native = self.native orelse return error.NoSurface;
+        var surface: cpu_gradient.Surface = undefined;
+        if (zlc_gradient_surface(native, &surface) != 0) return error.NoSurface;
+        // The whole plane, whatever the clip left by the frame.
+        surface.clip = .{ 0, 0, @floatFromInt(surface.width), @floatFromInt(surface.height) };
+        commands.backdrop.maskHoles(surface, holes, mask, zlc_layer_transparent(native) != 0);
+    }
+    /// Makes the plane opaque white again, as it starts, after a frame drew
+    /// a transparent one in it.
+    pub fn resetOpaque(self: *Renderer) void {
+        const native = self.native orelse return;
+        var surface: cpu_gradient.Surface = undefined;
+        if (zlc_gradient_surface(native, &surface) != 0) return;
+        for (0..surface.height) |y| @memset(surface.pixels[y * surface.stride ..][0..surface.width], 0xffffffff);
+    }
     /// The plane's pixels, for tests.
     pub fn testSurface(self: *Renderer, out: *cpu_gradient.Surface) c_int {
         return zlc_gradient_surface(self.native.?, out);

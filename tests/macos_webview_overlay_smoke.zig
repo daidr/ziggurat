@@ -8,6 +8,11 @@
 //! cannot become key (another app keeps the keyboard, or the session's
 //! screen is locked), the page takes no keyboard, so the Tab steps are
 //! skipped and said so; the shape and the popover are still checked.
+//! Where macOS has Liquid Glass, the popover's content then sits on the
+//! system's glass (`Glass.native`): the page shows under the glass, also
+//! under the button on it, which the window draws over the glass and which
+//! keeps the pointer; the glass and the overlay take no pointer, and the
+//! glass goes with the material.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -23,8 +28,12 @@ extern fn zwo_activate(*anyopaque) c_int;
 extern fn zwo_tab(*anyopaque, c_int) c_int;
 extern fn zwo_scale(*anyopaque) f64;
 extern fn zua_test_page_in_tree(*anyopaque) c_int;
+extern fn zwk_test_page_shows(*anyopaque, i32, i32) c_int;
+extern fn zlm_test_glass_count(*anyopaque) c_int;
+extern fn zlm_test_overlay_alpha(*anyopaque, u32, u32) c_int;
+extern fn zlm_test_glass_passes(*anyopaque, f64, f64) c_int;
 
-const Phase = enum { loading, shaped, first, into, through, out, back, covered, done };
+const Phase = enum { loading, shaped, first, into, through, out, back, covered, glass, unglass, done };
 
 const State = struct {
     app: *z.App,
@@ -39,6 +48,10 @@ const State = struct {
     /// The tick the window was first asked to become key.
     asked: ?u32 = null,
     popover: bool = false,
+    /// The popover's content sits on the system's glass.
+    glass: bool = false,
+    /// Whether the system's glass was checked, or skipped where it is none.
+    glass_checked: ?bool = null,
     phase: Phase = .loading,
     ticks: u32 = 0,
     since: u32 = 0,
@@ -51,7 +64,9 @@ const State = struct {
         try v.column(.{ .grow = 1, .alignment = .stretch, .gap = 0, .padding = view.Insets.all(0) });
         _ = try v.button("Before", .{ .height = 30 });
         if (try v.popover(&self.popover, .{}, .{ .name = "Over the page" })) {
+            try v.column(.{ .padding = view.Insets.all(12), .radius = 14, .material = if (self.glass) .{ .glass = .{ .native = true } } else null });
             _ = try v.button("Inside", .{ .width = 120, .height = 60 });
+            try v.end();
         }
         try v.end();
         try self.item.show(v, .{ .grow = 1 });
@@ -122,9 +137,27 @@ const State = struct {
         if (value < 0) return error.PageClosed;
         return value == 1;
     }
+    /// Whether the page shows at a point of the window, in its DIPs,
+    /// whoever takes the pointer there.
+    fn pageShows(self: *State, x: f32, y: f32) !bool {
+        const scale = zwo_scale(self.window.nativeHandle().?);
+        const value = zwk_test_page_shows(self.page.native orelse return error.PageClosed, @intFromFloat(x * scale), @intFromFloat(y * scale));
+        if (value < 0) return error.PageClosed;
+        return value == 1;
+    }
+    /// The box of the button named `name`.
+    fn buttonBox(self: *State, name: []const u8) ?view.Rect {
+        for (self.host.view.nodes()) |node| if (node.kind == .button and std.mem.eql(u8, node.text, name)) return node.bounds;
+        return null;
+    }
     fn pageHasKeyboard(self: *State) bool {
         const native = self.page.native orelse return false;
         return zwk_has_focus(native) != 0;
+    }
+    /// The backend's window state, which the zlm_test_* hooks take (the
+    /// native handle is the NSWindow).
+    fn windowState(self: *State) *anyopaque {
+        return self.app.windows.get(self.window.key).?.native.native.?;
     }
     fn step(self: *State) !void {
         if (self.host.last_error) |err| return err;
@@ -214,6 +247,44 @@ const State = struct {
                 // The popover under the first button, over the page's top.
                 if (try self.pageAt(box.x + 20, box.y + 20)) return;
                 if (!try self.pageAt(box.x + 20, box.y + box.height - 10)) return error.PageCovered;
+                if (!self.window.nativeGlassSupported()) {
+                    self.glass_checked = false;
+                    self.next(.done);
+                    self.app.quit();
+                    return;
+                }
+                self.glass = true;
+                self.window.invalidate();
+                self.next(.glass);
+            },
+            .glass => {
+                const places = self.host.context.nativeGlassPlaces();
+                if (places.len != 1 or zlm_test_glass_count(self.windowState()) != 1) return;
+                const clip = places[0].clip;
+                const button = self.buttonBox("Inside") orelse return error.NoButton;
+                const scale = zwo_scale(native);
+                // The page shows under the glass, under its button too,
+                // which the window draws over the glass and which keeps the
+                // pointer; the glass and the overlay take none.
+                if (!try self.pageShows(clip.x + 4, clip.y + 4)) return;
+                if (!try self.pageShows(button.x + button.width / 2, button.y + button.height / 2)) return error.PageCutUnderGlass;
+                if (try self.pageAt(button.x + button.width / 2, button.y + button.height / 2)) return error.PageTookButton;
+                const alpha = zlm_test_overlay_alpha(self.windowState(), @intFromFloat((button.x + button.width / 2) * scale), @intFromFloat((button.y + button.height / 2) * scale));
+                if (alpha <= 0) {
+                    std.debug.print("overlay alpha over the button: {d}\n", .{alpha});
+                    return error.OverlayEmpty;
+                }
+                const leaf_box = self.leaf() orelse return error.NoLeaf;
+                if (zlm_test_overlay_alpha(self.windowState(), @intFromFloat((leaf_box.x + 20) * scale), @intFromFloat((leaf_box.y + leaf_box.height - 10) * scale)) != 0) return error.OverlayOutsideGlass;
+                if (zlm_test_glass_passes(self.windowState(), button.x + button.width / 2, button.y + button.height / 2) != 1) return error.GlassTookPointer;
+                self.glass = false;
+                self.window.invalidate();
+                self.next(.unglass);
+            },
+            .unglass => {
+                if (self.host.context.nativeGlassPlaces().len != 0 or zlm_test_glass_count(self.windowState()) != 0) return;
+                if (zlm_test_overlay_alpha(self.windowState(), 0, 0) != -1) return error.OverlayKept;
+                self.glass_checked = true;
                 self.next(.done);
                 self.app.quit();
             },
@@ -270,5 +341,6 @@ fn run(allocator: std.mem.Allocator) !void {
     state.item.remove();
     _ = try state.window.destroy();
     const keyboard = if (state.key == true) "Tab went into the page, through it and out, Shift+Tab back to its last element" else "Tab skipped (the window could not become key)";
-    std.debug.print("macOS web view overlay: the native UI showed around the page and its popover over it; {s}{s}\n", .{ keyboard, if (ui.capabilities.accessibility) "; the page's tree is inside the web view's node" else "" });
+    const glass = if (state.glass_checked == true) "; the system's glass showed the page under the popover's button, which kept the pointer" else "; the system has no Liquid Glass, so its glass was not checked";
+    std.debug.print("macOS web view overlay: the native UI showed around the page and its popover over it; {s}{s}{s}\n", .{ keyboard, if (ui.capabilities.accessibility) "; the page's tree is inside the web view's node" else "", glass });
 }
