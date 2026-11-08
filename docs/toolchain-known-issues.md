@@ -6,11 +6,12 @@ The supported compiler is Zig 0.17.0; the issues below were reproduced on 0.15.2
 
 Zig 0.17.0 defaults to LLVM for Windows (COFF) Debug artifacts, while Linux Debug already uses the self-hosted x86_64 backend. On the 4-core Windows runner a cold `zig build test` took 1277 s with LLVM and 770 s with the self-hosted backend, so `build.zig` now selects the self-hosted backend for every Windows Debug compile step that does not pin `use_llvm`. Release builds keep LLVM, and `-Dwindows-llvm=true` restores LLVM for Debug.
 
-The self-hosted COFF linker needs three workarounds, all applied only to those steps:
+The self-hosted COFF linker needs four workarounds, all applied only to those steps:
 
 - mingw-w64 implements `_assert` as a wrapper around the UCRT export renamed through `NAME_EXPORTAS` (`__msvcrt_assert == _assert`), which the linker reports as `TODO handle name_type NAME_EXPORTAS`. Executables and tests get `src/c/windows/assert_shim.c`, which prints the CRT message and aborts. Each gets a private copy of its root module for it, because root modules are also shared with object files that are linked into the same executables.
 - The mingw-w64 definition names `UIAutomationCore.DLL`, and the linker rejects the upper-case extension. `src/c/windows/uiautomationcore.def` lowers the name; `zig dlltool` turns it into the import library.
 - With libc linked, the calls that `@sin`, `@cos`, `@exp`, `@log` and similar lower to are bound to the UCRT imports rather than compiler-rt's weak definitions (LLVM builds import none of them). UCRT differs in the last bit for some inputs, such as sin(-pi/4), which broke pixel-exact SVG marker tests. `src/c/windows/math` compiles compiler-rt's own transcendental code, copied from the Zig installation at build time, into a static library with strong `sin`/`cos`/`tan`/`exp`/`exp2`/`log`/`log2`/`log10` definitions and their `f` variants. Correctly rounded functions such as `sqrt`, `floor` and `fma` still come from UCRT.
+- The linker drops resource sections, both from the `.rc` file a module adds and from COFF objects, so executables lost their icons, version information and manifest (and with it common controls 6, DPI awareness and the supported-OS list). `build.zig` takes the resource file off the executable, compiles it with `zig rc /:output-format coff`, and `tools/pe_resources.zig` copies the linked image with a `.rsrc` section and resource directory added. Installs and run steps use that copy.
 
 The self-hosted backend writes no PDB, so installs skip it and panics print no stack trace (`(empty stack trace)`). To debug a Windows-only crash, rebuild with `-Dwindows-llvm=true`.
 

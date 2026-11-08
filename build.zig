@@ -3399,6 +3399,8 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
 
     var automation_library: ?std.Build.LazyPath = null;
     var math_library: ?*std.Build.Step.Compile = null;
+    var resource_tool: ?*std.Build.Step.Compile = null;
+    var patched: std.AutoHashMapUnmanaged(*std.Build.Step.Compile, struct { bin: std.Build.LazyPath, step: *std.Build.Step }) = .empty;
     for (steps.keys()) |step| {
         const compile = step.cast(std.Build.Step.Compile) orelse continue;
         if (compile.rootModuleTarget().os.tag != .windows or compile.use_llvm != null) continue;
@@ -3426,6 +3428,42 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
             root.* = compile.root_module.*;
             root.link_objects = compile.root_module.link_objects.clone(b.allocator) catch @panic("OOM");
             root.cached_graph = .{ .modules = &.{}, .names = &.{} };
+            // Zig's COFF linker drops resource sections, so compile the
+            // resources separately and add them to the linked image.
+            var resources: std.ArrayList(*std.Build.Module.RcSourceFile) = .empty;
+            var kept: usize = 0;
+            for (root.link_objects.items) |object| switch (object) {
+                .win32_resource_file => |file| resources.append(b.allocator, file) catch @panic("OOM"),
+                else => {
+                    root.link_objects.items[kept] = object;
+                    kept += 1;
+                },
+            };
+            root.link_objects.shrinkRetainingCapacity(kept);
+            if (resources.items.len > 1) std.debug.panic("{s}: more than one resource file", .{compile.name});
+            if (resources.items.len == 1) {
+                const file = resources.items[0];
+                const rc = b.addSystemCommand(&.{ b.graph.zig_exe, "rc", "/:output-format", "coff", "/:target", @tagName(compile.rootModuleTarget().cpu.arch), "/:auto-includes", "gnu", "/x", "/D_DEBUG" });
+                rc.addArgs(file.flags);
+                for (file.include_paths) |path| {
+                    rc.addArg("/i");
+                    rc.addDirectoryArg(path);
+                }
+                rc.addFileArg(file.file);
+                // The generated script starts with `#pragma code_page`, which
+                // makes the resource compiler print a warning; keep it out of the build output.
+                _ = rc.captureStdErr(.{});
+                const object = rc.addOutputFileArg("resources.obj");
+                const tool = resource_tool orelse blk: {
+                    resource_tool = b.addExecutable(.{ .name = "ziggurat-pe-resources", .root_module = b.createModule(.{ .root_source_file = b.path("tools/pe_resources.zig"), .target = b.graph.host, .optimize = .Debug }), .use_llvm = if (b.graph.host.result.os.tag == .windows) false else null });
+                    break :blk resource_tool.?;
+                };
+                const patch = b.addRunArtifact(tool);
+                patch.addFileArg(compile.getEmittedBin());
+                patch.addFileArg(object);
+                const output = patch.addOutputFileArg(b.fmt("{s}.exe", .{compile.name}));
+                patched.put(b.allocator, compile, .{ .bin = output, .step = &patch.step }) catch @panic("OOM");
+            }
             root.addCSourceFile(.{ .file = b.path("src/c/windows/assert_shim.c") });
             root.linkLibrary(math_library orelse blk: {
                 const sources = b.addWriteFiles();
@@ -3443,7 +3481,26 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
         }
     }
     for (steps.keys()) |step| {
+        if (step.cast(std.Build.Step.Run)) |run| {
+            // Run the image with its resources wherever it is run directly.
+            for (run.argv.items) |*arg| switch (arg.*) {
+                .artifact => |artifact| if (patched.get(artifact.artifact)) |image| {
+                    arg.* = .{ .lazy_path = .{ .prefix = artifact.prefix, .lazy_path = image.bin, .suffix = artifact.suffix, .make_absolute = artifact.make_absolute } };
+                    run.step.dependOn(image.step);
+                },
+                else => {},
+            };
+            continue;
+        }
         const install = step.cast(std.Build.Step.InstallArtifact) orelse continue;
+        // The installer copies the compiler's own output, so install the
+        // image with its resources as a separate file in its place.
+        if (patched.get(install.artifact)) |image| if (install.dest_dir) |dir| {
+            const file = b.addInstallFileWithDir(image.bin, dir, install.dest_sub_path orelse install.artifact.out_filename);
+            install.dest_dir = null;
+            install.emitted_bin = null;
+            install.step.dependOn(&file.step);
+        };
         if (install.artifact.producesPdbFile()) continue;
         install.pdb_dir = null;
         install.emitted_pdb = null;
