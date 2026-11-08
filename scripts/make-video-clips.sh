@@ -7,6 +7,7 @@
 #   examples/assets/trailer.mp4  6 s at 30 fps, 480×270: drifting colors and a tone
 set -eu
 cd "$(dirname "$0")/.."
+command -v ffmpeg >/dev/null 2>&1 || { echo "make-video-clips: ffmpeg with libx264 and the lavfi sources is required" >&2; exit 1; }
 exact="-map_metadata -1 -fflags +bitexact -flags:v +bitexact -flags:a +bitexact"
 ffmpeg -hide_banner -loglevel error -y \
   -f lavfi -i "color=c=red:s=64x48:r=10:d=0.4" -f lavfi -i "color=c=lime:s=64x48:r=10:d=0.4" -f lavfi -i "color=c=blue:s=64x48:r=10:d=0.4" \
