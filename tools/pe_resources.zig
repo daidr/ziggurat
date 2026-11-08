@@ -1,25 +1,29 @@
-//! `ziggurat-pe-resources INPUT.exe RESOURCES.obj OUTPUT.exe`: copies a
-//! linked Windows image and adds the `.rsrc` section of a resource object
-//! (as `zig rc /:output-format coff` writes it). Zig's own COFF linker drops
-//! resource sections, so Debug builds that use it get their icons, manifest
-//! and version information this way.
+//! `ziggurat-pe-resources IMAGE.exe RESOURCES.obj`: adds the `.rsrc` section
+//! of a resource object (as `zig rc /:output-format coff` writes it) to a
+//! linked Windows image, in place. Zig's own COFF linker drops resource
+//! sections, so Debug builds that use it get their icons, manifest and
+//! version information this way. Patching in place keeps one copy of each
+//! image in the cache; an image that already has resources is left as is.
 const std = @import("std");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 4) {
-        std.debug.print("usage: ziggurat-pe-resources INPUT.exe RESOURCES.obj OUTPUT.exe\n", .{});
+    if (args.len != 3) {
+        std.debug.print("usage: ziggurat-pe-resources IMAGE.exe RESOURCES.obj\n", .{});
         std.process.exit(2);
     }
     const cwd = std.Io.Dir.cwd();
     const image = try cwd.readFileAlloc(init.io, args[1], allocator, .limited(1024 * 1024 * 1024));
     const object = try cwd.readFileAlloc(init.io, args[2], allocator, .limited(256 * 1024 * 1024));
-    const output = addResources(allocator, image, object) catch |err| {
-        std.debug.print("{s}: {s}\n", .{ args[1], @errorName(err) });
-        std.process.exit(1);
+    const output = addResources(allocator, image, object) catch |err| switch (err) {
+        error.AlreadyHasResources => return,
+        else => {
+            std.debug.print("{s}: {s}\n", .{ args[1], @errorName(err) });
+            std.process.exit(1);
+        },
     };
-    try cwd.writeFile(init.io, .{ .sub_path = args[3], .data = output });
+    try cwd.writeFile(init.io, .{ .sub_path = args[1], .data = output });
 }
 
 fn read(comptime T: type, bytes: []const u8, offset: usize) !T {

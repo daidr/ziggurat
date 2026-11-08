@@ -3400,7 +3400,7 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
     var automation_library: ?std.Build.LazyPath = null;
     var math_library: ?*std.Build.Step.Compile = null;
     var resource_tool: ?*std.Build.Step.Compile = null;
-    var patched: std.AutoHashMapUnmanaged(*std.Build.Step.Compile, struct { bin: std.Build.LazyPath, step: *std.Build.Step }) = .empty;
+    var patched: std.AutoHashMapUnmanaged(*std.Build.Step.Compile, *std.Build.Step) = .empty;
     for (steps.keys()) |step| {
         const compile = step.cast(std.Build.Step.Compile) orelse continue;
         if (compile.rootModuleTarget().os.tag != .windows or compile.use_llvm != null) continue;
@@ -3461,8 +3461,7 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
                 const patch = b.addRunArtifact(tool);
                 patch.addFileArg(compile.getEmittedBin());
                 patch.addFileArg(object);
-                const output = patch.addOutputFileArg(b.fmt("{s}.exe", .{compile.name}));
-                patched.put(b.allocator, compile, .{ .bin = output, .step = &patch.step }) catch @panic("OOM");
+                patched.put(b.allocator, compile, &patch.step) catch @panic("OOM");
             }
             root.addCSourceFile(.{ .file = b.path("src/c/windows/assert_shim.c") });
             root.linkLibrary(math_library orelse blk: {
@@ -3482,25 +3481,16 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
     }
     for (steps.keys()) |step| {
         if (step.cast(std.Build.Step.Run)) |run| {
-            // Run the image with its resources wherever it is run directly.
-            for (run.argv.items) |*arg| switch (arg.*) {
-                .artifact => |artifact| if (patched.get(artifact.artifact)) |image| {
-                    arg.* = .{ .lazy_path = .{ .prefix = artifact.prefix, .lazy_path = image.bin, .suffix = artifact.suffix, .make_absolute = artifact.make_absolute } };
-                    run.step.dependOn(image.step);
-                },
+            // The image is patched in place, so everything that runs or
+            // installs it waits for that.
+            for (run.argv.items) |arg| switch (arg) {
+                .artifact => |artifact| if (patched.get(artifact.artifact)) |patch| run.step.dependOn(patch),
                 else => {},
             };
             continue;
         }
         const install = step.cast(std.Build.Step.InstallArtifact) orelse continue;
-        // The installer copies the compiler's own output, so install the
-        // image with its resources as a separate file in its place.
-        if (patched.get(install.artifact)) |image| if (install.dest_dir) |dir| {
-            const file = b.addInstallFileWithDir(image.bin, dir, install.dest_sub_path orelse install.artifact.out_filename);
-            install.dest_dir = null;
-            install.emitted_bin = null;
-            install.step.dependOn(&file.step);
-        };
+        if (patched.get(install.artifact)) |patch| install.step.dependOn(patch);
         if (install.artifact.producesPdbFile()) continue;
         install.pdb_dir = null;
         install.emitted_pdb = null;
