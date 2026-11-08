@@ -2096,6 +2096,7 @@ pub const Window = struct {
         const record = self.resolve() orelse return;
         if (record.phase != .open) return;
         record.frame_requested = true;
+        record.frame_built = false;
         backend.invalidate(record);
     }
     /// Whether the window draws the system's glass under its content where
@@ -2136,13 +2137,40 @@ pub const Window = struct {
         if (comptime @hasDecl(backend, "commitOverlay")) backend.commitOverlay(record, shown);
     }
     /// True while the content asked for a frame, through `invalidate` or
-    /// `invalidateRect`, that the window has not painted yet. A hidden or
-    /// minimized window paints nothing, so it has none pending.
+    /// `invalidateRect`, that the window has not painted yet. A window out
+    /// of sight (`outOfSight`) paints none until it shows, so there only a
+    /// frame asked for that was not built out of sight (`frameAsked`)
+    /// counts.
     pub fn framePending(self: Window) bool {
         const record = self.resolve() orelse return false;
         if (record.phase != .open or !record.frame_requested) return false;
-        const current = record.observedState();
-        return current.visible and !current.minimized;
+        if (record.outOfSight()) return !record.frame_built;
+        return true;
+    }
+    /// True while none of the window shows: hidden, minimized, or on macOS
+    /// covered by other windows or behind the locked screen. Its frames
+    /// wait for it to show; macOS draws none for a hidden window, nor for
+    /// any while the screen is locked.
+    pub fn outOfSight(self: Window) bool {
+        const record = self.resolve() orelse return false;
+        if (record.phase != .open) return false;
+        return record.outOfSight();
+    }
+    /// True while the content asked for a frame that the window has not
+    /// painted, and that its content has not built outside paint since
+    /// (`builtOutOfSight`).
+    pub fn frameAsked(self: Window) bool {
+        const record = self.resolve() orelse return false;
+        return record.phase == .open and record.frame_requested and !record.frame_built;
+    }
+    /// Note that the content built the frame it asked for outside paint,
+    /// as automation does for a window out of sight so that input takes
+    /// effect and reads see what the window shows now. The frame stays
+    /// asked for, to paint once the window shows, but `frameAsked` reports
+    /// it no more until the content asks again.
+    pub fn builtOutOfSight(self: Window) void {
+        const record = self.resolve() orelse return;
+        if (record.phase == .open and record.frame_requested) record.frame_built = true;
     }
     /// Queue client-area damage in DIP. The native update region coalesces
     /// requests; this does not promise partial command generation or GPU replay.
@@ -2154,6 +2182,7 @@ pub const Window = struct {
         if (bounds.width == 0 or bounds.height == 0) return;
         self.app.native_failure = null;
         scope.record.frame_requested = true;
+        scope.record.frame_built = false;
         backend.invalidateRect(scope.record, zoomRect(bounds, scope.record.zoom)) catch |err| {
             self.app.report(self.app.failureDiagnostic(.window_update, err, self));
             return err;
@@ -2327,6 +2356,10 @@ pub const WindowRecord = struct {
     content: ?Content = null,
     /// Set by invalidate, cleared once the content is given a paint.
     frame_requested: bool = false,
+    /// The content built the frame asked for outside paint while the
+    /// window was out of sight (`Window.builtOutOfSight`); cleared by the
+    /// next invalidate and by a paint.
+    frame_built: bool = false,
     parent_destroy_notified: bool = false,
     service: ?WindowService = null,
     next_native_id: u32 = 1,
@@ -2530,6 +2563,12 @@ pub const WindowRecord = struct {
             }
             cursor = next orelse break;
         }
+    }
+    fn outOfSight(self: *WindowRecord) bool {
+        const current = self.observedState();
+        if (!current.visible or current.minimized) return true;
+        if (comptime @hasDecl(backend, "occluded")) return backend.occluded(self);
+        return false;
     }
     fn observedState(self: *WindowRecord) WindowState {
         var current = backend.state(self);
@@ -2849,7 +2888,10 @@ pub const WindowRecord = struct {
             if (self.text_busy) self.text_blur_pending = true else self.revokeTextClient(.focus_lost, true) catch |err| self.window.report(.{ .domain = .core, .operation = .text_input, .err = err });
             if (self.phase != .open) return;
         }
-        if (event == .paint) self.frame_requested = false;
+        if (event == .paint) {
+            self.frame_requested = false;
+            self.frame_built = false;
+        }
         switch (event) {
             .pointer_down, .pointer_up, .pointer_move, .wheel, .text_input, .text_preedit, .edit_key, .key, .key_input => if (!self.inputAllowed()) return,
             else => {},

@@ -1,7 +1,7 @@
 //! Drives a shown window of views through the automation socket, as a test
 //! runner in another process would: windows, idle, tree, act by key and by
-//! ID, pointer and key input, capture, errors, and menu items, the last of
-//! which quits the app and closes the connection.
+//! ID, pointer and key input, capture, errors, the window out of sight, and
+//! menu items, the last of which quits the app and closes the connection.
 const std = @import("std");
 const builtin = @import("builtin");
 const zio = @import("ziggurat_io");
@@ -242,6 +242,8 @@ fn drive(path: []const u8) !void {
     try client.expectError("eval", "{\"script\":\"1\"}", "unsupported");
     try client.expectError("fly", "{}", "unknown_method");
 
+    try outOfSight(client, arena, add);
+
     if (!has_menus) {
         // No menu bar to choose from: the app quits through a task instead.
         try client.expectError("menu", "{\"path\":[\"File\",\"Reset\"]}", "unsupported");
@@ -258,6 +260,47 @@ fn drive(path: []const u8) !void {
     _ = try client.result("menu", "{\"path\":[\"File\",\"Quit\"]}");
     try std.testing.expect(try client.send("windows", "{}") == null);
 }
+
+/// Drives the window while none of it shows, as one behind the locked
+/// screen, which paints no frame until it shows: a press and a click build
+/// the frame they wait for, so that they take effect, and idle, the tree
+/// and a capture tell what the window shows now.
+fn outOfSight(client: *Client, arena: std.mem.Allocator, add: std.json.ObjectMap) !void {
+    try quit_app.?.post(.{ .context = quit_app.?, .call = hideTask });
+    while (true) {
+        const windows = (try client.result("windows", "{}")).get("windows").?.array.items;
+        if (!windows[0].object.get("visible").?.bool) break;
+        zio.sleep(10 * std.time.ns_per_ms);
+    }
+    try client.idle();
+    const before = if (comptime builtin.os.tag == .macos) (try client.result("capture", "{}")).get("png").?.string else "";
+    _ = try client.result("act", "{\"key\":\"add\",\"action\":\"press\"}");
+    try expectCount(client, 5);
+    // macOS draws a hidden window's view when asked to capture it; GTK
+    // captures none of a hidden window.
+    if (comptime builtin.os.tag == .macos) {
+        const after = (try client.result("capture", "{}")).get("png").?.string;
+        try std.testing.expect(!std.mem.eql(u8, before, after));
+    }
+    const point = center(add);
+    _ = try client.result("input", try std.fmt.allocPrint(arena, "{{\"window\":1,\"events\":[{{\"type\":\"click\",\"x\":{d},\"y\":{d}}}]}}", .{ point[0], point[1] }));
+    try expectCount(client, 6);
+    try quit_app.?.post(.{ .context = quit_app.?, .call = showTask });
+    while (true) {
+        const windows = (try client.result("windows", "{}")).get("windows").?.array.items;
+        if (windows[0].object.get("visible").?.bool) break;
+        zio.sleep(10 * std.time.ns_per_ms);
+    }
+    try expectCount(client, 6);
+}
+
+fn hideTask(_: *anyopaque) void {
+    shown_window.?.perform(.hide) catch {};
+}
+fn showTask(_: *anyopaque) void {
+    shown_window.?.show();
+}
+var shown_window: ?z.Window = null;
 
 /// Platforms with a native menu bar drive menu items too.
 const has_menus = system.capabilities.native_menu;
@@ -309,6 +352,7 @@ pub fn main() !void {
     var owner = system.Owner.init(&state, State.onMenu);
     const window = try app.createWindow(.{ .title = "Automation", .width = 360, .height = 240 });
     state.window = window;
+    shown_window = window;
     try host.attach(window);
     quit_app = app;
     const items = [_]system.Item{

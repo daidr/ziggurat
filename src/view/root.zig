@@ -9169,6 +9169,48 @@ pub const Host = struct {
         // The frame that shows it builds again.
         self.invalidate();
     }
+    /// True while none of the window shows (`z.Window.outOfSight`) and a
+    /// frame waits to build: one asked for after input or a change that
+    /// was not built since (`z.Window.frameAsked`), or a pass for an event
+    /// since the last frame laid the view out. The window may paint none
+    /// until it shows: macOS draws none for a hidden window, nor for any
+    /// while the screen is locked.
+    pub fn waitsOutOfSight(self: *const Host) bool {
+        const window = self.context.window orelse return false;
+        return window.outOfSight() and (window.frameAsked() or !self.arranged);
+    }
+    /// Build and lay out now, in a window out of sight, the frame that
+    /// waits to build there (`waitsOutOfSight`): the view takes the input
+    /// given it, as a press, and its nodes are those the window shows now.
+    /// Automation settles before it reads the tree and after it acts or
+    /// sends input. The window still paints the frame once it shows.
+    /// Returns whether it built; does nothing inside a pass.
+    pub fn settle(self: *Host) bool {
+        if (self.building or !self.waitsOutOfSight()) return false;
+        const window = self.context.window.?;
+        if (!self.layOutNow()) return false;
+        window.builtOutOfSight();
+        return true;
+    }
+    /// Build and lay the view out in the window's whole content area,
+    /// outside a frame.
+    fn layOutNow(self: *Host) bool {
+        const window = self.context.window orelse return false;
+        const size = window.contentSize() catch return false;
+        const scale = if (std.math.isFinite(size.scale) and size.scale > 0) size.scale else 1;
+        const whole: Rect = .{ .x = 0, .y = 0, .width = @as(f32, @floatFromInt(size.width)) / scale, .height = @as(f32, @floatFromInt(size.height)) / scale };
+        self.view.window_active = self.context.windowActive();
+        self.pass(null) catch |err| {
+            self.last_error = err;
+            return false;
+        };
+        self.view.arrange(whole, self.context.currentTheme(), self.options.measurer) catch |err| {
+            self.last_error = err;
+            return false;
+        };
+        self.arranged = true;
+        return true;
+    }
     /// Follow the window hiding or showing again (`View.windowHidden`). A
     /// build that asked builds once more as it hides, while no frame draws,
     /// to stop what it does out of sight, and the frame that shows it again
@@ -9178,20 +9220,7 @@ pub const Host = struct {
         self.view.window_hidden = hidden;
         if (!self.view.hidden_asked) return;
         if (!hidden or self.building) return self.invalidate();
-        const window = self.context.window orelse return;
-        const size = window.contentSize() catch return;
-        const scale = if (std.math.isFinite(size.scale) and size.scale > 0) size.scale else 1;
-        const whole: Rect = .{ .x = 0, .y = 0, .width = @as(f32, @floatFromInt(size.width)) / scale, .height = @as(f32, @floatFromInt(size.height)) / scale };
-        self.view.window_active = self.context.windowActive();
-        self.pass(null) catch |err| {
-            self.last_error = err;
-            return;
-        };
-        self.view.arrange(whole, self.context.currentTheme(), self.options.measurer) catch |err| {
-            self.last_error = err;
-            return;
-        };
-        self.arranged = true;
+        if (!self.layOutNow()) return;
         self.invalidate();
     }
     /// Tell `fit` the size the content just laid out in `window` takes, if
@@ -9911,6 +9940,7 @@ test {
     _ = @import("controls_tests.zig");
     _ = @import("hidden_tests.zig");
     _ = @import("click_tests.zig");
+    _ = @import("settle_tests.zig");
     _ = @import("headless_tests.zig");
     _ = @import("access_tests.zig");
     _ = @import("menu_tests.zig");

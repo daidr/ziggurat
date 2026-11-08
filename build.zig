@@ -450,6 +450,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_text_outlines", .module = text_outlines },
     } });
     const gif = b.addModule("ziggurat_gif", .{ .root_source_file = b.path("src/images/gif.zig"), .target = target, .optimize = optimize });
+    const png = b.addModule("ziggurat_png", .{ .root_source_file = b.path("src/images/png.zig"), .target = target, .optimize = optimize });
+    const apng = b.addModule("ziggurat_apng", .{ .root_source_file = b.path("src/images/apng.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_png", .module = png }} });
     const images = b.addModule("ziggurat_images", .{ .root_source_file = b.path("src/images/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_drawing_resources", .module = drawing_resources }, .{ .name = "ziggurat_gif", .module = gif } } });
     const image_options = b.addOptions();
     image_options.addOption(bool, "webp", webp);
@@ -887,7 +889,7 @@ pub fn build(b: *std.Build) void {
     } });
     const view_video = b.addModule("ziggurat_view_video", .{ .root_source_file = b.path("src/view/video.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat_ui", .module = ui },   .{ .name = "ziggurat_view", .module = declarative_view },
-        .{ .name = "ziggurat_gif", .module = gif },
+        .{ .name = "ziggurat_gif", .module = gif }, .{ .name = "ziggurat_apng", .module = apng },
     } });
     const view_timer = b.addModule("ziggurat_view_timer", .{ .root_source_file = b.path("src/view/timer.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },      .{ .name = "ziggurat_view", .module = declarative_view },
@@ -3001,7 +3003,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_audio_tests.step);
     b.step("test-audio", "Run WAV/FLAC decoding, mixing, player, stream, notification and test-backend output invariants").dependOn(&run_audio_tests.step);
     addSmoke(b, "smoke-audio", "tests/audio_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_audio", .module = audio }});
-    const terminal = b.addModule("ziggurat_terminal", .{ .root_source_file = b.path("src/terminal/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    const terminal = b.addModule("ziggurat_terminal", .{ .root_source_file = b.path("src/terminal/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_png", .module = png } } });
     terminal.link_libc = true;
     const terminal_tests = addTest(b, .{ .root_module = terminal });
     const run_terminal_tests = b.addRunArtifact(terminal_tests);
@@ -3194,6 +3196,14 @@ pub fn build(b: *std.Build) void {
         const run_gif_tests = b.addRunArtifact(gif_tests);
         test_step.dependOn(&run_gif_tests.step);
         b.step("test-gif", "Run GIF graphic decoding and animation frame tests").dependOn(&run_gif_tests.step);
+        const png_tests = addTest(b, .{ .root_module = png });
+        check.dependOn(&png_tests.step);
+        test_step.dependOn(&b.addRunArtifact(png_tests).step);
+        const apng_tests = addTest(b, .{ .root_module = apng });
+        check.dependOn(&apng_tests.step);
+        const run_apng_tests = b.addRunArtifact(apng_tests);
+        test_step.dependOn(&run_apng_tests.step);
+        b.step("test-apng", "Run animated PNG decoding and frame composition tests").dependOn(&run_apng_tests.step);
         const image_tests = addTest(b, .{ .root_module = images });
         check.dependOn(&image_tests.step);
         test_step.dependOn(&b.addRunArtifact(image_tests).step);

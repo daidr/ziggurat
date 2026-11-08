@@ -8,7 +8,7 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
-const png = @import("png.zig");
+const png = @import("ziggurat_png");
 const screen_module = @import("screen.zig");
 
 const Screen = screen_module.Screen;

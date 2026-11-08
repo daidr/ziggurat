@@ -171,11 +171,15 @@ _ = try v.slider(&self.level, .{ .minimum = 0, .maximum = 10, .step = 1 }, .{ .k
 
 ### idle
 
-窗口稳定后回答，让客户端等界面而不是睡眠：原生界面在内容不再请求未绘制的帧时稳定（`Window.framePending()`，并且视图已经排列过）；页面在加载完成并回答一段脚本后稳定。之后才到期的计时器不算在内。永远不稳定的内容（例如一直在动的指示器）永远不会回答：给出 `timeout`（毫秒），超时后以 `timeout` 失败。隐藏或最小化的窗口不绘制，也不等待。
+窗口稳定后回答，让客户端等界面而不是睡眠：原生界面在内容不再请求未绘制的帧时稳定（`Window.framePending()`，并且视图已经排列过）；页面在加载完成并回答一段脚本后稳定。之后才到期的计时器不算在内。永远不稳定的内容（例如一直在动的指示器）永远不会回答：给出 `timeout`（毫秒），超时后以 `timeout` 失败。看不见的窗口在下一节说明。
 
 ```json
 {"id": 8, "method": "idle", "params": {"window": 1, "timeout": 5000}}
 ```
+
+### 看不见的窗口
+
+完全看不见的窗口（隐藏或最小化的，以及在 macOS 上被其他窗口完全盖住或在锁屏之后的）把帧留到它再显示时才绘制：GTK 不绘制隐藏窗口，macOS 不绘制隐藏窗口，锁屏时也不绘制任何窗口。对这样的原生界面窗口，请求自己构建窗口正在等待的那一帧（`Host.settle`）：读 `tree` 之前、`act` 和 `input` 之后、`capture` 之前、`idle` 每次检查时。于是 `act` 与 `input` 立即生效，`tree` 和 `capture` 读到的是窗口现在显示的内容；`idle` 只等这种待构建的帧，不等窗口显示后才会画的帧，所以不会一直等下去。窗口显示后照常绘制那一帧。GTK 截不到隐藏窗口，`capture` 以 `failed` 回答；macOS 会把隐藏窗口的视图画进截图。
 
 ## 客户端
 
@@ -277,3 +281,4 @@ Windows 需要 Windows 10 1803 或更高版本（Unix 域套接字）。其他�
 - `windows` 的窗框来自 `ziggurat_window_placement.frameMetrics`，与窗口位置记忆用的是同一份装饰尺寸。
 - 核心为它提供 `Window.attachedContent()`、`framePending()`、`emitKey()`、`activateMenuItem()` 和 `capture()`；`ui.Context.ofWindow`、`view.Host.ofContext` 和 `webview.View.ofWindow` 从窗口找到视图或页面，不需要全局注册表。
 - `view.Host.perform(id, action)` 执行无障碍操作；`Host.arranged` 表示视图排列过，`tree` 与 `idle` 用它等待排列后的 bounds。
+- 窗口完全看不见时（`Window.outOfSight()`），`Host.waitsOutOfSight()` 表示有一帧在等着构建：内容请求过、而且之后没有在窗口外构建过的帧（`Window.frameAsked()`），或者事件 pass 之后视图还没排列。`Host.settle()` 立即构建并排列它，再用 `Window.builtOutOfSight()` 记下，这一帧在 `framePending()` 里不再算待绘制，直到内容再次请求；窗口显示后仍然绘制它。

@@ -130,6 +130,11 @@ pub fn state(record: *core.WindowRecord) core.WindowState {
     const flags = zlm_window_state(record.native.native.?);
     return .{ .visible = flags & 1 != 0, .minimized = flags & 2 != 0, .maximized = flags & 4 != 0, .focused = flags & 8 != 0, .enabled = flags & 16 != 0, .fullscreen = flags & 32 != 0, .fullscreen_requested = flags & 64 != 0, .always_on_top = flags & 128 != 0, .always_on_top_requested = flags & 256 != 0 };
 }
+extern fn zlm_window_occluded(*anyopaque) c_int;
+/// Whether other windows cover all of the window, or the screen is locked.
+pub fn occluded(record: *core.WindowRecord) bool {
+    return zlm_window_occluded(record.native.native orelse return false) != 0;
+}
 pub fn capabilities(record: *core.WindowRecord) core.WindowCapabilities {
     const flags = zlm_window_capabilities(record.native.native.?);
     return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0, .opacity = flags & 64 != 0, .ignore_pointer = flags & 128 != 0, .attention = flags & 256 != 0, .skip_taskbar = flags & 512 != 0, .window_buttons = flags & 1024 != 0, .content_protection = flags & 2048 != 0, .transparent = flags & 4096 != 0, .vibrancy = flags & 8192 != 0 };

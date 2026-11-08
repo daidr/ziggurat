@@ -1,6 +1,7 @@
 //! Videos that play in a declarative view: a `Player` plays the frames a
 //! `Decoder` gives it, and `Player.show` lays it out, fits and names it as
-//! `View.image` does a bitmap. `GifDecoder` decodes animated GIFs.
+//! `View.image` does a bitmap. `GifDecoder` decodes animated GIFs and
+//! `ApngDecoder` animated PNGs.
 //!
 //! Everything runs on the main thread. Building a playing video asks for a
 //! pass when its frame ends; the pass that finds it due posts a task that,
@@ -14,6 +15,7 @@ const std = @import("std");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
 const gif = @import("ziggurat_gif");
+const apng = @import("ziggurat_apng");
 
 /// Decodes a video's frames one after another for a `Player`.
 pub const Decoder = struct {
@@ -75,6 +77,42 @@ pub const GifDecoder = struct {
     }
     fn rewind(ptr: *anyopaque) anyerror!void {
         const self: *GifDecoder = @ptrCast(@alignCast(ptr));
+        self.animation.rewind();
+    }
+};
+
+/// An animated PNG as a `Decoder`, as browsers show one: each frame drawn
+/// over what the ones before it left, as its disposal and blending say,
+/// and a frame of 10 ms or less shown for 100 ms. A PNG that is not
+/// animated is a video of one frame. Frames stay compressed and decode as
+/// they play; the bytes need not outlive the decoder. The player's loop,
+/// not the PNG's count of plays, says whether it plays again. Keep it at a
+/// stable address while a player uses it.
+pub const ApngDecoder = struct {
+    animation: apng.Animation,
+
+    pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !ApngDecoder {
+        return .{ .animation = try apng.Animation.init(allocator, bytes) };
+    }
+    pub fn deinit(self: *ApngDecoder) void {
+        self.animation.deinit();
+    }
+    pub fn decoder(self: *ApngDecoder) Decoder {
+        return .{ .context = self, .width = self.animation.width, .height = self.animation.height, .next = next, .rewind = rewind };
+    }
+    /// The length of the animation, in nanoseconds.
+    pub fn duration(self: *const ApngDecoder) u64 {
+        return self.animation.duration();
+    }
+    fn next(ptr: *anyopaque, pixels: []u8) anyerror!?u64 {
+        const self: *ApngDecoder = @ptrCast(@alignCast(ptr));
+        if (pixels.len != self.animation.canvas.len) return error.InvalidValue;
+        const shows = (try self.animation.next()) orelse return null;
+        @memcpy(pixels, self.animation.canvas);
+        return shows;
+    }
+    fn rewind(ptr: *anyopaque) anyerror!void {
+        const self: *ApngDecoder = @ptrCast(@alignCast(ptr));
         self.animation.rewind();
     }
 };
@@ -511,4 +549,31 @@ test "a GIF decodes into premultiplied BGRA frames" {
     try std.testing.expectEqual(@as(?u64, 100 * ms), try source.next(source.context, &pixels));
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &pixels);
     try std.testing.expectEqual(@as(?u64, null), try source.next(source.context, &pixels));
+}
+
+test "an animated PNG decodes into premultiplied BGRA frames and tells its length" {
+    // One pixel: opaque red for 30 ms, then half transparent blue, which
+    // replaces it, for 10 ms, shown for 100 ms.
+    const bytes = "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01" ++
+        "\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x08\x61\x63\x54\x4c\x00\x00\x00\x02\x00\x00\x00" ++
+        "\x00\xf3\x8d\x93\x70\x00\x00\x00\x1a\x66\x63\x54\x4c\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00" ++
+        "\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\x00\x64\x00\x00\x62\xf6\x85\x9a\x00\x00\x00\x0d\x49" ++
+        "\x44\x41\x54\x78\x9c\x63\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99\x3d\x1d\x00\x00\x00\x1a" ++
+        "\x66\x63\x54\x4c\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x00\x01\x00\x0a\x00\x00\xc1\x0c\xda\x04\x00\x00\x00\x11\x66\x64\x41\x54\x00\x00\x00\x02\x78\x9c" ++
+        "\x63\x60\x60\xf8\xdf\x00\x00\x02\x83\x01\x80\x50\xb7\x56\x7a\x00\x00\x00\x00\x49\x45\x4e\x44\xae" ++
+        "\x42\x60\x82";
+    var decoder = try ApngDecoder.init(std.testing.allocator, bytes);
+    defer decoder.deinit();
+    try std.testing.expectEqual(@as(u64, 130 * ms), decoder.duration());
+    const source = decoder.decoder();
+    try std.testing.expectEqual(@as(u32, 1), source.width);
+    var pixels: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(?u64, 30 * ms), try source.next(source.context, &pixels));
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, &pixels);
+    try std.testing.expectEqual(@as(?u64, 100 * ms), try source.next(source.context, &pixels));
+    try std.testing.expectEqualSlices(u8, &.{ 128, 0, 0, 128 }, &pixels);
+    try std.testing.expectEqual(@as(?u64, null), try source.next(source.context, &pixels));
+    try source.rewind(source.context);
+    try std.testing.expectEqual(@as(?u64, 30 * ms), try source.next(source.context, &pixels));
 }
