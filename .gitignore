@@ -4,3 +4,6 @@ validation/
 zig-out/
 .deps/
 *.WebView2/
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
