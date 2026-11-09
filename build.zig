@@ -902,9 +902,15 @@ pub fn build(b: *std.Build) void {
         native_support.add(b, system_video, "video-avfoundation", "src/video/avfoundation.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize).addIncludePath(b.path("src/ui"));
         native_support.linkFrameworks(b, system_video, &.{ "AVFoundation", "CoreMedia", "CoreVideo", "QuartzCore", "Foundation" });
     }
+    // Media Foundation's media engine, its DLLs loaded with the first video.
+    if (target.result.os.tag == .windows) {
+        _ = native_support.add(b, system_video, "video-media-foundation", "src/video/media_foundation.c", &.{ "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        system_video.linkSystemLibrary("ole32", .{});
+        system_video.linkSystemLibrary("oleaut32", .{});
+    }
     // A clip played by the system's engine in a real window, drawn in
     // software, and with -Dgpu=true by OpenGL or Metal from its NV12 planes.
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) addSmoke(b, "smoke-video", "tests/video_smoke.zig", target, optimize, &.{
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos or target.result.os.tag == .windows) addSmoke(b, "smoke-video", "tests/video_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_view_video", .module = view_video },
         .{ .name = "ziggurat_video", .module = system_video },
@@ -1937,6 +1943,12 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ziggurat", .module = core },
                 .{ .name = "ziggurat_ui", .module = ui },
                 .{ .name = "ziggurat_text_layout", .module = text_layout },
+            });
+            // Opacities and masked clips, each drawing by itself, on GDI and
+            // Direct3D 11 alike.
+            addSmoke(b, "smoke-gpu-masks", "tests/gpu_masks_smoke.zig", target, optimize, &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
             });
             addSmoke(b, "smoke-gpu-domain", "tests/gpu_domain_smoke.zig", target, optimize, &.{
                 .{ .name = "ziggurat", .module = core },
@@ -3182,8 +3194,8 @@ pub fn build(b: *std.Build) void {
     b.step("test-system-integration", "Run single-instance framing, identity, registration and power unit tests").dependOn(&run_system_unit_tests.step);
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
-    // The system's media engines, on macOS as on Linux.
-    if (target.result.os.tag != .windows and target.result.cpu.arch != .wasm32) {
+    // The system's media engines, on Windows and macOS as on Linux.
+    if (target.result.cpu.arch != .wasm32) {
         const system_video_tests = addTest(b, .{ .root_module = system_video });
         check.dependOn(&system_video_tests.step);
         const run_system_video_tests = b.addRunArtifact(system_video_tests);

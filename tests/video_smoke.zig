@@ -1,5 +1,5 @@
 //! The system's media engine plays a clip in a real window: GStreamer on
-//! Linux, AVFoundation on macOS. Its pictures reach the window through the
+//! Linux, AVFoundation on macOS, Media Foundation on Windows. Its pictures reach the window through the
 //! posted task, and the window's frames show them: red, then green, then
 //! blue to the clip's end; a paused clip shows the picture each seek asks
 //! for, and one played again after its end starts over. The frames are
@@ -19,11 +19,14 @@ const builtin = @import("builtin");
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlm_test_paint(*anyopaque) void;
 extern fn zlc_test_raw_pixel(*anyopaque, u32, u32) u32;
+extern "user32" fn InvalidateRect(?*anyopaque, ?*const anyopaque, c_int) callconv(.winapi) c_int;
+extern "user32" fn SendMessageW(?*anyopaque, u32, usize, isize) callconv(.winapi) isize;
 
 const title = "Video smoke";
 const width = 160;
 const height = 120;
-const gpu = @FieldType(ui.Context, "gpu_renderer") != void;
+// Direct3D 11 draws the BGRA pictures as images: the software capture serves.
+const gpu = builtin.os.tag != .windows and @FieldType(ui.Context, "gpu_renderer") != void;
 const ms = std.time.ns_per_ms;
 
 const Screen = struct {
@@ -60,12 +63,24 @@ const Smoke = struct {
             }
         }
         // A frame drawn in software, as the window draws one, and read.
-        const native = self.window.app.windows.get(self.window.key).?.native.native.?;
-        if (builtin.os.tag == .linux) zlg_test_paint(native, width, height) else zlm_test_paint(native);
+        if (builtin.os.tag == .windows) {
+            // The window's paint, delivered at once: a hidden window may
+            // hold back UpdateWindow's.
+            const hwnd = self.window.nativeHandle();
+            _ = InvalidateRect(hwnd, null, 0);
+            _ = SendMessageW(hwnd, 0x000F, 0, 0); // WM_PAINT
+        } else {
+            const native = self.window.app.windows.get(self.window.key).?.native.native.?;
+            if (builtin.os.tag == .linux) zlg_test_paint(native, width, height) else zlm_test_paint(native);
+        }
         if (self.host.last_error) |err| return err;
         if (!gpu or self.frames_on_gpu == 0) {
             const size = self.host.context.last_paint_size.?;
-            const pixel = zlc_test_raw_pixel(self.host.context.renderer.native.?, size.width / 2, size.height / 2);
+            const pixel = if (builtin.os.tag == .windows) windows: {
+                const renderer = &self.host.context.renderer;
+                const pixels = renderer.pixels orelse return error.NoSurface;
+                break :windows pixels[@as(usize, size.height / 2) * renderer.width + size.width / 2];
+            } else zlc_test_raw_pixel(self.host.context.renderer.native.?, size.width / 2, size.height / 2);
             color = .{ @truncate(pixel >> 16), @truncate(pixel >> 8), @truncate(pixel) };
         }
         try self.app.dispatch();

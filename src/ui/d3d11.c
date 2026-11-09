@@ -18,6 +18,7 @@ static void han_language(WCHAR out[86]);
 #include "coverage_resource.h"
 #include "gradient_interpolation_native.h"
 #include "gaussian_gpu_native.h"
+#include "text_symbols_windows.h"
 #define ZG_EFFECT_SLOTS 16
 
 /* Native graphics resources only; command storage and rendering policy live in Zig. */
@@ -26,6 +27,8 @@ typedef struct ShapeGeometry {
     ID2D1PathGeometry *path;
     float width,height,radius,stroke;
     uint64_t used;
+    /* The frame that last drew it, for the sweep (gpu_sweep.h). */
+    uint64_t frame;
 } ShapeGeometry;
 typedef struct CachedImage {ID2D1Bitmap *bitmaps[2][ZI_IMAGE_LEVELS];const ZiImageLevel *levels;ZiImageLevel coverage_level;uint32_t count,dynamic,active,is_coverage;} CachedImage;
 typedef struct GpuLayers GpuLayers;
@@ -69,6 +72,9 @@ typedef struct State {
     ShapeGeometry shapes[GEOMETRY_CAPACITY];
     uint64_t geometry_clock;
     uint32_t geometry_creations,geometry_evictions;
+    /* Frames ended, and the one that last swept the shapes no frame drew
+       for a while (gpu_sweep.h). */
+    uint64_t frame_serial,swept,sweeps;
     ID2D1Effect *gradient;
     uint64_t gradient_previous_uploads;
     uint32_t gradient_creations,gradient_draws,gradient_restores;
@@ -119,6 +125,15 @@ static HRESULT end_frame(State *s,int offscreen);
 #include "gpu_layers.h"
 #include "gpu_effects.h"
 #include "gpu_domain.h"
+#include "gpu_sweep.h"
+/* Once ZG_SWEEP_EVERY frames went by since the last sweep, however each was
+   drawn, the shapes no frame drew in ZG_SWEEP_IDLE frames go. */
+static void sweep(State *s){
+    s->frame_serial++;
+    if(!zg_sweep_due(s->frame_serial,&s->swept))return;
+    for(unsigned i=0;i<GEOMETRY_CAPACITY;i++)if(s->shapes[i].path&&zg_sweep_idle(s->frame_serial,s->shapes[i].frame,ZG_SWEEP_IDLE)){DROP(s->shapes[i].path);memset(&s->shapes[i],0,sizeof(s->shapes[i]));}
+    s->sweeps++;
+}
 
 uint32_t zgpu_resource_count(void) { return (uint32_t)InterlockedCompareExchange(&live_resources, 0, 0); }
 void zgpu_interpolation_account(int delta){InterlockedExchangeAdd(&live_resources,delta);}
@@ -560,7 +575,7 @@ static HRESULT cached_shape(State *s,float w,float h,float r,float stroke,ID2D1P
     unsigned victim=0;
     for(unsigned i=0;i<GEOMETRY_CAPACITY;i++) {
         ShapeGeometry *entry=&s->shapes[i];
-        if(entry->path&&entry->width==w&&entry->height==h&&entry->radius==r&&entry->stroke==stroke) {entry->used=now;*out=entry->path;return S_OK;}
+        if(entry->path&&entry->width==w&&entry->height==h&&entry->radius==r&&entry->stroke==stroke) {entry->used=now;entry->frame=s->frame_serial;*out=entry->path;return S_OK;}
         if(!entry->path || (s->shapes[victim].path && entry->used<s->shapes[victim].used))victim=i;
     }
     ID2D1PathGeometry *path=NULL;ID2D1GeometrySink *sink=NULL;
@@ -572,7 +587,7 @@ static HRESULT cached_shape(State *s,float w,float h,float r,float stroke,ID2D1P
     if(w>stroke*2&&h>stroke*2)shape_contour(sink,stroke,stroke,w-stroke*2,h-stroke*2,r>stroke?r-stroke:0);
     hr=ID2D1GeometrySink_Close(sink);if(FAILED(hr))goto done;
     if(s->shapes[victim].path){DROP(s->shapes[victim].path);s->geometry_evictions++;}
-    s->shapes[victim]=(ShapeGeometry){path,w,h,r,stroke,now};path=NULL;
+    s->shapes[victim]=(ShapeGeometry){path,w,h,r,stroke,now,s->frame_serial};path=NULL;
     s->geometry_creations++;*out=s->shapes[victim].path;
 done:
     DROP(sink);DROP(path);return hr;
@@ -695,10 +710,13 @@ void zgpu_text(State *s, float x, float y, float width, float height, uint32_t r
        Chinese in a Japanese font where it has the characters and in a
        Traditional Chinese one where it lacks them. Letter spacing goes
        after each character (IDWriteTextLayout1's trailing spacing). */
-    const int han=s->han[0]&&has_han(text,len);
-    if(han||(spacing!=0&&isfinite(spacing))){
+    const int han=s->han[0]&&has_han(text,len),symbols=zsym_any(text,len);
+    if(han||symbols||(spacing!=0&&isfinite(spacing))){
         IDWriteTextLayout *layout=NULL;
         if(SUCCEEDED(IDWriteFactory_CreateTextLayout(s->text_factory,text,len,format,r.right-r.left,r.bottom-r.top,&layout))&&layout){
+            /* Symbols presented as text draw in the text's color, as the
+               layouts that measured them (text_symbols_windows.h). */
+            if(symbols)(void)zsym_apply(s->text_factory,key?s->font_collection:NULL,layout,text,len,family?family:monospace?L"Consolas":L"Segoe UI",key?(DWRITE_FONT_WEIGHT)weight:DWRITE_FONT_WEIGHT_NORMAL,key&&italic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL);
             for(uint32_t i=0;han&&i<len;){
                 uint32_t n=0;while(i+n<len){uint32_t k=1,cp=scalar_at(text,len,i+n,&k);if(!is_han(cp))break;n+=k;}
                 if(n){DWRITE_TEXT_RANGE range={i,n};IDWriteTextLayout_SetLocaleName(layout,s->han,range);i+=n;continue;}
@@ -711,13 +729,14 @@ void zgpu_text(State *s, float x, float y, float width, float height, uint32_t r
                 }
             }
             D2D1_POINT_2F origin={r.left,r.top};
-            ID2D1RenderTarget_DrawTextLayout(RT(s),origin,layout,(ID2D1Brush *)s->brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            ID2D1RenderTarget_DrawTextLayout(RT(s),origin,layout,(ID2D1Brush *)s->brush,D2D1_DRAW_TEXT_OPTIONS_CLIP|D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
             IDWriteTextLayout_Release(layout);
             return;
         }
         if(layout)IDWriteTextLayout_Release(layout);
     }
-    ID2D1RenderTarget_DrawText(RT(s), text, len, format, &r, (ID2D1Brush *)s->brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    /* Emoji draw in their own colors. */
+    ID2D1RenderTarget_DrawText(RT(s), text, len, format, &r, (ID2D1Brush *)s->brush, D2D1_DRAW_TEXT_OPTIONS_CLIP|D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, DWRITE_MEASURING_MODE_NATURAL);
 }
 typedef struct PreparedClip {float x,y,width,height;} PreparedClip;
 float zgpu_scale(State *s){return s->dpi/96.0f;}
@@ -793,7 +812,7 @@ void zgpu_prepared(State *s,IDWriteTextLayout *layout,float x,float y,const Prep
     D2D1_TEXT_ANTIALIAS_MODE previous=ID2D1RenderTarget_GetTextAntialiasMode(RT(s));
     ID2D1RenderTarget_SetTextAntialiasMode(RT(s),D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     if(clip){D2D1_RECT_F r=rectangle(x+clip->x,y+clip->y,clip->width,clip->height);ID2D1RenderTarget_PushAxisAlignedClip(RT(s),&r,D2D1_ANTIALIAS_MODE_ALIASED);}
-    const D2D1_POINT_2F origin={x,y};ID2D1RenderTarget_DrawTextLayout(RT(s),origin,layout,(ID2D1Brush *)s->brush,D2D1_DRAW_TEXT_OPTIONS_NO_SNAP);
+    const D2D1_POINT_2F origin={x,y};ID2D1RenderTarget_DrawTextLayout(RT(s),origin,layout,(ID2D1Brush *)s->brush,D2D1_DRAW_TEXT_OPTIONS_NO_SNAP|D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
     if(clip)ID2D1RenderTarget_PopAxisAlignedClip(RT(s));
     ID2D1RenderTarget_SetTextAntialiasMode(RT(s),previous);
 }
@@ -813,6 +832,7 @@ static HRESULT end_frame(State *s,int offscreen) {
     if(s->layers&&s->layers->depth){finish_draw(s);return E_UNEXPECTED;}
     while (s->clips) { ID2D1RenderTarget_PopAxisAlignedClip(RT(s)); s->clips--; }
     HRESULT hr = ID2D1RenderTarget_EndDraw(RT(s), NULL, NULL); s->drawing = FALSE;
+    sweep(s);
     if(s->layers)s->context->lpVtbl->SetTarget(s->context,(ID2D1Image *)s->target);
     if (FAILED(hr)) {gpu_layer_abort_metadata(s);return failure(s, hr);}
     if (s->fault == 1) { s->fault = 0;gpu_layer_abort_metadata(s);return failure(s, DXGI_ERROR_DEVICE_REMOVED); }
