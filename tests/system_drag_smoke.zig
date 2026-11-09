@@ -57,6 +57,7 @@ const X11 = struct {
     }
     fn raise(_: *X11, _: z.Window) void {}
     fn report(_: *X11, _: z.ScreenPoint) void {}
+    fn reportCursor(_: *X11, _: z.Window) void {}
 };
 extern fn gtk_widget_get_scale_factor(*anyopaque) c_int;
 
@@ -118,6 +119,23 @@ const Win32 = struct {
         _ = win.SetWindowPos(hwnd, win.HWND_TOPMOST, 0, 0, 0, 0, flags);
         _ = win.SetWindowPos(hwnd, win.HWND_NOTOPMOST, 0, 0, 0, 0, flags);
         _ = win.SetForegroundWindow(hwnd);
+    }
+    /// The window under the cursor: its title, whether it is `expected`'s
+    /// and has an OLE drop target, and which window holds the capture.
+    fn reportCursor(_: *Win32, expected: z.Window) void {
+        var cursor: win.POINT = .{ .x = 0, .y = 0 };
+        _ = win.GetCursorPos(&cursor);
+        const under = win.WindowFromPoint(cursor);
+        const want: win.HWND = @ptrCast(expected.nativeHandle() orelse return);
+        var title: [64]u16 = @splat(0);
+        const title_len: usize = if (under != null) @intCast(@max(0, win.GetWindowTextW(under, &title, title.len))) else 0;
+        var title_utf8: [192]u8 = undefined;
+        const name = title_utf8[0 .. std.unicode.utf16LeToUtf8(&title_utf8, title[0..title_len]) catch 0];
+        const ole = std.unicode.utf8ToUtf16LeStringLiteral("OleDropTargetInterface");
+        const capture = win.GetCapture();
+        var capture_pid: win.DWORD = 0;
+        if (capture != null) _ = win.GetWindowThreadProcessId(capture, &capture_pid);
+        std.debug.print("drag smoke cursor: under=\"{s}\" expected={} registered={} expected_registered={} expected_visible={} capture={} capture_pid={d}\n", .{ name, under == want, under != null and win.GetPropW(under, ole) != null, win.GetPropW(want, ole) != null, win.IsWindowVisible(want) != 0, capture != null, capture_pid });
     }
     /// What real input meets at `point`: whether the session takes input at
     /// all, where the cursor is and which window is under the point.
@@ -333,6 +351,7 @@ const Smoke = struct {
         if (self.waited > 800) {
             std.debug.print("drag smoke: stuck in round {s} at {s}; source {s}, held {}, hovers {d}, left {d}\n", .{ @tagName(self.round), @tagName(self.stage), @tagName(self.source.state), self.held, self.hovers, self.left });
             if (self.center(self.source_window)) |start| self.input.report(start) else |_| {}
+            self.input.reportCursor(if (self.round == .legacy) self.legacy_window else self.target_window);
             self.finish(error.Timeout);
         }
     }
