@@ -428,6 +428,11 @@ jobs:
         run: |
           zig build smoke-webview-overlay-windows -Dwebview=true -Daccessibility=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Standalone CookieStore over a hidden web view
+        timeout-minutes: 15
+        run: |
+          zig build smoke-webview-cookies-windows -Dwebview=true -Doptimize=ReleaseSafe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Real WebView2 Runtime lifecycle and policy checks
         run: |
           bun test tests/ipc_client.test.ts tests/ipc_events.test.ts tests/resource_stream_client.test.ts
@@ -435,7 +440,7 @@ jobs:
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-content-rules smoke-webview-page-facts smoke-webview-http-auth smoke-webview-context-menu smoke-webview-page-options smoke-webview-session-state smoke-webview-picture-in-picture smoke-webview-cookies-windows -Dwebview=true -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-content-rules smoke-webview-page-facts smoke-webview-http-auth smoke-webview-context-menu smoke-webview-page-options smoke-webview-session-state smoke-webview-picture-in-picture -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Standalone engine discovery without a page
         run: |
