@@ -87,8 +87,23 @@ const Win32 = struct {
         input.unnamed_0.ki.dwFlags = if (down) 0 else win.KEYEVENTF_KEYUP;
         self.send(input);
     }
-    fn pointer(_: *Win32, point: z.ScreenPoint) void {
-        _ = win.SetCursorPos(point.x, point.y);
+    fn pointer(self: *Win32, point: z.ScreenPoint) void {
+        if (win.SetCursorPos(point.x, point.y) != 0) {
+            var at: win.POINT = undefined;
+            if (win.GetCursorPos(&at) != 0 and at.x == point.x and at.y == point.y) return;
+        }
+        // The cursor did not get there, as when the system holds it for a
+        // moment: move it as a mouse would, across the virtual desktop.
+        const left = win.GetSystemMetrics(win.SM_XVIRTUALSCREEN);
+        const top = win.GetSystemMetrics(win.SM_YVIRTUALSCREEN);
+        const width = @max(2, win.GetSystemMetrics(win.SM_CXVIRTUALSCREEN));
+        const height = @max(2, win.GetSystemMetrics(win.SM_CYVIRTUALSCREEN));
+        var input = std.mem.zeroes(win.INPUT);
+        input.type = win.INPUT_MOUSE;
+        input.unnamed_0.mi.dx = @intCast(@divTrunc((@as(i64, point.x) - left) * 65535, width - 1));
+        input.unnamed_0.mi.dy = @intCast(@divTrunc((@as(i64, point.y) - top) * 65535, height - 1));
+        input.unnamed_0.mi.dwFlags = win.MOUSEEVENTF_MOVE | win.MOUSEEVENTF_ABSOLUTE | win.MOUSEEVENTF_VIRTUALDESK;
+        self.send(input);
     }
     fn press(self: *Win32, down: bool) void {
         var input = std.mem.zeroes(win.INPUT);
