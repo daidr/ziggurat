@@ -1,11 +1,17 @@
 const std = @import("std");
 const os = @import("builtin").os.tag;
-/// The engine-backed store: WebKitGTK on Linux, WKHTTPCookieStore on macOS.
-const native_store = os == .linux or os == .macos;
+/// The engine-backed store: WebKitGTK on Linux, WKHTTPCookieStore on macOS,
+/// and on Windows the cookie manager of a hidden web view of the Profile.
+pub const native_store = os == .linux or os == .macos or os == .windows;
 const cookies = @import("cookies.zig");
 
-/// Independent, explicitly Profile-owned cookie operations. There is no
-/// hidden page, Context, Window, worker, timer or application keepalive.
+/// Independent, explicitly Profile-owned cookie operations. On Linux and
+/// macOS there is no hidden page, Context, Window, worker, timer or
+/// application keepalive. WebView2 has a cookie manager only through a web
+/// view: on Windows the first call makes a hidden one of the Profile, which
+/// serves the calls one after the other and closes once none has needed it
+/// for five seconds, unless it alone keeps session cookies, or once the
+/// Store closes. Its calls complete from the message loop.
 pub fn Type(comptime z: type, comptime Profile: type) type {
     return struct {
         const Self = @This();
@@ -57,7 +63,6 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
 
         /// App outlives the Zig Store and its explicit close. Native operations
         /// may finish later, with only C/GObject state. Profile may close first.
-        /// Windows rejects this independent API before touching Profile/input.
         pub fn create(allocator: std.mem.Allocator, app: *z.App, profile: *Profile, options: Options) !*Self {
             if (!native_store) return error.UnsupportedCapability;
             if (std.Thread.getCurrentId() != app.owner) return error.WrongThread;

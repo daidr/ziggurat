@@ -1,6 +1,8 @@
 # 独立 CookieStore
 
-`ziggurat_webview.CookieStore` 在 Linux 显式绑定一个已准备的 `Profile`，直接使用其 WebsiteDataManager。它不创建 View、WebContext、Window、后台线程、定时器或 App keepalive。普通 View 不会自动构造 Store。Windows 的独立 Store 返回 `UnsupportedCapability`，且在读取 App/Profile 或调用 allocator 前拒绝；既有 View 工具接口不变。
+`ziggurat_webview.CookieStore` 显式绑定一个已准备的 `Profile`。Linux 直接使用其 WebsiteDataManager，macOS 使用 WKHTTPCookieStore；两者都不创建 View、WebContext、Window、后台线程、定时器或 App keepalive。普通 View 不会自动构造 Store。
+
+WebView2 只有通过 web view 才能拿到 cookie manager。Windows 的 Store 在第一次调用时为该 Profile 建一个隐藏 web view，放在 Store 自己的隐藏窗口里，占用 Profile 的一个 Context 名额，与同一 Profile 的页面共用浏览器进程。调用按提交顺序逐个经由它的 manager 完成，回调都从消息循环发出，不在方法返回前同步发生。WebView2 在调用返回后才改变 cookie，所以 set、delete、clear 和 replaceAll 会再列出 cookie，直到改变可见（最多约 2 秒，否则以原生失败完成）。连续 5 秒没有调用需要它时，Store 列一次 cookie：没有会话 cookie 就关闭隐藏 web view，让 WebView2 进程随最后一个 web view 退出；有会话 cookie 就保留，因为关闭会让浏览器进程连同它们一起丢弃，直到下一次调用后再检查。下一次调用会重新建立隐藏 web view。Store 关闭后，隐藏 web view 在没有调用需要它时从消息循环关闭。
 
 ```zig
 const store = try web.CookieStore.create(allocator, app, profile, .{});
@@ -57,7 +59,7 @@ const operation = try replacer.replaceAll(&replacement_cookies, .{ .context = st
 
 适配层校验、容量、malloc 或原生 Cookie 构造失败发生在接受前，不调用 Completion，旧集合不受该请求影响。一旦 SDK 受理，失败、cancel、Stop 或 close 都不能保证保旧、撤销副作用或回滚。官方 Soup 后端以原生一次替换入口完成删除/添加，未提供事务回滚合同；本模块不承诺其他页面看不到中间状态、所有输入均实际保留、与并发页面写入的排序，或 fsync。`.completed` 只是 SDK 报告完成，显式 query/listAll 或实际请求用于观察结果。
 
-replace 的 async/finish 同样使用完整可空弱引用 pair，缺任一入口接受前返回 `UnsupportedCapability`。其他平台的冷 Store 尚未实现。
+replace 的 async/finish 同样使用完整可空弱引用 pair，缺任一入口接受前返回 `UnsupportedCapability`。Windows 没有一次替换的原生入口：replaceAll 先删除全部 cookie，再逐个写入，并等到新 cookie 都可见，中间状态对页面可见。
 
 ## 接受、结果与取消
 

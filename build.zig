@@ -1850,6 +1850,7 @@ pub fn build(b: *std.Build) void {
         });
         addPointerCostSmoke(b, target, optimize, core);
         addSmoke(b, "smoke-window-state", "tests/window_state_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-window-reveal", "tests/window_reveal_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-relationships", "tests/window_relationship_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-chrome", "tests/window_chrome_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
@@ -2072,7 +2073,7 @@ pub fn build(b: *std.Build) void {
         });
         automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
-        for ([_][]const u8{ "webview2.c", "page_host.c" }) |file| {
+        for ([_][]const u8{ "webview2.c", "page_host.c", "windows_cookies.c" }) |file| {
             const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{"-std=c11"}, target, optimize);
             native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
             native.addIncludePath(b.path("src/webview/include"));
@@ -2292,6 +2293,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-picture-in-picture", "tests/picture_in_picture_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-cookies-windows", "tests/windows_cookie_store_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-page-remote", "tests/remote_page_smoke.zig", target, optimize, &.{
@@ -3784,7 +3788,8 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
         .windows => {
             _ = native_support.add(b, module, "system-taskbar-native", "src/system/taskbar_windows.c", &.{"-std=c11"}, target, optimize);
             _ = native_support.add(b, module, "system-jump-list-native", "src/system/jump_list_windows.c", &.{"-std=c11"}, target, optimize);
-            for ([_][]const u8{ "advapi32", "ole32", "shell32" }) |library| module.linkSystemLibrary(library, .{});
+            _ = native_support.add(b, module, "system-notification-image-native", "src/system/notification_image_windows.c", &.{"-std=c11"}, target, optimize);
+            for ([_][]const u8{ "advapi32", "ole32", "shell32", "windowscodecs" }) |library| module.linkSystemLibrary(library, .{});
             module.link_libc = true;
         },
         .linux => {

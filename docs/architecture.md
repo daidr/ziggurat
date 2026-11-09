@@ -177,7 +177,7 @@ Linux Profile 可显式冻结宿主既有回环 HTTPS 服务的证书例外与�
 
 ## 句柄与生命周期
 
-Linux 的可选 `CookieStore` 直接持有 Profile 的 C-only lease 和 manager 引用，不借 View/Context/Window 建立第二生命周期。它独立注册 App Stop，先撤销逻辑槽再完成回调；取消不保证回滚引擎变更，迟到 GTask 最后释放后才回收 C 操作和 manager。结果 Batch 由调用者 allocator 独立拥有，可以跨 Store/App 存活；`on_closed` 仅表示最后一次 Zig 使用结束，不是引擎持久化或所有原生引用释放屏障。预算和系统内部分配边界见[Cookie 存储](cookie-store.md)。
+Linux 的可选 `CookieStore` 直接持有 Profile 的 C-only lease 和 manager 引用，不借 View/Context/Window 建立第二生命周期。它独立注册 App Stop，先撤销逻辑槽再完成回调；取消不保证回滚引擎变更，迟到 GTask 最后释放后才回收 C 操作和 manager。结果 Batch 由调用者 allocator 独立拥有，可以跨 Store/App 存活；`on_closed` 仅表示最后一次 Zig 使用结束，不是引擎持久化或所有原生引用释放屏障。Windows 的 Store 为 Profile 建一个隐藏 web view 取得 cookie manager，空闲时释放。预算和系统内部分配边界见[Cookie 存储](cookie-store.md)。
 
 `App.init(allocator)` 分配稳定 App，并初始化进程主线程的平台状态。一个 App 单次运行，可顺序创建新 App。`createWindow` 创建隐藏窗口；应用附加内容后显式 show。窗口尺寸、最小客户区尺寸与输入坐标使用 DIP，Paint 同时携带像素尺寸与 scale。
 

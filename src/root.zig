@@ -371,7 +371,11 @@ pub const WindowService = struct {
     message: ?*const fn (*anyopaque, Window, u32, usize, isize) ?isize = null,
     native_destroying: *const fn (*anyopaque) void,
 };
-pub const CloseReason = enum { user, application, owner, quit };
+/// Why a window is asked to close. `session_end`: the OS is ending the
+/// session (logout, restart or shutdown) and the process may end as soon as
+/// the handlers return, so the decision is ignored and the handler must do
+/// its work at once, without waiting on a dialog or a worker.
+pub const CloseReason = enum { user, application, owner, quit, session_end };
 pub const CloseDecision = enum { allow, cancel };
 pub const CloseResult = enum { closed, cancelled, deferred, in_progress };
 pub const CloseHandler = struct {
@@ -693,6 +697,8 @@ pub const App = struct {
     activity_depth: usize = 0,
     stop_resources: app_stop.Manager,
     querying_quit: bool = false,
+    /// Set while `endSession` finishes the app inside the OS's notification.
+    ending_session: bool = false,
     /// Inside the native event loop of `run`.
     looping: bool = false,
     querying_close_tree: bool = false,
@@ -943,6 +949,9 @@ pub const App = struct {
         if (comptime !builtin.is_test and builtin.os.tag == .windows) return backend.cleanupSafe();
         return true;
     }
+    fn shutdownSafe(self: *const App) bool {
+        return self.ending_session or cleanupSafe();
+    }
     fn flushCleanups(self: *App) void {
         if (self.activity_depth != 0 or !cleanupSafe()) return;
         for (0..64) |_| {
@@ -1092,6 +1101,41 @@ pub const App = struct {
         self.quit();
         return .accepted;
     }
+    /// The OS is ending the session (logout, restart or shutdown; Windows
+    /// sends WM_ENDSESSION) and may end the process as soon as this returns.
+    /// Every open window's close handler hears `.session_end`, whose
+    /// decision is ignored, then the quit finishes right here: posted tasks
+    /// run, stop participants stop and the windows are destroyed, with
+    /// `on_closed` notified. When a quit already ran its handlers, they are
+    /// not asked again; only the shutdown is finished.
+    pub fn endSession(self: *App) void {
+        self.assertOwner();
+        if (self.phase == .stopped or self.ending_session) return;
+        if (self.activity_depth != 0 or self.dispatching or self.destroying) {
+            // Inside a callback nothing can finish; the quit still goes on.
+            self.quit();
+            return;
+        }
+        self.ending_session = true;
+        defer self.ending_session = false;
+        if (self.phase != .stopping and !self.querying_quit and !self.querying_close_tree) {
+            self.querying_quit = true;
+            self.activity_depth += 1;
+            self.quit_cursor = self.first;
+            while (self.quit_cursor) |record| {
+                self.quit_cursor = record.next;
+                record.pin();
+                _ = record.allowClose(.session_end);
+                record.unpin();
+                if (self.phase == .stopping) break;
+            }
+            self.quit_cursor = null;
+            self.querying_quit = false;
+            self.leaveActivity();
+        }
+        self.quit();
+        self.shutdown() catch |err| self.report(.{ .domain = .core, .operation = .app_stop, .err = err });
+    }
     /// Unconditional shutdown for explicit termination/error paths. Bypasses vetoes.
     pub fn quit(self: *App) void {
         self.assertOwner();
@@ -1110,12 +1154,13 @@ pub const App = struct {
         if (running) backend.quit(self);
     }
     fn shutdown(self: *App) !void {
+        if (self.phase == .stopped) return;
         self.phase = .stopping;
         self.stop_resources.seal() catch unreachable;
         self.cancelNativeWaits();
         self.queue.close();
         self.drain();
-        if (!cleanupSafe() and self.stop_resources.count != 0) return error.UnsafeCleanupContext;
+        if (!self.shutdownSafe() and self.stop_resources.count != 0) return error.UnsafeCleanupContext;
         self.activity_depth += 1;
         const pointer = self.suspendPointer();
         defer self.restorePointer(pointer);
@@ -1131,7 +1176,7 @@ pub const App = struct {
                 if (record.phase != .closing) _ = try record.window.destroy();
             }
         }
-        if (!cleanupSafe() and self.cleanup_head != null) return error.UnsafeCleanupContext;
+        if (!self.shutdownSafe() and self.cleanup_head != null) return error.UnsafeCleanupContext;
         while (self.cleanup_head != null) self.flushCleanups();
         self.phase = .stopped;
     }

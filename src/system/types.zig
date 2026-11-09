@@ -224,7 +224,8 @@ pub const NotificationOptions = struct {
     /// image on Linux (the spec's `image-data`, scaled down to fit 256
     /// pixels). Copied before `showNotification` returns. An image the system
     /// cannot decode leaves the notification without one; nothing is
-    /// fetched. Windows does not show it yet. At most
+    /// fetched. Windows shows it as the balloon's large icon, which the
+    /// toast it makes of the balloon draws beside the text. At most
     /// `max_notification_image_bytes`.
     image: ?[]const u8 = null,
 };

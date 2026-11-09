@@ -35,7 +35,7 @@ const PointerDispatch = struct {
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
 pub const AppData = struct { popup_shadow_class: c.ATOM = 0, taskbar_created: c.UINT = 0, taskbar: ?*TaskbarList = null, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
-pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, pen: PenState = .{}, held: HeldKeys = .{} };
+pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, pen: PenState = .{}, held: HeldKeys = .{}, cloaked: bool = false, material: core.Vibrancy = .none, glass: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } };
 /// The pen or finger of the last WM_POINTER message, which the mouse messages
 /// Windows makes of it carry.
 const PenState = struct {
@@ -250,6 +250,7 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
         return error.CreateWindowFailed;
     }
     window.native.icons.apply(window.native.hwnd);
+    cloak(window);
     if (options.decoration != .system and options.popup == null) plainCaption(window.native.hwnd);
     if (options.vibrancy != .none) setVibrancy(window, options.vibrancy);
     // Windows 11 rounds, outlines and shades a popup with a shadow as it
@@ -263,6 +264,35 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
         errdefer _ = c.DestroyWindow(window.native.hwnd);
         _ = try setTextInputMode(window, options.text_input_mode);
     }
+}
+const dwm_cloak = 13;
+/// The window's timer that shows a window still cloaked when no frame came.
+const uncloak_timer: usize = 0x5a43;
+/// How long a shown window waits for its first frame before it shows anyway.
+const uncloak_after_ms: c.UINT = 1000;
+/// A window stays out of sight (DWMWA_CLOAK), though visible to Windows, from
+/// its creation until its first frame painted: shown before, it would show
+/// what it holds until then, white where the graphics surface is, for as long
+/// as the renderer takes to start. Windows still sends a cloaked window
+/// WM_PAINT, after which it shows; a second after it shows without one, it
+/// shows anyway.
+fn cloak(window: *core.WindowRecord) void {
+    const on: u32 = 1;
+    window.native.cloaked = DwmSetWindowAttribute(window.native.hwnd, dwm_cloak, &on, @sizeOf(u32)) >= 0;
+}
+fn uncloak(window: *core.WindowRecord, hwnd: c.HWND) void {
+    if (!window.native.cloaked) return;
+    window.native.cloaked = false;
+    _ = c.KillTimer(hwnd, uncloak_timer);
+    // What DWM shows a refresh before the frame presents is the window's
+    // own pixels, which hold the content's background.
+    _ = c.GdiFlush();
+    const off: u32 = 0;
+    _ = DwmSetWindowAttribute(hwnd, dwm_cloak, &off, @sizeOf(u32));
+}
+/// Whether the window is still kept out of sight until its first frame.
+pub fn cloaked(window: *core.WindowRecord) bool {
+    return window.native.cloaked;
 }
 const dwm_caption_color = 35;
 /// DWMWA_COLOR_NONE: no caption color at all, not the accent.
@@ -935,11 +965,31 @@ fn backdropFor(material: core.Vibrancy) u32 {
 /// Windows before 11 22H2 ignore the backdrop attribute.
 pub fn setVibrancy(window: *core.WindowRecord, material: core.Vibrancy) void {
     const hwnd = window.native.hwnd;
-    const margins: Margins = if (material == .none) .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } else .{ .left = -1, .right = -1, .top = -1, .bottom = -1 };
-    _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+    window.native.material = material;
+    extendGlass(window, hwnd, true);
     const backdrop = backdropFor(material);
     _ = DwmSetWindowAttribute(hwnd, dwm_system_backdrop_type, &backdrop, @sizeOf(u32));
     _ = c.InvalidateRect(hwnd, null, c.FALSE);
+}
+/// Extends the frame over the client area for the material: a sheet over the
+/// whole window, or, for a maximized window with the system's title bar,
+/// from the bottom over the client area alone. Extended all over, the frame
+/// keeps a maximized window's caption buttons as tall as a restored one's,
+/// past its shorter title bar, where the one under the pointer shows through
+/// a translucent page; extended from the bottom, the frame's top is the
+/// title bar, which holds them.
+fn extendGlass(window: *core.WindowRecord, hwnd: c.HWND, always: bool) void {
+    var margins: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
+    if (window.native.material != .none) {
+        if (window.options.decoration == .system and !window.native.fullscreen and c.IsZoomed(hwnd) != 0) {
+            var client: c.RECT = undefined;
+            const height = if (c.GetClientRect(hwnd, &client) != 0) client.bottom - client.top else 1;
+            margins = .{ .left = 0, .right = 0, .top = 0, .bottom = @max(height, 1) };
+        } else margins = .{ .left = -1, .right = -1, .top = -1, .bottom = -1 };
+    }
+    if (!always and std.meta.eql(margins, window.native.glass)) return;
+    window.native.glass = margins;
+    _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
 }
 pub fn setBackdrop(window: *core.WindowRecord, material: core.WindowBackdrop) !void {
     const hwnd = window.native.hwnd;
@@ -1366,6 +1416,15 @@ fn dispatchProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callc
         }
         return 0;
     }
+    if (message == c.WM_ENDSESSION and wp != 0) {
+        // The session ends once this returns: finish the quit here.
+        const address = c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA);
+        if (address != 0) {
+            const app: *core.App = @ptrFromInt(@as(usize, @bitCast(address)));
+            app.endSession();
+        }
+        return 0;
+    }
     if (message == c.WM_NCDESTROY) _ = c.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
     return c.DefWindowProcW(hwnd, message, wp, lp);
 }
@@ -1426,6 +1485,14 @@ fn windowMessage(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: 
     if (message == c.WM_TIMER and wp == input_region_timer) {
         followCursor(window);
         return 0;
+    }
+    if (message == c.WM_TIMER and wp == uncloak_timer) {
+        uncloak(window, hwnd);
+        return 0;
+    }
+    if (message == c.WM_WINDOWPOSCHANGED and window.native.cloaked) {
+        const position: *const c.WINDOWPOS = @ptrFromInt(@as(usize, @bitCast(lp)));
+        if (position.flags & c.SWP_SHOWWINDOW != 0) _ = c.SetTimer(hwnd, uncloak_timer, uncloak_after_ms, null);
     }
     if (message == c.WM_SHOWWINDOW and window.input_region != null) pollCursor(window, wp != 0);
     if (pointers.isPointerMessage(message)) {
@@ -1634,6 +1701,7 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             // Over native content composed under them (`Window.composeUnder`)
             // the frames show their alpha through DirectComposition too.
             if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd), .transparent = window.native.no_redirect or window.composed_under != 0, .background = if (window.native.no_redirect) null else window.native.background } });
+            if (sameWindow(window, hwnd) and window.native.cloaked and c.IsWindowVisible(hwnd) != 0) uncloak(window, hwnd);
             return 0;
         },
         c.WM_ERASEBKGND => {
@@ -1684,6 +1752,7 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             if (wp == c.SIZE_MAXIMIZED) fitWorkArea(window, hwnd);
             if (!sameWindow(window, hwnd)) return 0;
             if (wp != c.SIZE_MINIMIZED) fillUncovered(window, hwnd, lp);
+            if (wp != c.SIZE_MINIMIZED and window.native.material != .none) extendGlass(window, hwnd, false);
             window.emitPointerLifecycle(operation, .{ .resize = size(hwnd) });
             window.emitPointerState(operation);
             invalidate(window);

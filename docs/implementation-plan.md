@@ -160,7 +160,7 @@ T07 负责可选字体注册与发现，不扩大T01已验收布局范围：有�
 | I02 | 已完成 | 编译期服务调度与显式 caller 上下文 | 签名/错误类型校验、拥有的 Reply/Work、OOM 编码重试不重复业务副作用、真实 WebView 调度 |
 | B01 | 部分完成（Windows/Linux） | page 导航、远程/文件资源策略、历史、标题/加载状态 | B01.1 本地页面与 B01.2 远程/显式文件快照已验收；methods/headers、私有文件按需读取与原生 scheme 由 B05.1–B05.3 验收，未开放 file:// 目录；导航中关闭/重定向/失败和 IPC 绑定 |
 | B02 | 部分完成（Windows/Linux） | 异步 JS 求值、zoom、user agent、devtools、用户注入脚本 | B02.1既有Windows操作及B02.2两平台文档起始主frame初始化器/有序替换首片已验；Linux DevTools 开关/独立 inspector 已验，两平台 B02.1 属性操作对齐；其他时机/frame/world继续，未做人眼工具窗展示验收；依赖 B01 |
-| B03 | 部分完成（Windows/Linux） | cookie/data store、find、截图、打印/PDF | Windows View Cookie/Profile清理、原生find、预算PNG、异步PDF，以及Linux独立CookieStore的URL/显式授权全量查询、写入/快照删除/身份删除/非空完整替换/清Cookie、原生PNG、整体数据清理和有界substring Find/显式unknown状态已分项验收；整词/高亮关闭等不支持选项明确拒绝，Linux PDF及系统打印机输出继续，无页面Windows CookieStore仍明确不支持；依赖 B02 |
+| B03 | 部分完成（Windows/Linux） | cookie/data store、find、截图、打印/PDF | Windows View Cookie/Profile清理、原生find、预算PNG、异步PDF，以及Linux独立CookieStore的URL/显式授权全量查询、写入/快照删除/身份删除/非空完整替换/清Cookie、原生PNG、整体数据清理和有界substring Find/显式unknown状态已分项验收；整词/高亮关闭等不支持选项明确拒绝，Linux PDF及系统打印机输出继续；Windows 独立 CookieStore 经 Profile 的隐藏 web view 实现，空闲 5 秒且无会话 cookie 时释放；依赖 B02 |
 | B04 | 已完成（Windows，宿主显式策略） | 下载管理、权限决策与持久策略 | B04.1 有界下载/临时权限与 B04.2 版本化宿主规则已验收；宿主负责规则执行与 worker I/O，合作取消不等于硬磁盘配额；依赖 B01/I01 |
 | B05 | 部分完成（Windows/Linux） | 自定义协议、请求/响应与资源流 | Windows B05.1–B05.4及Linux有界custom读取/头授权、异步资源/文件泵、HTTP Range/准备文件响应、独立TLS站点、两平台已知长producer已分项验收；Windows实际HTTPS/browser链使用测试证书例外，生产Profile级pin待实现；Linux custom写请求受实际Origin缺失限制，opaque scheme及更广策略继续；不在UI线程磁盘等待；依赖 B01/I01 |
 | H01 | 已完成（Windows/Linux 页面与区域） | page/viewport 与窗口分离、多份内容生命周期 | H01.1 组合所有者/UI backdrop/矩形页面与H01.2独立PageSession/跨宿主DOM/App停机接线已验收；更广Linux页面策略及其他平台归P01/P04；依赖 W02/B01 |
@@ -217,7 +217,7 @@ D02 的外部修改/文档追踪必须覆盖另一程序save-replace后紧接ren
 
 B03 增补独立App/profile拥有的CookieStore：首个页面加载前即可提交操作，明确是否允许无页面时启动原生环境，不创建隐藏窗口；与View/PageSession共享哪个profile由宿主显式选择。拥有型有界all/filter查询、URL/name/domain/path匹配与精确domain/path删除分别定义，读取/清除整个profile要求显式授权；重复名/路径、HttpOnly/secure/SameSite、队列Full/取消/关闭与最后native引用均验收。现按已授权URI操作的View工具继续保留既有合同，不由本项扩大默认权限；区分原生受理与查询可见的完成状态，使用显式初始化屏障验证首页面首个请求前cookie已经生效。
 
-Linux CookieStore 已分项验收 URL 查询、独立显式授权的全量读取、设置、带当前值的完整 Cookie 快照删除、仅按 name/domain/path 的身份删除、非空完整替换，以及独立授权的仅 Cookie 清除。快照删除包含值匹配，不能代表无条件删除，也不承诺原子 compare-delete；身份删除使用单次过期 tombstone，完整替换使用一次真实原生操作，不隐藏读取或 clear/set 序列。返回成功仍须由后续查询验证可见状态，不承诺持久化或受理后的回滚。Windows 的无页面独立入口先明确 Unsupported，不借隐藏 controller 实例伪装此能力。预算仅覆盖本项目请求的 malloc 和调用者 allocator；libsoup/GLib 对象、其内部字符串、引擎列表及进程成本另列，并以输入长度和 pending 上限约束其个数。
+Linux CookieStore 已分项验收 URL 查询、独立显式授权的全量读取、设置、带当前值的完整 Cookie 快照删除、仅按 name/domain/path 的身份删除、非空完整替换，以及独立授权的仅 Cookie 清除。快照删除包含值匹配，不能代表无条件删除，也不承诺原子 compare-delete；身份删除使用单次过期 tombstone，完整替换使用一次真实原生操作，不隐藏读取或 clear/set 序列。返回成功仍须由后续查询验证可见状态，不承诺持久化或受理后的回滚。Windows 的无页面独立入口经 Profile 的隐藏 web view 取得 cookie manager，空闲 5 秒且没有只靠它保留的会话 cookie 时关闭。预算仅覆盖本项目请求的 malloc 和调用者 allocator；libsoup/GLib 对象、其内部字符串、引擎列表及进程成本另列，并以输入长度和 pending 上限约束其个数。
 
 S08保留现Windows窗口Owner单托盘、图标/tooltip更新、消息与任务栏重建基础；独立App级多item及下述新增能力仍待实现。位置保留按各平台真实能力验收，稳定ID由应用提供，不从创建顺序或图标路径猜；多个item销毁/重建及跨启动不串位。popover/menu正常关闭、取消、owner关闭与异常路径均撤亮态；不支持的位置/亮态能力明确返回。S01已验收的Windows通知区气泡保持原范围，P02/P04分别实现原生托盘/状态项。
 
