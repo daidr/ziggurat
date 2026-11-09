@@ -6,6 +6,8 @@ const tray_message = c.WM_APP + 0x421;
 const hotkey: system.Hotkey = .{ .key = .f24, .modifiers = .{ .control = true, .alt = true, .shift = true } };
 const native_key = c.VK_F24;
 const native_modifiers = c.MOD_CONTROL | c.MOD_ALT | c.MOD_SHIFT;
+/// A 2 by 1 PNG, red and blue.
+const tiny_png = "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x02\x00\x00\x00\x01\x08\x06\x00\x00\x00\xf4\x22\x7f\x8a\x00\x00\x00\x0e\x49\x44\x41\x54\x78\x9c\x63\xf8\xcf\xc0\x00\x42\xff\x01\x0f\xf9\x03\xfd\x85\x11\x99\x76\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
 const Probe = struct {
     owner: system.Owner = undefined,
     hotkeys: usize = 0,
@@ -118,6 +120,16 @@ pub fn main() !void {
             try std.testing.expect(first.owner.notification == null);
             sendNotification(hwnd, notification_id, c.NIN_BALLOONUSERCLICK);
             try std.testing.expectEqual(1, first.notifications);
+            try first.owner.clearNotification();
+            // The image becomes the balloon's large icon; a toast that never
+            // says it is done loses its icon on the owner's timer.
+            try first.owner.showNotification(9, .{ .title = "Ziggurat integration check", .body = "Notification with an image", .silent = true, .image = tiny_png });
+            try std.testing.expect(first.owner.notification.?.balloon != null);
+            _ = c.SendMessageW(hwnd, c.WM_TIMER, 0x5a4e, 0);
+            try std.testing.expect(first.owner.notification == null);
+            try std.testing.expectEqual(1, first.notifications);
+            try first.owner.showNotification(9, .{ .title = "Ziggurat integration check", .body = "Undecodable image", .silent = true, .image = "\x89PNG\r\n\x1a\nnot really an image" });
+            try std.testing.expect(first.owner.notification.?.balloon == null);
             try first.owner.clearNotification();
             try first.owner.showNotification(9, .{ .title = "Ziggurat integration check", .body = "Pending notification is removed on close", .silent = true });
             try std.testing.expect(first.owner.notification != null);

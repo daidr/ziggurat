@@ -14,7 +14,16 @@ pub const tray_message: u32 = c.WM_APP + 0x421;
 const Entry = native_menu.Entry;
 const Tray = struct { id: u16, icon: c.HICON, tooltip: [128]u16 };
 const HotkeyEntry = struct { id: u64, native_id: u16, key: u32, modifiers: u32 };
-const Notification = struct { id: u64, tray: Tray };
+const Notification = struct { id: u64, tray: Tray, balloon: c.HICON = null };
+/// The owner HWND's timer that takes a notification's icon away once its
+/// toast is long gone.
+const notification_timer: usize = 0x5a4e;
+/// How long a notification's icon stays after its balloon went out. Windows
+/// 10 and later show the balloon as a toast, which tells the icon it left the
+/// screen (NIN_BALLOONTIMEOUT) within the toast duration the user sets, at
+/// most five minutes; a toast parked in the notification center never does.
+const notification_linger_ms: c.UINT = 6 * 60 * 1000;
+extern fn zsn_image_icon(bytes: [*]const u8, length: usize, size: c_int) c.HICON;
 
 /// Keep at a stable address through detach/on_closed. All operations and action
 /// callbacks run on the window's owner thread. Native resources are reclaimed
@@ -182,16 +191,38 @@ pub const Owner = struct {
             .warning => c.NIIF_WARNING,
             .err => c.NIIF_ERROR,
         }) | @as(c.DWORD, if (options.silent) c.NIIF_NOSOUND else 0);
+        // The image shows as the balloon's large icon, which the toast
+        // Windows 11 makes of it draws at 40 DIPs: twice SM_CXICON, shrunk.
+        var balloon: c.HICON = null;
+        defer if (balloon != null) {
+            _ = c.DestroyIcon(balloon);
+        };
+        if (options.image) |image| if (image.len != 0) {
+            const icon_size = c.GetSystemMetricsForDpi(c.SM_CXICON, self.windowDpi());
+            balloon = zsn_image_icon(image.ptr, image.len, 2 * (if (icon_size > 0) icon_size else 32));
+            if (balloon != null) {
+                value.hBalloonIcon = balloon;
+                value.dwInfoFlags = @as(c.DWORD, c.NIIF_USER | c.NIIF_LARGE_ICON) | @as(c.DWORD, if (options.silent) c.NIIF_NOSOUND else 0);
+            }
+        };
         if (c.Shell_NotifyIconW(c.NIM_MODIFY, &value) == 0) return self.failed(error.NotificationSubmissionFailed);
         if (window.isClosed()) return error.Closed;
         const previous = self.notification;
-        self.notification = .{ .id = id, .tray = tray };
+        self.notification = .{ .id = id, .tray = tray, .balloon = balloon };
         owned = false;
         added = false;
+        balloon = null;
         if (previous) |old| {
             _ = self.deleteTrayAt(hwnd, old.tray);
-            _ = c.DestroyIcon(old.tray.icon);
+            releaseNotification(old);
         }
+        // A toast parked in the notification center never says it is done:
+        // the icon, which only the balloon wanted, goes on a timer.
+        _ = c.SetTimer(hwnd, notification_timer, notification_linger_ms, null);
+    }
+    fn releaseNotification(notification: Notification) void {
+        _ = c.DestroyIcon(notification.tray.icon);
+        if (notification.balloon != null) _ = c.DestroyIcon(notification.balloon);
     }
     pub fn clearNotification(self: *Owner) !void {
         const window = try self.require();
@@ -199,8 +230,9 @@ pub const Owner = struct {
         defer scope.end();
         const notification = self.notification orelse return;
         self.notification = null;
+        _ = c.KillTimer(self.hwnd, notification_timer);
         const removed = self.deleteTrayAt(self.hwnd, notification.tray);
-        _ = c.DestroyIcon(notification.tray.icon);
+        releaseNotification(notification);
         if (!removed) return error.NotificationRemovalFailed;
     }
 
@@ -413,8 +445,9 @@ pub const Owner = struct {
         }
         if (self.notification) |notification| {
             self.notification = null;
+            _ = c.KillTimer(self.hwnd, notification_timer);
             _ = self.deleteTrayAt(self.hwnd, notification.tray);
-            _ = c.DestroyIcon(notification.tray.icon);
+            releaseNotification(notification);
         }
         if (self.tray) |tray| {
             self.tray = null;
@@ -498,6 +531,11 @@ pub const Owner = struct {
             if (self.menu_key.popup != null and @intFromPtr(self.menu_key.popup) == @as(usize, @bitCast(lp)) and wp & 0xffff == self.menu_key.key) return c.MNC_CLOSE << 16;
             return null;
         }
+        if (native_message == c.WM_TIMER and wp == notification_timer) {
+            _ = c.KillTimer(self.hwnd, notification_timer);
+            self.clearNotification() catch |err| window.report(.{ .severity = .warning, .domain = .win32, .operation = .window_update, .err = err, .code = if (self.last_error != 0) self.last_error else null });
+            return 0;
+        }
         if (native_message == c.WM_HOTKEY) {
             for (self.hotkeys[0..self.hotkey_count]) |entry| if (wp == entry.native_id) {
                 const bits: usize = @bitCast(lp);
@@ -541,7 +579,8 @@ pub const Owner = struct {
             // stale user messages. Persistent tray configuration is restored.
             if (self.notification) |notification| {
                 self.notification = null;
-                _ = c.DestroyIcon(notification.tray.icon);
+                _ = c.KillTimer(self.hwnd, notification_timer);
+                releaseNotification(notification);
             }
             if (self.tray) |tray| self.addTray(tray) catch |err| window.report(.{ .severity = .warning, .domain = .win32, .operation = .window_update, .err = err, .code = self.last_error });
             return 0;

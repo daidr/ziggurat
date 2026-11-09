@@ -3756,7 +3756,8 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
         .windows => {
             _ = native_support.add(b, module, "system-taskbar-native", "src/system/taskbar_windows.c", &.{"-std=c11"}, target, optimize);
             _ = native_support.add(b, module, "system-jump-list-native", "src/system/jump_list_windows.c", &.{"-std=c11"}, target, optimize);
-            for ([_][]const u8{ "advapi32", "ole32", "shell32" }) |library| module.linkSystemLibrary(library, .{});
+            _ = native_support.add(b, module, "system-notification-image-native", "src/system/notification_image_windows.c", &.{"-std=c11"}, target, optimize);
+            for ([_][]const u8{ "advapi32", "ole32", "shell32", "windowscodecs" }) |library| module.linkSystemLibrary(library, .{});
             module.link_libc = true;
         },
         .linux => {
