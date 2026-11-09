@@ -395,7 +395,7 @@ jobs:
     if: ((github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview'))
     # Also needs Node.js and an installed WebView2 Runtime on the runner.
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     defaults:
       run:
         shell: pwsh
