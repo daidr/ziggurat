@@ -185,6 +185,7 @@ const Smoke = struct {
     scale: f32 = 1,
     stop: std.atomic.Value(bool) = .init(false),
     ticks: std.atomic.Value(u32) = .init(0),
+    legacy_hovers: u32 = 0,
 
     fn event(ptr: *anyopaque, window: z.Window, value: z.Event) void {
         const self: *Smoke = @ptrCast(@alignCast(ptr));
@@ -265,6 +266,11 @@ const Smoke = struct {
         return true;
     }
 
+    fn legacyHover(ptr: *anyopaque, _: z.Window, value: drop.Hover) bool {
+        const self: *Smoke = @ptrCast(@alignCast(ptr));
+        if (value.phase != .leave) self.legacy_hovers += 1;
+        return value.text;
+    }
     fn legacyDrop(ptr: *anyopaque, _: z.Window, value: drop.Drop) void {
         const self: *Smoke = @ptrCast(@alignCast(ptr));
         self.legacy_drops += 1;
@@ -392,7 +398,8 @@ const Smoke = struct {
                 self.step += 1;
                 self.input.pointer(.{ .x = end.x + @as(i32, @intCast(self.step % 4)), .y = end.y });
                 if (self.round == .move and self.step == 2) self.input.keyEvent(0xffe1, true);
-                if (self.step > 10 and (self.round == .no_target or self.round == .legacy or self.hovers > 0)) self.to(.release);
+                // Released before the target saw it, a drag ends with no effect.
+                if (self.step > 10 and (self.round == .no_target or (self.round == .legacy and self.legacy_hovers > 0) or self.hovers > 0)) self.to(.release);
             },
             .release => if (self.waited > 2) {
                 self.input.press(false);
@@ -408,6 +415,7 @@ const Smoke = struct {
             },
             .next => {
                 self.hovers = 0;
+                self.legacy_hovers = 0;
                 self.local_hovers = 0;
                 self.drops = 0;
                 self.dropped_items = 0;
@@ -518,7 +526,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     smoke.legacy_window = try app.createWindow(.{ .title = "text target", .width = 300, .height = 200 });
     try smoke.legacy_window.setClientBounds(.{ .position = .{ .x = 520, .y = 420 }, .width = 300, .height = 200 });
     try smoke.legacy_window.perform(.show);
-    smoke.legacy = .{ .context = &smoke, .on_drop = Smoke.legacyDrop, .kinds = .{ .files = false }, .buffer = &smoke.legacy_buffer };
+    smoke.legacy = .{ .context = &smoke, .on_drop = Smoke.legacyDrop, .on_hover = Smoke.legacyHover, .kinds = .{ .files = false }, .buffer = &smoke.legacy_buffer };
     try smoke.legacy.attach(smoke.legacy_window);
     defer smoke.legacy.detach();
     defer smoke.target.detach();
