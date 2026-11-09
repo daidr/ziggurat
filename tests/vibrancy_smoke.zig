@@ -16,6 +16,7 @@ const linux = builtin.os.tag == .linux;
 const c = @import("ziggurat_c_win32");
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlc_test_raw_argb(*anyopaque, u32, u32) u32;
+extern "dwmapi" fn DwmGetWindowAttribute(c.HWND, u32, *anyopaque, u32) callconv(.winapi) c.HRESULT;
 extern fn gdk_screen_get_default() ?*anyopaque;
 extern fn gdk_screen_get_rgba_visual(*anyopaque) ?*anyopaque;
 
@@ -66,6 +67,11 @@ const State = struct {
     surface: Surface = .{},
     menu_seen: bool = false,
     menu_tries: u8 = 0,
+    ready_polls: usize = 0,
+    /// GetTickCount64 when the watcher saw the menu loop, and when it saw
+    /// it end (0 while it lasts).
+    menu_opened: std.atomic.Value(u64) = .init(0),
+    menu_ended: std.atomic.Value(u64) = .init(0),
     caps: z.WindowCapabilities = undefined,
     failure: ?anyerror = null,
     thread_failure: ?anyerror = null,
@@ -148,6 +154,8 @@ const State = struct {
     /// menu on its own, so a menu gone before the task is opened again.
     fn openMenu(self: *State) !void {
         self.menu_tries += 1;
+        self.menu_opened.store(0, .release);
+        self.menu_ended.store(0, .release);
         const hwnd: c.HWND = @ptrCast(self.window.nativeHandle().?);
         _ = c.SetForegroundWindow(hwnd);
         _ = c.PostMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_KEYMENU, 0);
@@ -162,7 +170,17 @@ const State = struct {
         info.cbSize = @sizeOf(c.GUITHREADINFO);
         for (0..5000) |_| {
             if (c.GetGUIThreadInfo(thread, &info) != 0 and info.flags & c.GUI_POPUPMENUMODE != 0) {
+                self.menu_opened.store(c.GetTickCount64(), .release);
                 self.app.post(.{ .context = self, .call = closeMenu }) catch |err| return self.failLater(err);
+                // Notes when the loop ends, for the report of a menu that
+                // closed before the task.
+                for (0..10000) |_| {
+                    if (c.GetGUIThreadInfo(thread, &info) == 0 or info.flags & c.GUI_POPUPMENUMODE == 0) {
+                        self.menu_ended.store(c.GetTickCount64(), .release);
+                        return;
+                    }
+                    zio.sleep(std.time.ns_per_ms);
+                }
                 return;
             }
             zio.sleep(std.time.ns_per_ms);
@@ -174,12 +192,35 @@ const State = struct {
         var info = std.mem.zeroes(c.GUITHREADINFO);
         info.cbSize = @sizeOf(c.GUITHREADINFO);
         if (c.GetGUIThreadInfo(0, &info) == 0 or info.flags & c.GUI_POPUPMENUMODE == 0) {
+            const now = c.GetTickCount64();
+            const opened = self.menu_opened.load(.acquire);
+            const ended = self.menu_ended.load(.acquire);
+            const hwnd: c.HWND = @ptrCast(self.window.nativeHandle().?);
+            std.debug.print("vibrancy smoke: try {d}: menu gone before the task: ended {d} ms and task {d} ms after open; cloaked {}, foreground {}, active {}\n", .{ self.menu_tries, if (ended == 0) -1 else @as(i64, @intCast(ended - opened)), now - opened, isCloaked(hwnd), c.GetForegroundWindow() == hwnd, c.GetActiveWindow() == hwnd });
             if (self.menu_tries >= 5) return self.fail(error.MenuClosedBeforeTask);
-            return self.openMenu() catch |err| self.fail(err);
+            self.ready_polls = 0;
+            return self.waitReady();
         }
         self.menu_seen = true;
         _ = c.EndMenu();
         self.app.post(.{ .context = self, .call = finishTask }) catch |err| self.fail(err);
+    }
+    /// Before trying again: waits (up to 2 s) for the window to be shown
+    /// uncloaked and in the foreground.
+    fn waitReady(self: *State) void {
+        const hwnd: c.HWND = @ptrCast(self.window.nativeHandle().?);
+        self.ready_polls += 1;
+        if ((!isCloaked(hwnd) and c.GetForegroundWindow() == hwnd) or self.ready_polls > 2000) {
+            std.debug.print("vibrancy smoke: retry after {d} polls: cloaked {}, foreground {}\n", .{ self.ready_polls, isCloaked(hwnd), c.GetForegroundWindow() == hwnd });
+            return self.openMenu() catch |err| self.fail(err);
+        }
+        if (self.ready_polls % 200 == 0) _ = c.SetForegroundWindow(hwnd);
+        zio.sleep(std.time.ns_per_ms);
+        self.app.post(.{ .context = self, .call = waitReadyTask }) catch |err| self.fail(err);
+    }
+    fn waitReadyTask(ptr: *anyopaque) void {
+        const self: *State = @ptrCast(@alignCast(ptr));
+        self.waitReady();
     }
     fn failLater(self: *State, err: anyerror) void {
         self.thread_failure = err;
@@ -198,6 +239,12 @@ const State = struct {
         self.app.quit();
     }
 };
+
+fn isCloaked(hwnd: c.HWND) bool {
+    var cloaked: u32 = 0;
+    // DWMWA_CLOAKED
+    return DwmGetWindowAttribute(hwnd, 14, &cloaked, @sizeOf(u32)) >= 0 and cloaked != 0;
+}
 
 fn backdropsAvailable() bool {
     var info: std.os.windows.RTL_OSVERSIONINFOW = undefined;
