@@ -184,6 +184,7 @@ const Smoke = struct {
     input: Input = undefined,
     scale: f32 = 1,
     stop: std.atomic.Value(bool) = .init(false),
+    ticks: std.atomic.Value(u32) = .init(0),
 
     fn event(ptr: *anyopaque, window: z.Window, value: z.Event) void {
         const self: *Smoke = @ptrCast(@alignCast(ptr));
@@ -273,13 +274,33 @@ const Smoke = struct {
         }
     }
     fn ticker(self: *Smoke) void {
+        var seen: u32 = 0;
+        var idle: u32 = 0;
         while (!self.stop.load(.acquire)) {
             zio.sleep(25 * std.time.ns_per_ms);
-            self.app.post(.{ .context = self, .call = tick }) catch return;
+            self.app.post(.{ .context = self, .call = tick }) catch |err| {
+                std.debug.print("drag smoke: ticker stopped: {s}\n", .{@errorName(err)});
+                return;
+            };
+            // The stuck report runs on the UI thread; this one names where
+            // that thread stopped taking ticks.
+            const ticks = self.ticks.load(.acquire);
+            if (ticks != seen) {
+                seen = ticks;
+                idle = 0;
+            } else {
+                idle += 1;
+                if (idle == 400) std.debug.print("drag smoke: no tick for 10s in round {s} at {s}; source {s}, native {}, held {}\n", .{ @tagName(self.round), @tagName(self.stage), @tagName(self.source.state), @hasField(@TypeOf(self.source.native), "drop_source") and nativeStarted(&self.source), self.held });
+            }
         }
+    }
+    fn nativeStarted(source: *drag.Source) bool {
+        if (comptime !@hasField(@TypeOf(source.native), "drop_source")) return false;
+        return source.native.drop_source != null;
     }
     fn tick(ptr: *anyopaque) void {
         const self: *Smoke = @ptrCast(@alignCast(ptr));
+        _ = self.ticks.fetchAdd(1, .release);
         if (self.stage == .done) return;
         self.advance() catch |err| return self.finish(err);
         self.waited += 1;
