@@ -1,13 +1,19 @@
 name: native checks
 
 on:
-  # Pull requests run only the platforms their files touch (see the changes
-  # job); every push to dev runs all of them plus the ReleaseSafe unit tests,
-  # so nothing a narrowed pull request skipped goes unchecked. Feature branch
+  # Pull requests run only the platforms their files touch and a core set of
+  # smokes (see the changes job). Each OS has a single runner, so merging into
+  # dev starts nothing that would hold up the next pull request: the full
+  # suite runs on dev once a night instead (when dev changed that day), on
+  # pushes to main, on manual runs and with the full-ci label. Feature branch
   # pushes would start a second run beside the pull request's.
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
+  schedule:
+    # 03:00 in China Standard Time. GitHub runs schedules from the default
+    # branch (main), so the jobs check out dev explicitly.
+    - cron: '0 19 * * *'
   workflow_dispatch:
     inputs:
       webview:
@@ -20,8 +26,8 @@ permissions:
 
 concurrency:
   group: native-${{ github.workflow }}-${{ github.ref }}
-  # A new push to a pull request replaces its running checks. Pushes to dev
-  # and main finish; GitHub keeps only the newest one waiting behind them.
+  # A new push to a pull request replaces its running checks. Pushes to main
+  # and the nightly run finish; GitHub keeps only the newest one waiting.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -49,11 +55,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
       - id: select
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
-          REF: ${{ github.ref }}
           PULL: ${{ github.event.pull_request.number }}
           FULL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
@@ -76,8 +82,13 @@ jobs:
             # The checkout is the merge result, so the import graph matches it.
             choose --github-files --explain < "$pages"
             echo full=false | tee -a "$GITHUB_OUTPUT"
-          elif [ "$EVENT" = pull_request ] || { [ "$EVENT" = push ] && [ "$REF" = refs/heads/dev ]; }; then
-            # ReleaseSafe on main and manual runs comes from their full matrix.
+          elif [ "$EVENT" = schedule ] && [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt 90000 ]; then
+            # Nothing reached dev since the last night's run.
+            echo 'dev has no commit from the last 25 hours; skipping.'
+            printf '%s\n' windows=false linux=false macos=false release_tests=false full=true | tee -a "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = pull_request ]; then
+            # The full-ci label. ReleaseSafe on main, nightly and manual runs
+            # comes from their full matrix.
             choose --all --release-tests < /dev/null
             echo full=true | tee -a "$GITHUB_OUTPUT"
           else
@@ -98,8 +109,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests and dev run Debug; ReleaseSafe runs on main and manual runs.
-        optimize: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/dev')) && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+        # Pull requests run Debug; main, nightly and manual runs add ReleaseSafe.
+        optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
     env:
       # A cold Debug build fills about 24 GB of Zig cache, and the runner's
       # 60 GB data disk also holds the page file and the runner. Keep the
@@ -114,6 +125,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
       - name: Use cached Zig 0.17.0 and build caches
         run: |
           $ErrorActionPreference = 'Stop'
@@ -127,7 +139,7 @@ jobs:
         if: needs.changes.outputs.full != 'true'
         # Unit tests and the core window, input, text, drawing, view and
         # system smokes. Every other smoke, the packaging, GPU and optional
-        # dependency checks run on pushes to dev and with the full-ci label.
+        # dependency checks run nightly on dev, on main and with the full-ci label.
         run: |
           zig fmt --check build.zig build_support src examples tests tools
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -207,8 +219,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests and dev run Debug; ReleaseSafe runs on main and manual runs.
-        optimize: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/dev')) && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+        # Pull requests run Debug; main, nightly and manual runs add ReleaseSafe.
+        optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
     env:
       # Each job adds several GB to the shared Zig caches and the script wipes
       # them whole once they pass the cap, so a small cap made most jobs start
@@ -219,6 +231,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
       - name: Native GTK/Pango dependencies
         run: |
           sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri adwaita-icon-theme gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
@@ -230,7 +243,7 @@ jobs:
           sh scripts/ci-zig-cache.sh >> "$GITHUB_ENV"
       - name: Pull request core checks
         if: needs.changes.outputs.full != 'true'
-        # See the Windows job: the rest runs on dev and with full-ci.
+        # See the Windows job: the rest runs nightly, on main and with full-ci.
         env:
           G_DEBUG: fatal-criticals
           GDK_BACKEND: x11
@@ -394,8 +407,8 @@ jobs:
           retention-days: 7
 
   linux-release-tests:
-    # Unit tests built ReleaseSafe on every push to dev, and on pull requests
-    # labelled full-ci. Zig 0.17.0 has optimizer-only miscompiles (see
+    # Unit tests built ReleaseSafe on pull requests labelled full-ci (main,
+    # nightly and manual runs get them from the full Linux matrix). Zig 0.17.0 has optimizer-only miscompiles (see
     # zio.asUnsigned) that Debug runs miss, and main publishes ReleaseSafe
     # builds. A cold build takes about 45 minutes on the one Linux runner, so
     # running it for every pull request held every other Linux job back.
@@ -410,6 +423,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
       - name: Native GTK/Pango dependencies
         run: |
           sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri adwaita-icon-theme gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
@@ -435,12 +449,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests and dev run Debug; ReleaseSafe runs on main and manual runs.
-        optimize: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/dev')) && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+        # Pull requests run Debug; main, nightly and manual runs add ReleaseSafe.
+        optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
       - name: Use cached Zig 0.17.0 and build caches
         run: |
           xcrun --sdk macosx --show-sdk-path
@@ -512,6 +527,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
       - name: Use cached Zig 0.17.0, build caches and SDK
         run: |
           $ErrorActionPreference = 'Stop'
@@ -587,6 +603,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
       - name: Use cached Zig 0.17.0 and build caches
         run: |
           zig_bin=$(sh scripts/fetch-zig.sh)
