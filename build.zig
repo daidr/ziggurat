@@ -3407,6 +3407,8 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
         if (llvm) continue;
         const optimize = compile.root_module.optimize orelse .debug;
         if (optimize != .debug) continue;
+        // TEMP: locate a setup packaging failure with LLVM (stack trace).
+        if (std.mem.eql(u8, compile.name, "ziggurat")) continue;
         compile.use_llvm = false;
         for (compile.root_module.getGraph().modules) |module| for (module.link_objects.items) |*object| switch (object.*) {
             .system_lib => |library| if (std.ascii.eqlIgnoreCase(library.name, "uiautomationcore")) {

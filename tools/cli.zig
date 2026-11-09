@@ -192,6 +192,8 @@ pub fn main(process_init: std.process.Init.Minimal) void {
     defer arena.deinit();
     const code = run(arena.allocator(), process_init.args) catch |err| {
         std.debug.print("ziggurat: {s}\n", .{@errorName(err)});
+        // TEMP: locate a Windows-only failure.
+        if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
         std.process.exit(1);
     };
     std.process.exit(code);
