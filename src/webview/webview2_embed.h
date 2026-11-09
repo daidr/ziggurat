@@ -427,6 +427,7 @@ static void embed_close(State *s) {
 /* Places a page with an Embed: its clip, its frame and the size it lays out
    at, in the window's client pixels, its corners' radii in its own pixels
    from the top-left clockwise, and the boxes the content paints over it. */
+static HRESULT embed_apply(State *s);
 HRESULT zwv_embed_place(State *s,const float *clip,const float *frame,const float *layout,const float *radii,const float *covers,uint32_t cover_count,_Bool visible,_Bool wheel_to_container) {
     if (!s||s->closed) return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
     Embed *e=s->embed;
@@ -462,11 +463,20 @@ HRESULT zwv_embed_place(State *s,const float *clip,const float *frame,const floa
         /* A hidden page keeps no keyboard: it goes back to the window. */
         if (e->focused&&s->hwnd) SetFocus(s->hwnd);
     }
+    return embed_apply(s);
+}
+/* Gives the controller the page's placement: its bounds, which place what
+   WebView2 shows in windows of its own, and whether it shows. Before the
+   first placement the page stays hidden. */
+static HRESULT embed_apply(State *s) {
+    Embed *e=s->embed;
     ICoreWebView2Controller *controller=s->controller;
-    if (!controller) return S_OK;
+    if (!e||!controller) return S_OK;
+    float width=e->width, height=e->height;
+    BOOL show=e->placed&&e->shown;
     ICoreWebView2Controller_AddRef(controller);
     HRESULT hr=S_OK;
-    if (e->shown) {
+    if (show) {
         /* Its bounds, in the window's pixels, place what WebView2 shows in
            windows of its own, as a select's options. */
         RECT bounds={(LONG)floorf(e->at_x+0.5f),(LONG)floorf(e->at_y+0.5f),(LONG)floorf(e->at_x+0.5f)+(LONG)width,(LONG)floorf(e->at_y+0.5f)+(LONG)height};
@@ -474,7 +484,7 @@ HRESULT zwv_embed_place(State *s,const float *clip,const float *frame,const floa
         if (SUCCEEDED(ICoreWebView2Controller_get_Bounds(controller,&previous))&&!EqualRect(&previous,&bounds)) hr=ICoreWebView2Controller_put_Bounds(controller,bounds);
     }
     BOOL was=FALSE;
-    if (SUCCEEDED(hr)&&!s->closed&&SUCCEEDED(ICoreWebView2Controller_get_IsVisible(controller,&was))&&was!=e->shown) hr=ICoreWebView2Controller_put_IsVisible(controller,e->shown);
+    if (SUCCEEDED(hr)&&!s->closed&&SUCCEEDED(ICoreWebView2Controller_get_IsVisible(controller,&was))&&was!=show) hr=ICoreWebView2Controller_put_IsVisible(controller,show);
     if (SUCCEEDED(hr)&&s->closed) hr=HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
     ICoreWebView2Controller_Release(controller);
     return hr;

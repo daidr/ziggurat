@@ -572,7 +572,8 @@ HRESULT zwv_resize(State *s) {
     HRESULT hr=s->closed?HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE):S_OK;
     if (!s->closed && s->controller) {
         RECT rect;
-        if (s->has_viewport) hr=viewport_apply(s,s->viewport,s->viewport_visible);
+        if (s->embed) hr=embed_apply(s);
+        else if (s->has_viewport) hr=viewport_apply(s,s->viewport,s->viewport_visible);
         else if (GetClientRect(s->hwnd,&rect)) hr=viewport_apply(s,rect,TRUE);
         else hr=HRESULT_FROM_WIN32(GetLastError());
     }
@@ -812,10 +813,14 @@ static HRESULT controller_ready(State *s,HRESULT hr,ICoreWebView2Controller *con
     hr=ICoreWebView2Controller_put_ZoomFactor(controller,s->zoom);
     if (FAILED(hr)||s->closed) goto failed;
     RECT bounds;
-    if (s->has_viewport) bounds=s->viewport;
-    else if (!GetClientRect(s->hwnd,&bounds)) { hr=HRESULT_FROM_WIN32(GetLastError());goto failed; }
-    if (s->closed) goto done;
-    hr=viewport_apply(s,bounds,s->has_viewport?s->viewport_visible:TRUE);
+    /* A composed page is placed by its region. */
+    if (s->embed) hr=embed_apply(s);
+    else {
+        if (s->has_viewport) bounds=s->viewport;
+        else if (!GetClientRect(s->hwnd,&bounds)) { hr=HRESULT_FROM_WIN32(GetLastError());goto failed; }
+        if (s->closed) goto done;
+        hr=viewport_apply(s,bounds,s->has_viewport?s->viewport_visible:TRUE);
+    }
     if (FAILED(hr)||s->closed) goto failed;
     hr=prepare_permissions(s);
     if (FAILED(hr)) goto failed;
