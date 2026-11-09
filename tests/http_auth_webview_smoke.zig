@@ -156,6 +156,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try app.run();
     watchdog.stop();
     if (probe.failure) |err| return err;
+    if (watchdog.expired or probe.step != .done or probe.challenges != 2 or probe.certificates != 2)
+        std.debug.print("http auth ended: expired {} step {s} challenges {d} certificates {d}\n", .{ watchdog.expired, @tagName(probe.step), probe.challenges, probe.certificates });
     try std.testing.expect(!watchdog.expired and probe.step == .done and probe.challenges == 2 and probe.certificates == 2);
     std.debug.print("http auth: signed in, refusal without credentials, certificate refused then allowed by its DER\n", .{});
 }
