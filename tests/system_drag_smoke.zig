@@ -278,9 +278,14 @@ const Smoke = struct {
         var idle: u32 = 0;
         while (!self.stop.load(.acquire)) {
             zio.sleep(25 * std.time.ns_per_ms);
-            self.app.post(.{ .context = self, .call = tick }) catch |err| {
-                std.debug.print("drag smoke: ticker stopped: {s}\n", .{@errorName(err)});
-                return;
+            // A full queue means the UI thread is not taking posts; the
+            // report below names where it stopped.
+            self.app.post(.{ .context = self, .call = tick }) catch |err| switch (err) {
+                error.Full => {},
+                else => {
+                    std.debug.print("drag smoke: ticker stopped: {s}\n", .{@errorName(err)});
+                    return;
+                },
             };
             // The stuck report runs on the UI thread; this one names where
             // that thread stopped taking ticks.
@@ -290,7 +295,7 @@ const Smoke = struct {
                 idle = 0;
             } else {
                 idle += 1;
-                if (idle == 400) std.debug.print("drag smoke: no tick for 10s in round {s} at {s}; source {s}, native {}, held {}\n", .{ @tagName(self.round), @tagName(self.stage), @tagName(self.source.state), @hasField(@TypeOf(self.source.native), "drop_source") and nativeStarted(&self.source), self.held });
+                if (idle == 400) std.debug.print("drag smoke: no tick for 10s after {d} in round {s} at {s}; source {s}, native {}, held {}\n", .{ ticks, @tagName(self.round), @tagName(self.stage), @tagName(self.source.state), @hasField(@TypeOf(self.source.native), "drop_source") and nativeStarted(&self.source), self.held });
             }
         }
     }

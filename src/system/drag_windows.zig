@@ -66,6 +66,9 @@ fn run(source: *drag.Source) void {
     _ = c.ReleaseCapture();
     var effect: c.DWORD = c.DROPEFFECT_NONE;
     const allowed: c.DWORD = (if (source.operations.copy) @as(c.DWORD, c.DROPEFFECT_COPY) else 0) | (if (source.operations.move) @as(c.DWORD, c.DROPEFFECT_MOVE) else 0);
+    // This loop starts from a helper message, after the main loop may have
+    // dropped this turn's wake message.
+    source.window.app.enterNativeLoop();
     const hr = c.DoDragDrop(@ptrCast(data), @ptrCast(drop_source), allowed, &effect);
     data.source = null;
     // Cancellation or shutdown may already have finished this drag, and its

@@ -921,6 +921,12 @@ pub const App = struct {
     pub fn post(self: *App, task: Task) !void {
         if (try self.queue.post(task)) backend.wake(self);
     }
+    /// Call on the main thread just before entering a system modal loop
+    /// that no window message announces (OLE drag tracking, for one), so
+    /// posted tasks keep being dispatched through it.
+    pub fn enterNativeLoop(self: *App) void {
+        if (comptime @hasDecl(backend, "enterNativeLoop")) backend.enterNativeLoop(self);
+    }
     /// Enqueue final native release without allocation or mailbox capacity.
     /// Callbacks cannot rely on detached Window/Content storage or block/retry.
     pub fn deferCleanup(self: *App, node: *Cleanup) void {

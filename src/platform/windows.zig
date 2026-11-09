@@ -567,6 +567,11 @@ pub fn wake(app: *core.App) void {
         _ = c.PostMessageW(app.native.dispatcher, wake_message, 0, 0);
     }
 }
+/// A native modal loop dispatches only messages; re-post a wake the main
+/// loop may have dropped this turn while answering the kernel event.
+pub fn enterNativeLoop(app: *core.App) void {
+    if (app.native.wake_pending.load(.acquire)) _ = c.PostMessageW(app.native.dispatcher, wake_message, 0, 0);
+}
 fn consumeWake(app: *core.App) void {
     // Reset before publishing the empty wake flag; producers then either join this
     // dispatch or signal a fresh event. Reversing these operations can lose a wake.
@@ -1390,8 +1395,7 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
         // The main loop drops queued wake messages and answers the kernel
         // event instead. A wake still pending when a native loop starts may
         // have had its message dropped this turn; the loop only sees messages.
-        const app = window.window.app;
-        if (app.native.wake_pending.load(.acquire)) _ = c.PostMessageW(app.native.dispatcher, wake_message, 0, 0);
+        enterNativeLoop(window.window.app);
     }
     if (message == c.WM_EXITSIZEMOVE or message == c.WM_EXITMENULOOP) {
         if (window.native.native_loop_depth != 0) window.native.native_loop_depth -= 1;
