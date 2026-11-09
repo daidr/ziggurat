@@ -336,7 +336,10 @@ pub const Handler = struct {
             if (!self.composing) self.session_epoch = std.math.add(u64, self.session_epoch, 1) catch return error.IdExhausted;
             self.composing = true;
             sink.emit(sink.context, .{ .text_preedit = .{ .text = text, .selection_start = selected, .selection_end = selected } });
-        } else if (flags == 0) {
+        } else if (flags & (c.GCS_RESULTSTR | c.GCS_COMPSTR) == 0 and c.ImmGetCompositionStringW(context, c.GCS_COMPSTR, null, 0) == 0) {
+            // A composition given up, as Microsoft's Japanese IME does on Esc:
+            // neither string, rather than an empty GCS_COMPSTR, before
+            // WM_IME_ENDCOMPOSITION, which would keep the marked text.
             self.composing = false;
             sink.emit(sink.context, .text_preedit_cancel);
         }

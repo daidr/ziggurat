@@ -10,15 +10,16 @@
 //! the controls over it take the pointer there, and the page takes no
 //! pointer behind a modal dialog. On Linux the page is under the native UI,
 //! which is cut away where the page shows; on macOS the page is over it and
-//! is masked where the native UI shows. On Windows the page is a native
-//! child over the window and native UI painted where it shows stays under
-//! it. A page is cut to its leaf's corner radius, and a page the poses
+//! is masked where the native UI shows; on Windows the page composes under
+//! the window's frames, which leave a hole for it where it shows, and the
+//! window sends the page the pointer outside what paints over it. A page
+//! is cut to its leaf's corner radius, and a page the poses
 //! around it scale shows scaled at the size its leaf was arranged at, as a
 //! picture of it, rather than laid out again.
 //!
 //! The leaf is a Tab stop: Tab moving the focus to it gives the page the
-//! keyboard at its first element, Shift+Tab at its last (Linux and macOS),
-//! and Tab past the page's other end moves the focus on from the leaf.
+//! keyboard at its first element, Shift+Tab at its last, and Tab past the
+//! page's other end moves the focus on from the leaf.
 //! Assistive technology finds the page's tree inside the leaf's semantic
 //! node.
 const std = @import("std");
@@ -199,6 +200,9 @@ pub const WebView = struct {
             if (box.width <= 0 or box.height <= 0) return;
         }
         self.placed = placed;
+        // On Windows the page composes under the window's frames, which
+        // leave a hole for it here, under what paints after the leaf.
+        if (@import("builtin").os.tag == .windows) frame.composedHole(placed.bounds, placed.radii[0] * placed.scale()[0]);
         // The page's tree is inside this node.
         try frame.semantic(.{ .id = id, .parent = self.about.parent, .role = .group, .name = self.about.name, .description = self.about.description, .bounds = placed.shown(), .native = self.page.accessibleNative() });
     }

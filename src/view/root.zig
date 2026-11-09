@@ -622,6 +622,27 @@ pub const AccessRole = enum {
     deletion,
     /// Content inserted, as a diff's added line: role=insertion.
     insertion,
+    /// The content of a tab, as role=tabpanel: name it after its tab with
+    /// `Style.name`, and have the tab point to it with `controls`, so that
+    /// screen readers move between a tab and its content.
+    tab_panel,
+    /// The main content of a window, as HTML's main: what the window is
+    /// for, apart from its bars and sidebars. A window has one, and it
+    /// needs no name. Screen readers list it among the window's landmarks
+    /// and jump to it.
+    main,
+    /// The top bar of a window, with the app's name or the window's title,
+    /// as a page's header: role=banner. A window has at most one.
+    banner,
+    /// Information about the content of a window, as its footer or status
+    /// area (a document's word count, its author, a copyright), as a page's
+    /// footer: role=contentinfo. A window has at most one.
+    content_info,
+    /// Content that completes the main content and makes sense on its
+    /// own, as a sidebar of related items or an inspector, as HTML's aside:
+    /// role=complementary. Name it with `Style.name` when a window has
+    /// several.
+    complementary,
     fn semantic(self: AccessRole) ui.accessibility.Role {
         return switch (self) {
             .group => .group,
@@ -640,6 +661,11 @@ pub const AccessRole = enum {
             .cell => .cell,
             .deletion => .deletion,
             .insertion => .insertion,
+            .tab_panel => .tab_panel,
+            .main => .main,
+            .banner => .banner,
+            .content_info => .content_info,
+            .complementary => .complementary,
         };
     }
 };
