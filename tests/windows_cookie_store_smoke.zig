@@ -227,7 +227,7 @@ const State = struct {
             },
             5 => try self.expect(result, "lasting,secure,session"),
             6 => {
-                try self.expect(result, "page,session");
+                try self.expect(result, "page,secure,session");
                 if (!find(result.cookies.rows, "page").?.http_only) return error.PageCookieNotHttpOnly;
             },
             8 => try self.expect(result, "page,secure"),
