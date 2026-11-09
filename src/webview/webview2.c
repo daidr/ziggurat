@@ -126,6 +126,10 @@ struct State {
     BOOL facts_added;
     AuthOffer auth;
     CertificateOffer certificate_offer;
+    /* The app answered a sign-in to a remote page: WebView2 sends the
+       credentials as a new navigation to the same document, which the next
+       NavigationStarting lets through once. */
+    BOOL auth_retry;
     /* 1 swipe between pages, 2 pinch zoom; both off unless asked. */
     uint32_t gestures;
     /* 0 no menu, 1 the engine's, 2 the app's offer changes it. */
@@ -912,10 +916,12 @@ static HRESULT STDMETHODCALLTYPE navigation_invoke(ICoreWebView2NavigationStarti
         (wcscmp(uri, L"about:blank") == 0 || wcsncmp(uri, L"data:text/html;", 15) == 0)));
     BOOL bounded = bounded_uri(uri);
     BOOL html = !s->initial_url && (initial || refresh);
+    BOOL sign_in = s->auth_retry && !redirected && uri && s->document_source && remote_url_equal(uri,s->document_source,FALSE);
+    s->auth_retry = FALSE;
     BOOL remote_allowed=FALSE;
     if (s->remote.enabled && (remote_grants(&s->remote,uri)&REMOTE_NAVIGATE)) {
         remote_allowed=redirected?(s->remote.allow_redirects && s->has_document && s->navigating && s->navigation_id==id):
-            (initial || explicit_url || history || refresh || s->remote.allow_script_navigation);
+            (initial || explicit_url || history || refresh || sign_in || s->remote.allow_script_navigation);
     }
     if (!s->closed && !s->recovering && initializers_allow_navigation(s) && SUCCEEDED(hr) && uri && (bounded || html) &&
         (s->remote.enabled?remote_allowed:((!s->custom_site||local) && (initial || explicit_url || refresh || (local && (s->allow_local_navigation || history)))))) {
@@ -1247,14 +1253,18 @@ HRESULT zwv_auth_answer(void *call_pointer,const WCHAR *user,const WCHAR *passwo
 static HRESULT STDMETHODCALLTYPE authentication_invoke(ICoreWebView2BasicAuthenticationRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2BasicAuthenticationRequestedEventArgs *args) {
     (void)sender; State *s=((AuthenticationHandler *)p)->state; retain(s);
     AuthCall call={args,FALSE};
+    BOOL document=FALSE;
     if (!s->closed&&s->auth) {
         WCHAR *uri=NULL,*challenge=NULL;
         if (SUCCEEDED(ICoreWebView2BasicAuthenticationRequestedEventArgs_get_Uri(args,&uri))&&uri&&
-            SUCCEEDED(ICoreWebView2BasicAuthenticationRequestedEventArgs_get_Challenge(args,&challenge))&&challenge&&!s->closed)
+            SUCCEEDED(ICoreWebView2BasicAuthenticationRequestedEventArgs_get_Challenge(args,&challenge))&&challenge&&!s->closed) {
+            document=s->remote.enabled&&s->document_source&&remote_url_equal(uri,s->document_source,FALSE);
             s->auth(s->context,uri,challenge,&call);
+        }
         CoTaskMemFree(uri);CoTaskMemFree(challenge);
     }
     if (!call.answered) ICoreWebView2BasicAuthenticationRequestedEventArgs_put_Cancel(args,TRUE);
+    else if (document) s->auth_retry=TRUE;
     release(s); return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE certificate_invoke(ICoreWebView2ClientCertificateRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2ClientCertificateRequestedEventArgs *args) {
