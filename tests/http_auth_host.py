@@ -91,6 +91,8 @@ def main():
         print("http auth smoke timed out", file=sys.stderr)
         return 1
     if code != 0:
+        with plain.lock, secure.lock:
+            print("http auth smoke failed; HTTP saw %r, HTTPS saw %r" % (plain.seen, secure.seen), file=sys.stderr)
         return code
     with plain.lock, secure.lock:
         if not any(path == "/private" and authorized for path, authorized in plain.seen):

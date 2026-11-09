@@ -88,6 +88,7 @@ const Probe = struct {
         switch (input) {
             .title_changed => |change| {
                 const title = change.title orelse return;
+                if (self.step == .welcome and !std.mem.eql(u8, title, "welcome")) std.debug.print("http auth title while signing in: {s}\n", .{title});
                 if (std.mem.eql(u8, title, "welcome") and self.step == .welcome) {
                     if (self.challenges != 1) return self.fail(error.ChallengeCount);
                     self.step = .denied;
@@ -103,6 +104,7 @@ const Probe = struct {
                 }
             },
             .completed => |info| {
+                if (self.step == .welcome) std.debug.print("http auth load while signing in: success {} status {d}\n", .{ info.success, info.native_status });
                 if (self.step != .refused or info.success) return;
                 if (self.certificates != 1) {
                     std.debug.print("refused load: status {d}, asked {d} times\n", .{ info.native_status, self.certificates });
