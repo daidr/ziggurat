@@ -207,6 +207,39 @@ const Grid = struct {
     }
 };
 
+const Landmarks = struct {
+    fn build(_: *Landmarks, v: *View) anyerror!void {
+        try v.column(.{ .key = 1, .role = .banner, .name = "Title bar" });
+        try v.text("Notes", .{});
+        try v.end();
+        try v.column(.{ .key = 2, .role = .main });
+        try v.column(.{ .key = 3, .role = .tab_panel, .name = "General" });
+        try v.text("General settings", .{});
+        try v.end();
+        try v.end();
+        try v.column(.{ .key = 4, .role = .complementary, .name = "Inspector" });
+        try v.end();
+        try v.column(.{ .key = 5, .role = .content_info });
+        try v.text("42 words", .{});
+        try v.end();
+    }
+};
+
+test "a window tells its main, banner, content info and complementary landmarks and a tab's panel" {
+    var storage: Storage = .{};
+    var app: Landmarks = .{};
+    var h = Harness.init(&app, Landmarks.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    h.recordSemantics(&context) catch |err| if (err == error.SkipZigTest) return error.SkipZigTest else return err;
+    try h.render();
+    try testing.expectEqual(ui.accessibility.Role.banner, (try h.accessible(.{ .key = 1 })).role());
+    try testing.expectEqual(ui.accessibility.Role.main, (try h.accessible(.{ .key = 2 })).role());
+    try testing.expectEqual(ui.accessibility.Role.tab_panel, (try h.accessible(.{ .key = 3 })).role());
+    try testing.expectEqual(ui.accessibility.Role.complementary, (try h.accessible(.{ .key = 4 })).role());
+    try testing.expectEqual(ui.accessibility.Role.content_info, (try h.accessible(.{ .key = 5 })).role());
+}
+
 test "a grid of the application's own tells its rows and columns, choices, relations and orientation" {
     var storage: Storage = .{};
     var app: Grid = .{};

@@ -19,6 +19,7 @@ pub const TextInputModeResult = enum { applied, superseded };
 pub const TextInputStamp = struct { mode: TextInputMode, epoch: u64 };
 
 pub const windows_text = if (builtin.os.tag == .windows) @import("platform/windows_text.zig") else struct {};
+pub const windows_pointer = if (builtin.os.tag == .windows) @import("platform/windows_pointer.zig") else struct {};
 
 pub const AppOptions = struct {
     /// Borrowed until deinit. Framework reports run on the owner thread.
@@ -1620,8 +1621,9 @@ pub const Window = struct {
     /// presses (`PointerSample`), read in the event's callback: macOS tells
     /// a tablet's pen and its pressure, and a touch, from the mouse event's
     /// subtype, Linux from GDK's source device and its pressure axis,
-    /// browsers from `PointerEvent`. Windows, and a platform that tells
-    /// none, report a mouse.
+    /// Windows from the mouse messages it makes of a pen's or a finger's
+    /// and the WM_POINTER messages before them, browsers from
+    /// `PointerEvent`. A platform that tells none reports a mouse.
     pub fn pointerSample(self: Window) PointerSample {
         const scope = self.beginCallback() orelse return .{};
         defer scope.end();
@@ -3100,6 +3102,7 @@ test {
     _ = registry;
     _ = diagnostics;
     _ = windows_text;
+    _ = windows_pointer;
     _ = text;
     _ = composition;
     _ = @import("text_client_test.zig");

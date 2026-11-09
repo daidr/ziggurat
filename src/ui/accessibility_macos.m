@@ -31,7 +31,8 @@ enum {
     ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU,
     ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT,
     ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING,
-    ROLE_GRID, ROLE_TREE_GRID, ROLE_DELETION, ROLE_INSERTION, ROLE_COUNT
+    ROLE_GRID, ROLE_TREE_GRID, ROLE_DELETION, ROLE_INSERTION, ROLE_TAB_PANEL, ROLE_MAIN, ROLE_BANNER,
+    ROLE_CONTENT_INFO, ROLE_COMPLEMENTARY, ROLE_COUNT
 };
 /* NativeNode flags, as accessibility.zig packs them. */
 enum {
@@ -201,6 +202,13 @@ static NSAccessibilityRole role_of(const NativeNode *n, NSAccessibilitySubrole *
     case ROLE_GRID: case ROLE_TREE_GRID: return NSAccessibilityTableRole;
     case ROLE_DELETION: *subrole = @"AXDeleteStyleGroup"; return NSAccessibilityGroupRole;
     case ROLE_INSERTION: *subrole = @"AXInsertStyleGroup"; return NSAccessibilityGroupRole;
+    /* A tab panel is a group, which its role description names. */
+    case ROLE_TAB_PANEL: return NSAccessibilityGroupRole;
+    /* The other landmarks, as WebKit's. */
+    case ROLE_MAIN: *subrole = @"AXLandmarkMain"; return NSAccessibilityGroupRole;
+    case ROLE_BANNER: *subrole = @"AXLandmarkBanner"; return NSAccessibilityGroupRole;
+    case ROLE_CONTENT_INFO: *subrole = @"AXLandmarkContentInfo"; return NSAccessibilityGroupRole;
+    case ROLE_COMPLEMENTARY: *subrole = @"AXLandmarkComplementary"; return NSAccessibilityGroupRole;
     default: return NSAccessibilityGroupRole;
     }
 }
@@ -997,7 +1005,10 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
         NSString *name = text_at(text, text_len, n->name_start, n->name_len);
         NSString *value = text_at(text, text_len, n->value_start, n->value_len);
         NSString *description = text_at(text, text_len, n->description_start, n->description_len);
-        el->role_description = n->role_description_len ? text_at(text, text_len, n->role_description_start, n->role_description_len) : nil;
+        /* What the app calls the role, else, for a role AppKit has no
+           name for, the name WAI-ARIA gives it. */
+        el->role_description = n->role_description_len ? text_at(text, text_len, n->role_description_start, n->role_description_len) :
+            n->role == ROLE_TAB_PANEL ? @"tab panel" : nil;
         el->key_shortcuts = n->key_shortcuts_len ? text_at(text, text_len, n->key_shortcuts_start, n->key_shortcuts_len) : nil;
         el->value_text = n->value_text_len ? text_at(text, text_len, n->value_text_start, n->value_text_len) : nil;
         el->published_at = i;

@@ -24,7 +24,8 @@ enum {
     ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU,
     ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT,
     ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING,
-    ROLE_GRID, ROLE_TREE_GRID, ROLE_DELETION, ROLE_INSERTION, ROLE_COUNT
+    ROLE_GRID, ROLE_TREE_GRID, ROLE_DELETION, ROLE_INSERTION, ROLE_TAB_PANEL, ROLE_MAIN, ROLE_BANNER,
+    ROLE_CONTENT_INFO, ROLE_COMPLEMENTARY, ROLE_COUNT
 };
 /* NativeNode flags, as accessibility.zig packs them. */
 enum {
@@ -225,6 +226,10 @@ static AtkRole atk_role_of(const NativeNode *n) {
     case ROLE_TREE_GRID: return ATK_ROLE_TREE_TABLE;
     case ROLE_DELETION: return ATK_ROLE_CONTENT_DELETION;
     case ROLE_INSERTION: return ATK_ROLE_CONTENT_INSERTION;
+    /* A tab panel is a scroll pane, as Core-AAM maps it. */
+    case ROLE_TAB_PANEL: return ATK_ROLE_SCROLL_PANE;
+    /* The other landmarks, with xml-roles saying which. */
+    case ROLE_MAIN: case ROLE_BANNER: case ROLE_CONTENT_INFO: case ROLE_COMPLEMENTARY: return ATK_ROLE_LANDMARK;
     default: return ATK_ROLE_PANEL;
     }
 }
@@ -592,7 +597,9 @@ static AtkAttributeSet *node_attributes(AtkObject *obj) {
        does not say all of. */
     const char *xml = n->role == ROLE_NAVIGATION ? "navigation" : n->role == ROLE_SEARCH ? "search" : n->role == ROLE_REGION ? "region" :
         n->role == ROLE_LOG ? "log" : n->role == ROLE_TIMER ? "timer" : n->role == ROLE_ALERT ? "alert" : n->role == ROLE_STATUS ? "status" :
-        n->role == ROLE_GRID ? "grid" : n->role == ROLE_TREE_GRID ? "treegrid" : (textual(n->role) && n->states & SEARCH) ? "searchbox" : NULL;
+        n->role == ROLE_GRID ? "grid" : n->role == ROLE_TREE_GRID ? "treegrid" : n->role == ROLE_TAB_PANEL ? "tabpanel" :
+        n->role == ROLE_MAIN ? "main" : n->role == ROLE_BANNER ? "banner" : n->role == ROLE_CONTENT_INFO ? "contentinfo" :
+        n->role == ROLE_COMPLEMENTARY ? "complementary" : (textual(n->role) && n->states & SEARCH) ? "searchbox" : NULL;
     if (xml) list = add_attribute(list, "xml-roles", g_strdup(xml));
     /* How a live region and what is inside it are read, as Chromium's say
        aria-live, aria-atomic and aria-relevant. */
