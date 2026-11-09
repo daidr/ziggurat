@@ -279,13 +279,14 @@ pub fn build(b: *std.Build) void {
     const sqlite_tests = addTest(b, .{ .root_module = sqlite });
     b.step("test-sqlite", "Run SQLite connection, binding, row, transaction, migration and thread tests (fetch source first)").dependOn(&b.addRunArtifact(sqlite_tests).step);
     const wake = b.addModule("ziggurat_wake", .{ .root_source_file = b.path("src/wake/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
-    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) {
         wake.link_libc = true;
         const native = native_support.add(b, wake, "wake-native", "src/wake/native.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         if (target.result.os.tag == .linux) {
             native.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .force });
             wake.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .force });
         }
+        if (target.result.os.tag == .macos) native_support.linkFrameworks(b, wake, &.{"CoreFoundation"});
         addSmoke(b, "smoke-wake", "tests/wake_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_wake", .module = wake },
@@ -1984,6 +1985,15 @@ pub fn build(b: *std.Build) void {
         native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "QuartzCore", "CoreGraphics", "Foundation", "CoreFoundation", "Security" });
         view_tests = addTest(b, .{ .root_module = view });
         _ = b.step("webview-runtime", "Use the system WKWebView");
+        _ = addExample(b, "web-counter", "examples/web_counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        _ = addExample(b, "rectangular-pages", "examples/rectangular_pages.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-webview-macos", "tests/macos_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -3206,6 +3216,11 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_system_video_tests.step);
         b.step("test-video", "Play a clip with the system's media engine: frames in order, its end, seeks (skips without an engine)").dependOn(&run_system_video_tests.step);
     }
+    const chart_view = b.addModule("ziggurat_chart_view", .{ .root_source_file = b.path("src/chart/view.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
+        .{ .name = "ziggurat_chart", .module = chart },
+    } });
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         const ui_tests = addTest(b, .{ .root_module = ui });
         check.dependOn(&ui_tests.step);
@@ -3284,11 +3299,6 @@ pub fn build(b: *std.Build) void {
         const run_markdown_view_tests = b.addRunArtifact(markdown_view_tests);
         test_step.dependOn(&run_markdown_view_tests.step);
         b.step("test-markdown-view", "Run Markdown to declarative view mapping, wrapping and activation tests").dependOn(&run_markdown_view_tests.step);
-        const chart_view = b.addModule("ziggurat_chart_view", .{ .root_source_file = b.path("src/chart/view.zig"), .target = target, .optimize = optimize, .imports = &.{
-            .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
-            .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
-            .{ .name = "ziggurat_chart", .module = chart },
-        } });
         const chart_view_tests = addTest(b, .{ .root_module = chart_view });
         check.dependOn(&chart_view_tests.step);
         const run_chart_view_tests = b.addRunArtifact(chart_view_tests);
@@ -3630,7 +3640,7 @@ const app_examples = [_]Example{
 /// Registers every application example under `run-<name>` and `example-<name>`, and compiles them in `check`.
 /// Examples use only public modules; WebView examples require `-Dwebview=true`.
 fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    if (target.result.os.tag != .windows and target.result.os.tag != .linux and target.result.cpu.arch != .wasm32) return;
+    if (target.result.os.tag != .windows and target.result.os.tag != .linux and target.result.os.tag != .macos and target.result.cpu.arch != .wasm32) return;
     const all = b.step("examples", "Compile every application example");
     const tests = b.step("test-examples", "Run the headless view tests inside the application examples");
     b.top_level_steps.get("test").?.step.dependOn(tests);

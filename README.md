@@ -45,6 +45,15 @@ zig build run-counter
 
 WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.sh`。安装依赖、跨目标编译与真实桌面运行是不同验证层次。
 
+macOS 15.0 及以上需要 Xcode 命令行工具（`xcode-select --install`）；`scripts/fetch-zig.sh` 打印一个校验过的 Zig 0.17.0 路径：
+
+```sh
+ZIG=$(sh scripts/fetch-zig.sh)
+$ZIG build run-gallery
+$ZIG build run-counter -Dgpu=true -Daccessibility=true   # Metal 与 NSAccessibility
+$ZIG build run-hybrid -Dwebview=true                     # 系统 WKWebView
+```
+
 ## 模块
 
 | 模块 | 职责 | 实际平台依赖 |

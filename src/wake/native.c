@@ -33,6 +33,83 @@ void zgwake_close(ZWake *state) {
 ZWakeCounts zgwake_counts(void) {
     return (ZWakeCounts){ (uint32_t)InterlockedCompareExchange(&states, 0, 0), (uint32_t)InterlockedCompareExchange(&handles, 0, 0), 0, 0 };
 }
+#elif defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <stdatomic.h>
+/* One repeating CFRunLoopTimer on the main run loop's common modes per owner,
+   with an interval no deadline reaches: arming moves its next fire date and
+   firing or cancelling parks it far away again, so it never repeats. */
+typedef struct {
+    CFRunLoopTimerRef timer;
+    void *context;
+    ZWakeCallback callback;
+    unsigned callbacks;
+    CFAbsoluteTime due;
+    int armed;
+    int closed;
+} ZWake;
+static atomic_uint states, sources, dispatches;
+static const CFTimeInterval parked = 1.0e10;
+static void release_state(ZWake *state) { atomic_fetch_sub(&states, 1); free(state); }
+static void ready(CFRunLoopTimerRef timer, void *data) {
+    ZWake *state = data;
+    /* A cancel earlier in the same run loop pass wins over a fire the run
+       loop had already selected. */
+    if (state->closed || !state->armed) return;
+    /* The run loop schedules on its own clock and can call a hair before the
+       deadline by this one. Moving the date inside the callout keeps it: the
+       run loop only advances a repeating timer whose date the callout left. */
+    if (CFAbsoluteTimeGetCurrent() < state->due) {
+        CFRunLoopTimerSetNextFireDate(timer, state->due);
+        return;
+    }
+    state->armed = 0;
+    CFRunLoopTimerSetNextFireDate(timer, CFAbsoluteTimeGetCurrent() + parked);
+    state->callbacks++;
+    atomic_fetch_add(&dispatches, 1);
+    ZWakeCallback callback = state->callback;
+    void *context = state->context;
+    callback(context);
+    state->callbacks--;
+    atomic_fetch_sub(&dispatches, 1);
+    if (state->closed && !state->callbacks) release_state(state);
+}
+void *zgwake_create(void *context, ZWakeCallback callback) {
+    ZWake *state = calloc(1, sizeof(*state));
+    if (!state) return NULL;
+    CFRunLoopTimerContext timer_context = { 0, state, NULL, NULL, NULL };
+    state->timer = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent() + parked, parked, 0, 0, ready, &timer_context);
+    if (!state->timer) { free(state); return NULL; }
+    atomic_fetch_add(&sources, 1); atomic_fetch_add(&states, 1);
+    state->context = context; state->callback = callback;
+    CFRunLoopAddTimer(CFRunLoopGetMain(), state->timer, kCFRunLoopCommonModes);
+    return state;
+}
+void *zgwake_handle(ZWake *state) { (void)state; return NULL; }
+int zgwake_arm(ZWake *state, uint64_t nanoseconds) {
+    if (state->closed) return 0;
+    const CFAbsoluteTime due = CFAbsoluteTimeGetCurrent() + (double)nanoseconds / 1.0e9;
+    state->due = due;
+    state->armed = 1;
+    CFRunLoopTimerSetNextFireDate(state->timer, due);
+    return 1;
+}
+void zgwake_cancel(ZWake *state) {
+    if (state->closed) return;
+    state->armed = 0;
+    CFRunLoopTimerSetNextFireDate(state->timer, CFAbsoluteTimeGetCurrent() + parked);
+}
+void zgwake_close(ZWake *state) {
+    state->closed = 1; state->armed = 0; state->context = NULL; state->callback = NULL;
+    CFRunLoopTimerRef timer = state->timer; state->timer = NULL;
+    CFRunLoopTimerInvalidate(timer);
+    CFRelease(timer);
+    atomic_fetch_sub(&sources, 1);
+    if (!state->callbacks) release_state(state);
+}
+ZWakeCounts zgwake_counts(void) {
+    return (ZWakeCounts){ atomic_load(&states), 0, atomic_load(&sources), atomic_load(&dispatches) };
+}
 #else
 #include <glib.h>
 typedef struct {

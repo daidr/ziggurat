@@ -10,7 +10,7 @@ pub const Stats = struct { armed: bool, generation: u64, fires: u64, stopped: bo
 pub const NativeCounts = extern struct { states: u32 = 0, handles: u32 = 0, sources: u32 = 0, dispatches: u32 = 0 };
 pub fn nativeCounts() NativeCounts {
     if (web) return .{ .states = browser.states, .sources = browser.states };
-    if (builtin.os.tag != .windows and builtin.os.tag != .linux) return .{};
+    if (builtin.os.tag != .windows and builtin.os.tag != .linux and builtin.os.tag != .macos) return .{};
     return zgwake_counts();
 }
 
@@ -19,7 +19,7 @@ pub fn nativeCounts() NativeCounts {
 pub const OneShot = opaque {
     pub fn create(app: *z.App, allocator: std.mem.Allocator, callback: Callback, options: Options) !*OneShot {
         if (std.Thread.getCurrentId() != app.owner) return error.WrongThread;
-        if (!web and builtin.os.tag != .windows and builtin.os.tag != .linux) return error.UnsupportedPlatform;
+        if (!web and builtin.os.tag != .windows and builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedPlatform;
         const scope = app.beginCallback() orelse return error.Closed;
         defer scope.end();
         const self = try allocator.create(State);
