@@ -21,6 +21,11 @@ const FakeApp = struct {
     path: []const u8 = "",
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = .init(false),
+    /// Each connection has its own thread, so one the server never sees
+    /// end cannot keep later commands waiting, and deinit shuts them all
+    /// down rather than waiting on a read that never ends.
+    lock: zio.Mutex = .{},
+    connections: std.ArrayList(Connection) = .empty,
     /// Idle requests answered; a window that keeps drawing never settles.
     idles: u32 = 0,
     drawing: bool = false,
@@ -90,17 +95,39 @@ const FakeApp = struct {
         return "!" ++ code ++ ":" ++ message;
     }
 
+    const Connection = struct { stream: std.Io.net.Stream, thread: std.Thread };
+
     fn serve(self: *FakeApp) void {
         const io = zio.io();
         while (!self.stop.load(.acquire)) {
-            var stream = self.server.accept(io) catch return;
-            defer stream.close(io);
-            var read_buffer: [1 << 16]u8 = undefined;
-            var reader = stream.reader(io, &read_buffer);
-            while (true) {
-                const whole = reader.interface.takeDelimiterInclusive('\n') catch break;
-                self.handle(&stream, whole[0 .. whole.len - 1]) catch break;
+            const stream = self.server.accept(io) catch continue;
+            if (self.stop.load(.acquire)) {
+                stream.close(io);
+                return;
             }
+            self.lock.lock();
+            defer self.lock.unlock();
+            self.connections.ensureUnusedCapacity(self.gpa, 1) catch {
+                stream.close(io);
+                continue;
+            };
+            const thread = std.Thread.spawn(.{}, converse, .{ self, stream }) catch {
+                stream.close(io);
+                continue;
+            };
+            self.connections.appendAssumeCapacity(.{ .stream = stream, .thread = thread });
+        }
+    }
+
+    fn converse(self: *FakeApp, stream: std.Io.net.Stream) void {
+        var own = stream;
+        var read_buffer: [1 << 16]u8 = undefined;
+        var reader = own.reader(zio.io(), &read_buffer);
+        while (true) {
+            const whole = reader.interface.takeDelimiterInclusive('\n') catch return;
+            self.lock.lock();
+            defer self.lock.unlock();
+            self.handle(&own, whole[0 .. whole.len - 1]) catch return;
         }
     }
 
@@ -132,6 +159,13 @@ const FakeApp = struct {
             if (address.connect(zio.io())) |stream| stream.close(zio.io()) else |_| {}
         } else |_| {}
         if (self.thread) |thread| thread.join();
+        // Ends every read still waiting, whether or not its command closed.
+        for (self.connections.items) |connection| connection.stream.shutdown(zio.io(), .both) catch {};
+        for (self.connections.items) |connection| {
+            connection.thread.join();
+            connection.stream.close(zio.io());
+        }
+        self.connections.deinit(self.gpa);
         self.server.deinit(zio.io());
         self.arena_state.deinit();
     }

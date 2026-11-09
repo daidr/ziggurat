@@ -248,9 +248,17 @@ pub fn sleep(ns: u64) void {
     const value = io();
     const protection = value.swapCancelProtection(.blocked);
     defer _ = value.swapCancelProtection(protection);
-    value.sleep(.fromNanoseconds(ns), .awake) catch |err| switch (err) {
-        error.Canceled => unreachable,
-    };
+    // Windows can end a relative wait a little before the performance
+    // counter has moved by the whole interval: wait out what is left, by the
+    // clock Instant and Timer read.
+    const deadline = Io.Clock.boot.now(value).addDuration(.fromNanoseconds(ns));
+    while (true) {
+        const left = Io.Clock.boot.now(value).durationTo(deadline);
+        if (left.nanoseconds <= 0) return;
+        value.sleep(left, .awake) catch |err| switch (err) {
+            error.Canceled => unreachable,
+        };
+    }
 }
 
 /// Wall-clock time since the Unix epoch.
