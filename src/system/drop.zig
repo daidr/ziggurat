@@ -82,7 +82,8 @@ pub const Target = struct {
         const accepted = if (self.on_hover) |callback| callback(self.context, window, value) else true;
         return accepted and (value.files or value.text);
     }
-    /// Native adapter entry. Bytes are copied into buffer before on_drop.
+    /// Native adapter entry. Bytes are copied into buffer before on_drop;
+    /// an adapter may also have converted them into buffer already.
     pub fn drop(self: *Target, point: z.Point, payload: Payload) void {
         const window = self.window orelse return;
         const scope = window.beginCallback() orelse return;
@@ -90,7 +91,7 @@ pub const Target = struct {
         const delivered: Payload = switch (payload) {
             .files, .text => |bytes| copied: {
                 if (bytes.len > self.buffer.len) break :copied .{ .capacity_exceeded = bytes.len };
-                @memcpy(self.buffer[0..bytes.len], bytes);
+                if (bytes.ptr != self.buffer.ptr) @memmove(self.buffer[0..bytes.len], bytes);
                 break :copied if (payload == .files) .{ .files = self.buffer[0..bytes.len] } else .{ .text = self.buffer[0..bytes.len] };
             },
             else => payload,

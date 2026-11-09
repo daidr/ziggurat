@@ -25,11 +25,8 @@ jobs:
     # Self-hosted Windows x64 runner with PowerShell 7, Python 3 and tar on
     # PATH, running in an interactive desktop session. The repository variable
     # WINDOWS_RUNS_ON overrides the labels with a JSON value, for example
-    # '"windows-2022"' to return to a hosted runner.
-    #
-    # Windows checks are paused while Linux and macOS come first: they run
-    # only when the repository variable WINDOWS_CI is 'true'.
-    if: vars.WINDOWS_CI == 'true'
+    # '"windows-2022"' to return to a hosted runner. Debug builds use Zig's
+    # self-hosted backend (see docs/toolchain-known-issues.md).
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 90
     strategy:
@@ -37,6 +34,13 @@ jobs:
       matrix:
         # Pull requests run Debug only; ReleaseSafe runs on main and manual runs.
         optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+    env:
+      # A cold Debug build fills about 24 GB of Zig cache, and the runner's
+      # 60 GB data disk also holds the page file and the runner. Keep the
+      # caches under that between jobs so they stay warm, and start each job
+      # with room for a cold one.
+      ZIGGURAT_CI_CACHE_MAX_MB: 24576
+      ZIGGURAT_CI_CACHE_MIN_FREE_MB: 28672
     defaults:
       run:
         shell: pwsh
@@ -388,8 +392,7 @@ jobs:
           zig build smoke-webview-http-auth -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
 
   webview:
-    # Paused with the Windows job; see WINDOWS_CI there.
-    if: vars.WINDOWS_CI == 'true' && ((github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview'))
+    if: ((github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview'))
     # Also needs Node.js and an installed WebView2 Runtime on the runner.
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 20

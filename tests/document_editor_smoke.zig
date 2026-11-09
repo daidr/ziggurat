@@ -225,7 +225,16 @@ fn dragAutoscroll(allocator: std.mem.Allocator) !void {
     const right = try adapter.caretRect(bounds, 1);
     try std.testing.expect(reached > anchor + 40);
     try std.testing.expect(right.x >= bounds.x and right.x + right.width <= bounds.x + bounds.width + 1);
-    for (0..40) |_| try std.testing.expect(try adapter.handleEvent(window, .{ .pointer_move = .{ .x = bounds.x - 30, .y = y } }, bounds, parameters));
+    // Each move past the left edge scrolls back by the same distance, so
+    // the number of moves to get back depends on the font's advance.
+    var back = reached;
+    for (0..400) |_| {
+        try std.testing.expect(try adapter.handleEvent(window, .{ .pointer_move = .{ .x = bounds.x - 30, .y = y } }, bounds, parameters));
+        const caret = (try document.selection()).caret;
+        try std.testing.expect(caret <= back);
+        back = caret;
+        if (caret < anchor) break;
+    }
     try std.testing.expect(try adapter.handleEvent(window, .{ .pointer_up = .{ .position = .{ .x = bounds.x - 30, .y = y } } }, bounds, parameters));
     const selection = try document.selection();
     try std.testing.expectEqual(anchor, selection.anchor);

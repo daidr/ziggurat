@@ -136,6 +136,10 @@ fn windowScale(window: z.Window) !f32 {
     return (try window.contentSize()).scale;
 }
 
+// The other process's file, as a URL and as the local path it names; a
+// path without a drive names no file on Windows.
+const external_url = if (builtin.os.tag == .windows) "file:///C:/drag%20smoke%20&%20more.txt" else "file:///tmp/drag%20smoke%20&%20more.txt";
+const external_path = if (builtin.os.tag == .windows) "C:\\drag smoke & more.txt" else "/tmp/drag smoke & more.txt";
 const Round = enum { copy, move, escape, cancel, no_target, refused, legacy, external };
 const Stage = enum { settle, press, start, travel, over, release, wait_done, next, external, done };
 
@@ -180,6 +184,8 @@ const Smoke = struct {
     input: Input = undefined,
     scale: f32 = 1,
     stop: std.atomic.Value(bool) = .init(false),
+    ticks: std.atomic.Value(u32) = .init(0),
+    legacy_hovers: u32 = 0,
 
     fn event(ptr: *anyopaque, window: z.Window, value: z.Event) void {
         const self: *Smoke = @ptrCast(@alignCast(ptr));
@@ -260,6 +266,11 @@ const Smoke = struct {
         return true;
     }
 
+    fn legacyHover(ptr: *anyopaque, _: z.Window, value: drop.Hover) bool {
+        const self: *Smoke = @ptrCast(@alignCast(ptr));
+        if (value.phase != .leave) self.legacy_hovers += 1;
+        return value.text;
+    }
     fn legacyDrop(ptr: *anyopaque, _: z.Window, value: drop.Drop) void {
         const self: *Smoke = @ptrCast(@alignCast(ptr));
         self.legacy_drops += 1;
@@ -269,13 +280,38 @@ const Smoke = struct {
         }
     }
     fn ticker(self: *Smoke) void {
+        var seen: u32 = 0;
+        var idle: u32 = 0;
         while (!self.stop.load(.acquire)) {
             zio.sleep(25 * std.time.ns_per_ms);
-            self.app.post(.{ .context = self, .call = tick }) catch return;
+            // A full queue means the UI thread is not taking posts; the
+            // report below names where it stopped.
+            self.app.post(.{ .context = self, .call = tick }) catch |err| switch (err) {
+                error.Full => {},
+                else => {
+                    std.debug.print("drag smoke: ticker stopped: {s}\n", .{@errorName(err)});
+                    return;
+                },
+            };
+            // The stuck report runs on the UI thread; this one names where
+            // that thread stopped taking ticks.
+            const ticks = self.ticks.load(.acquire);
+            if (ticks != seen) {
+                seen = ticks;
+                idle = 0;
+            } else {
+                idle += 1;
+                if (idle == 400) std.debug.print("drag smoke: no tick for 10s after {d} in round {s} at {s}; source {s}, native {}, held {}\n", .{ ticks, @tagName(self.round), @tagName(self.stage), @tagName(self.source.state), @hasField(@TypeOf(self.source.native), "drop_source") and nativeStarted(&self.source), self.held });
+            }
         }
+    }
+    fn nativeStarted(source: *drag.Source) bool {
+        if (comptime !@hasField(@TypeOf(source.native), "drop_source")) return false;
+        return source.native.drop_source != null;
     }
     fn tick(ptr: *anyopaque) void {
         const self: *Smoke = @ptrCast(@alignCast(ptr));
+        _ = self.ticks.fetchAdd(1, .release);
         if (self.stage == .done) return;
         self.advance() catch |err| return self.finish(err);
         self.waited += 1;
@@ -362,7 +398,8 @@ const Smoke = struct {
                 self.step += 1;
                 self.input.pointer(.{ .x = end.x + @as(i32, @intCast(self.step % 4)), .y = end.y });
                 if (self.round == .move and self.step == 2) self.input.keyEvent(0xffe1, true);
-                if (self.step > 10 and (self.round == .no_target or self.round == .legacy or self.hovers > 0)) self.to(.release);
+                // Released before the target saw it, a drag ends with no effect.
+                if (self.step > 10 and (self.round == .no_target or (self.round == .legacy and self.legacy_hovers > 0) or self.hovers > 0)) self.to(.release);
             },
             .release => if (self.waited > 2) {
                 self.input.press(false);
@@ -378,12 +415,16 @@ const Smoke = struct {
             },
             .next => {
                 self.hovers = 0;
+                self.legacy_hovers = 0;
                 self.local_hovers = 0;
                 self.drops = 0;
                 self.dropped_items = 0;
                 self.dropped_note_len = 0;
                 self.dropped_text_len = 0;
                 self.round = @fromBackingInt(@intCast(@backingInt(self.round) + 1));
+                // The rounds move the real cursor; name each, so a hang
+                // shows where it stopped.
+                std.debug.print("drag smoke: round {s}\n", .{@tagName(self.round)});
                 if (self.round != .external) return self.to(.settle);
                 // Another process drags into the target with real XDND.
                 const exe = try zio.executablePathAlloc(self.allocator);
@@ -402,7 +443,7 @@ const Smoke = struct {
                 try std.testing.expectEqual(1, self.dropped_items);
                 try std.testing.expectEqualStrings("from another process", self.dropped_text[0..self.dropped_text_len]);
                 try std.testing.expectEqualStrings("{\"note\":2}", self.dropped_note[0..self.dropped_note_len]);
-                try std.testing.expectEqualStrings("/tmp/drag smoke & more.txt", self.dropped_files[0..self.dropped_files_len]);
+                try std.testing.expectEqualStrings(external_path, self.dropped_files[0..self.dropped_files_len]);
                 return self.finish(null);
             },
             .done => {},
@@ -485,7 +526,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     smoke.legacy_window = try app.createWindow(.{ .title = "text target", .width = 300, .height = 200 });
     try smoke.legacy_window.setClientBounds(.{ .position = .{ .x = 520, .y = 420 }, .width = 300, .height = 200 });
     try smoke.legacy_window.perform(.show);
-    smoke.legacy = .{ .context = &smoke, .on_drop = Smoke.legacyDrop, .kinds = .{ .files = false }, .buffer = &smoke.legacy_buffer };
+    smoke.legacy = .{ .context = &smoke, .on_drop = Smoke.legacyDrop, .on_hover = Smoke.legacyHover, .kinds = .{ .files = false }, .buffer = &smoke.legacy_buffer };
     try smoke.legacy.attach(smoke.legacy_window);
     defer smoke.legacy.detach();
     defer smoke.target.detach();
@@ -535,7 +576,7 @@ const Other = struct {
     }
     fn detach(_: *anyopaque) void {}
     fn begin(self: *Other) !void {
-        const url = "file:///tmp/drag%20smoke%20&%20more.txt";
+        const url = external_url;
         const items = [_]transfer.Item{.{ .representations = &.{ .fromBytes(transfer.text, "from another process"), .fromBytes(note_format, "{\"note\":2}"), .fromBytes(transfer.file_list, url), .fromBytes(transfer.uri_list, url) } }};
         try self.source.start(self.allocator, self.window, .{ .items = &items }, .{ .context = self, .on_done = done });
     }
@@ -565,6 +606,7 @@ const Other = struct {
         if (self.waited > 400) self.end(error.Timeout);
     }
     fn to(self: *Other, stage: Stage) void {
+        std.debug.print("drag smoke source: stage {s}\n", .{@tagName(stage)});
         self.stage = stage;
         self.waited = 0;
         self.step = 0;

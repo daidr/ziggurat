@@ -46,6 +46,8 @@ pub fn main() !void {
         try watchdog.start();
         defer watchdog.stop();
         try app.run();
+        if (watchdog.expired or state.result == null or state.result.? != .cancelled or state.owner.window != null)
+            std.debug.print("WinRT {s}: expired={} result={any} window={}\n", .{ @tagName(kind), watchdog.expired, state.result, state.owner.window != null });
         try std.testing.expect(!watchdog.expired);
         if (state.result) |result| if (result == .failed) std.debug.print("WinRT {s} picker completion failed: {any}\n", .{ @tagName(kind), result.failed });
         try std.testing.expect(state.result != null and state.result.? == .cancelled);

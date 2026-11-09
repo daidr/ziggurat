@@ -3392,6 +3392,16 @@ pub fn build(b: *std.Build) void {
 /// so they link src/c/windows/math, which defines those symbols from
 /// compiler-rt's code. The self-hosted backend writes no PDB, so installs
 /// skip it.
+/// Debug images with the SQLite amalgamation crash in most tests when Zig's
+/// own backend and linker build them; those keep LLVM.
+fn linksSqlite(compile: *std.Build.Step.Compile) bool {
+    if (std.mem.eql(u8, compile.name, "sqlite-native")) return true;
+    for (compile.root_module.getGraph().modules) |module| for (module.link_objects.items) |object| switch (object) {
+        .other_step => |other| if (std.mem.eql(u8, other.name, "sqlite-native")) return true,
+        else => {},
+    };
+    return false;
+}
 fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
     var steps: std.array_hash_map.Auto(*std.Build.Step, void) = .empty;
     var it = b.top_level_steps.iterator();
@@ -3399,12 +3409,15 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
 
     var automation_library: ?std.Build.LazyPath = null;
     var math_library: ?*std.Build.Step.Compile = null;
+    var resource_tool: ?*std.Build.Step.Compile = null;
+    var patched: std.AutoHashMapUnmanaged(*std.Build.Step.Compile, *std.Build.Step) = .empty;
     for (steps.keys()) |step| {
         const compile = step.cast(std.Build.Step.Compile) orelse continue;
         if (compile.rootModuleTarget().os.tag != .windows or compile.use_llvm != null) continue;
         if (llvm) continue;
         const optimize = compile.root_module.optimize orelse .debug;
         if (optimize != .debug) continue;
+        if (linksSqlite(compile)) continue;
         compile.use_llvm = false;
         for (compile.root_module.getGraph().modules) |module| for (module.link_objects.items) |*object| switch (object.*) {
             .system_lib => |library| if (std.ascii.eqlIgnoreCase(library.name, "uiautomationcore")) {
@@ -3426,6 +3439,41 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
             root.* = compile.root_module.*;
             root.link_objects = compile.root_module.link_objects.clone(b.allocator) catch @panic("OOM");
             root.cached_graph = .{ .modules = &.{}, .names = &.{} };
+            // Zig's COFF linker drops resource sections, so compile the
+            // resources separately and add them to the linked image.
+            var resources: std.ArrayList(*std.Build.Module.RcSourceFile) = .empty;
+            var kept: usize = 0;
+            for (root.link_objects.items) |object| switch (object) {
+                .win32_resource_file => |file| resources.append(b.allocator, file) catch @panic("OOM"),
+                else => {
+                    root.link_objects.items[kept] = object;
+                    kept += 1;
+                },
+            };
+            root.link_objects.shrinkRetainingCapacity(kept);
+            if (resources.items.len > 1) std.debug.panic("{s}: more than one resource file", .{compile.name});
+            if (resources.items.len == 1) {
+                const file = resources.items[0];
+                const rc = b.addSystemCommand(&.{ b.graph.zig_exe, "rc", "/:output-format", "coff", "/:target", @tagName(compile.rootModuleTarget().cpu.arch), "/:auto-includes", "gnu", "/x", "/D_DEBUG" });
+                rc.addArgs(file.flags);
+                for (file.include_paths) |path| {
+                    rc.addArg("/i");
+                    rc.addDirectoryArg(path);
+                }
+                rc.addFileArg(file.file);
+                // The generated script starts with `#pragma code_page`, which
+                // makes the resource compiler print a warning; keep it out of the build output.
+                _ = rc.captureStdErr(.{});
+                const object = rc.addOutputFileArg("resources.obj");
+                const tool = resource_tool orelse blk: {
+                    resource_tool = b.addExecutable(.{ .name = "ziggurat-pe-resources", .root_module = b.createModule(.{ .root_source_file = b.path("tools/pe_resources.zig"), .target = b.graph.host, .optimize = .Debug }), .use_llvm = if (b.graph.host.result.os.tag == .windows) false else null });
+                    break :blk resource_tool.?;
+                };
+                const patch = b.addRunArtifact(tool);
+                patch.addFileArg(compile.getEmittedBin());
+                patch.addFileArg(object);
+                patched.put(b.allocator, compile, &patch.step) catch @panic("OOM");
+            }
             root.addCSourceFile(.{ .file = b.path("src/c/windows/assert_shim.c") });
             root.linkLibrary(math_library orelse blk: {
                 const sources = b.addWriteFiles();
@@ -3443,7 +3491,17 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
         }
     }
     for (steps.keys()) |step| {
+        if (step.cast(std.Build.Step.Run)) |run| {
+            // The image is patched in place, so everything that runs or
+            // installs it waits for that.
+            for (run.argv.items) |arg| switch (arg) {
+                .artifact => |artifact| if (patched.get(artifact.artifact)) |patch| run.step.dependOn(patch),
+                else => {},
+            };
+            continue;
+        }
         const install = step.cast(std.Build.Step.InstallArtifact) orelse continue;
+        if (patched.get(install.artifact)) |patch| install.step.dependOn(patch);
         if (install.artifact.producesPdbFile()) continue;
         install.pdb_dir = null;
         install.emitted_pdb = null;

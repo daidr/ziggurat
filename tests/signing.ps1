@@ -42,8 +42,19 @@ try {
     $bytes = [IO.File]::ReadAllBytes($extracted)
     $pe = [BitConverter]::ToUInt32($bytes, 0x3c)
     $optionalSize = [BitConverter]::ToUInt16($bytes, $pe + 20)
-    $firstSection = $pe + 24 + $optionalSize
-    $rawOffset = [BitConverter]::ToUInt32($bytes, $firstSection + 20)
+    $sections = $pe + 24 + $optionalSize
+    $sectionCount = [BitConverter]::ToUInt16($bytes, $pe + 6)
+    # The first section with file data: Zig's own linker puts .bss, which has
+    # none, first.
+    $rawOffset = 0
+    foreach ($index in 0..($sectionCount - 1)) {
+        $header = $sections + 40 * $index
+        if ([BitConverter]::ToUInt32($bytes, $header + 16) -ne 0 -and [BitConverter]::ToUInt32($bytes, $header + 20) -ne 0) {
+            $rawOffset = [BitConverter]::ToUInt32($bytes, $header + 20)
+            break
+        }
+    }
+    if ($rawOffset -eq 0) { throw 'The signed executable has no section data.' }
     $bytes[$rawOffset] = $bytes[$rawOffset] -bxor 1
     [IO.File]::WriteAllBytes($extracted, $bytes)
     if ((Get-AuthenticodeSignature -LiteralPath $extracted).Status -ne 'HashMismatch') { throw 'Modified executable digest was not rejected.' }
