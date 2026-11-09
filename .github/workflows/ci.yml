@@ -87,7 +87,7 @@ jobs:
           ./tests/setup_smoke.ps1
       - name: Direct3D 11 shader effects on WARP
         run: |
-          zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-shader-effects-gpu smoke-gpu-masks -Dgpu=true -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-shader-effects-gpu smoke-gpu-masks smoke-gpu-shared-device smoke-video -Dgpu=true -Doptimize=${{ matrix.optimize }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Optional pinned WebP decoder
         run: |

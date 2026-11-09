@@ -261,6 +261,29 @@ fn windowFrames(allocator: std.mem.Allocator) !void {
     try std.testing.expect(gpu.layerShownForTest());
     try std.testing.expectEqual(@as(usize, 0), probe.content.fallbacks);
 
+    // A frame the GPU did not finish in time: the next draws in memory,
+    // and so do those after it until the rest is over, without touching
+    // the wedged GPU; then the GPU draws again.
+    {
+        const presents = gpu.stats().presents;
+        const software = probe.content.gdi_frames;
+        gpu.injectTimeout();
+        metal.Renderer.displayForTest("Metal");
+        try std.testing.expectEqual(software + 1, probe.content.gdi_frames);
+        try std.testing.expectEqual(@as(usize, 1), probe.content.fallbacks);
+        try std.testing.expectEqual(@as(u64, 1), gpu.stats().timeouts);
+        try std.testing.expectEqual(@as(u64, 1), probe.content.gpu_rest.timeouts);
+        metal.Renderer.displayForTest("Metal");
+        try std.testing.expectEqual(software + 2, probe.content.gdi_frames);
+        try std.testing.expectEqual(presents, gpu.stats().presents);
+        probe.content.gpu_rest.until = 0;
+        const gpu_frames = probe.content.gpu_frames;
+        metal.Renderer.displayForTest("Metal");
+        try std.testing.expectEqual(gpu_frames + 1, probe.content.gpu_frames);
+        try std.testing.expect(gpu.layerShownForTest());
+        probe.content.fallbacks = 0;
+    }
+
     // A new size presents with the transaction.
     const before = gpu.stats();
     try probe.window.resize(400, 240);

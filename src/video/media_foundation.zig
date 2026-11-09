@@ -1,6 +1,8 @@
 //! On Windows, Media Foundation plays the video: src/video/media_foundation.c
 //! keeps the media engine, which this wraps as an engine. Its pictures are
-//! BGRA in memory, converted on the GPU and read back as each comes.
+//! BGRA textures it shares, which Direct3D 11 samples where they are and
+//! the CPU renderer has read back, or, where the device shares none, BGRA
+//! in memory, read back as each comes.
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const ui = @import("ziggurat_ui");
@@ -9,7 +11,8 @@ const source = @import("source.zig");
 
 extern fn zv_mf_open(url: ?[*:0]const u16, bytes: ?[*]const u8, length: usize, out: *?*anyopaque) c_int;
 extern fn zv_mf_set_wake(handle: *anyopaque, wake: ?*const fn (?*anyopaque) callconv(.c) void, context: ?*anyopaque) void;
-extern fn zv_mf_frame(handle: *anyopaque, pixels: *?[*]const u8, width: *u32, height: *u32, changed: *c_int) c_int;
+extern fn zv_mf_frame(handle: *anyopaque, pixels: *?[*]const u8, width: *u32, height: *u32, changed: *c_int, shared: *?*anyopaque, id: *u32) c_int;
+extern fn zv_mf_read(handle: *anyopaque, id: u32, pixels: [*]u8, stride: u32) c_int;
 extern fn zv_mf_state(handle: *anyopaque, code: ?*i32) c_int;
 extern fn zv_mf_size(handle: *anyopaque, size: *[2]u32) void;
 extern fn zv_mf_duration(handle: *anyopaque) u64;
@@ -97,7 +100,18 @@ pub const Engine = struct {
         var width: u32 = 0;
         var height: u32 = 0;
         var changed: c_int = 0;
-        if (zv_mf_frame(self.handle, &pixels, &width, &height, &changed) == 0) return null;
+        var shared: ?*anyopaque = null;
+        var id: u32 = 0;
+        if (zv_mf_frame(self.handle, &pixels, &width, &height, &changed, &shared, &id) == 0) return null;
+        if (shared != null) return .{ .changed = changed != 0, .picture = .{
+            .width = width,
+            .height = height,
+            .format = .bgra,
+            .native = shared,
+            .native_id = id,
+            .read = read,
+            .read_context = self,
+        } };
         return .{ .changed = changed != 0, .picture = .{
             .width = width,
             .height = height,
@@ -105,6 +119,11 @@ pub const Engine = struct {
             .planes = .{ pixels, null },
             .strides = .{ width * 4, 0 },
         } };
+    }
+    /// Reads a shared picture back for the CPU renderer.
+    fn read(context: ?*anyopaque, picture: *const ui.drawing.VideoPicture, pixels: [*]u8, stride: u32) callconv(.c) bool {
+        const self = cast(context.?);
+        return zv_mf_read(self.handle, picture.native_id, pixels, stride) != 0;
     }
     /// A frame of the window asks for the picture due at the display's
     /// rate: the engine converts it then.

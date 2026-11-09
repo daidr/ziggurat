@@ -1962,6 +1962,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ziggurat", .module = core },
                 .{ .name = "ziggurat_ui", .module = ui },
             });
+            addSmoke(b, "smoke-gpu-shared-device", "tests/gpu_shared_device_smoke.zig", target, optimize, &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+            });
         }
     }
     if (web and target.result.os.tag != .windows and target.result.os.tag != .linux and target.result.os.tag != .macos)

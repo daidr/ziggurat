@@ -3,7 +3,9 @@
 #define D2D_USE_C_DEFINITIONS
 #include <windows.h>
 #include <initguid.h>
+#include <d3d10.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi1_3.h>
 #include <d2d1_1.h>
 #include <dwrite.h>
@@ -30,13 +32,20 @@ typedef struct ShapeGeometry {
     /* The frame that last drew it, for the sweep (gpu_sweep.h). */
     uint64_t frame;
 } ShapeGeometry;
-typedef struct CachedImage {ID2D1Bitmap *bitmaps[2][ZI_IMAGE_LEVELS];const ZiImageLevel *levels;ZiImageLevel coverage_level;uint32_t count,dynamic,active,is_coverage;} CachedImage;
+/* An image, or a frame of video a decoder shares (video, its texture's
+   identity, and handle): opened by that identity when drawn. */
+typedef struct CachedImage {ID2D1Bitmap *bitmaps[2][ZI_IMAGE_LEVELS];const ZiImageLevel *levels;ZiImageLevel coverage_level;uint32_t count,dynamic,active,is_coverage,video;HANDLE video_handle;} CachedImage;
+/* A texture a decoder shares, opened on the renderer's device, and whether
+   the frame drawing holds its keyed mutex. */
+typedef struct SharedVideo {uint32_t id;ID2D1Bitmap1 *bitmap;IDXGIKeyedMutex *mutex;uint64_t used;int acquired;} SharedVideo;
+#define SHARED_VIDEOS 8
 typedef struct GpuLayers GpuLayers;
 typedef struct GpuDomain GpuDomain;
 typedef struct State {
     GpuDomain *domain;
     struct State *domain_previous, *domain_next;
     ID3D11Device *d3d;
+    int shares_device;
     ID2D1Factory1 *factory;
     ID2D1Device *device;
     ID2D1DeviceContext *context;
@@ -44,6 +53,18 @@ typedef struct State {
     IDXGISwapChain2 *swapchain2;
     HANDLE frame_ready;
     ID2D1Bitmap1 *target;
+    /* The window's kept frame: a frame drawn while keep_plane is set draws
+       into it, only where it changed when plane_valid says it holds the
+       last frame presented, and copies it to the swap chain, whose back
+       buffer holds a frame two before. plane_serial changes whenever it is
+       made again; plane_touched, once a frame began drawing into it. */
+    ID2D1Bitmap1 *plane;
+    UINT plane_width, plane_height;
+    FLOAT plane_dpi;
+    int keep_plane, plane_drawing, plane_valid, plane_touched, plane_composed;
+    SharedVideo videos[SHARED_VIDEOS];
+    uint64_t video_clock, video_opens;
+    uint64_t plane_serial, plane_partial_frames;
     ID2D1SolidColorBrush *brush;
     IDWriteFactory *text_factory;
     IDWriteTextFormat *format;
@@ -117,10 +138,14 @@ static const WCHAR surface_class[] = L"Ziggurat.Graphics.Surface.0";
 #include "gradient_effect.h"
 static HRESULT create_device(State *s);
 static void release_device(State *s);
+static void release_shared_device(State *s,BOOL lost);
+static void release_videos(State *s);
+static void drop_videos(State *s);
 static void release_composition(State *s);
 static HRESULT failure(State *s,HRESULT hr);
 static D2D1_RECT_F rectangle(float x,float y,float width,float height);
 static HRESULT end_frame(State *s,int offscreen);
+static void clear_frame(State *s);
 /* Raster scopes retain their transparent guard through final sampling. */
 #include "gpu_layers.h"
 #include "gpu_effects.h"
@@ -188,12 +213,21 @@ static void finish_draw(State *s) {
     while (s->clips) { ID2D1RenderTarget_PopAxisAlignedClip(RT(s)); s->clips--; }
     ID2D1RenderTarget_EndDraw(RT(s), NULL, NULL);
     s->drawing = FALSE;
+    release_videos(s);
+    /* A frame given up after it drew in the plane leaves it neither. */
+    if (s->plane_drawing && s->plane_touched) s->plane_valid = 0;
+    s->plane_drawing = 0;
     gpu_layer_abort_metadata(s);
     if(s->context&&s->target)s->context->lpVtbl->SetTarget(s->context,(ID2D1Image *)s->target);
+}
+static void drop_plane(State *s) {
+    if (s->plane) s->plane_serial++;
+    DROP(s->plane); s->plane_valid = 0;
 }
 static void release_target(State *s) {
     if (s->context) s->context->lpVtbl->SetTarget(s->context, NULL);
     DROP(s->target);
+    drop_plane(s);
 }
 static void drop_image_objects(CachedImage *image){for(unsigned bank=0;bank<2;bank++)for(uint32_t i=0;i<image->count;i++)DROP(image->bitmaps[bank][i]);}
 static void drop_image(CachedImage *image){drop_image_objects(image);memset(image,0,sizeof(*image));}
@@ -247,6 +281,8 @@ static void release_device(State *s) {
             ID3D11DeviceContext_Release(context);
         }
     }
+    drop_videos(s);
+    release_shared_device(s,FALSE);
     DROP(s->d3d);
     s->width = s->height = 0; s->dpi = 0;
 }
@@ -257,14 +293,59 @@ static BOOL device_lost(HRESULT hr) {
 static HRESULT failure(State *s, HRESULT hr) {
     if (device_lost(hr)) {
         if(s->domain) gpu_domain_lose(s->domain);
-        else {s->device_losses++; release_device(s);}
+        else {s->device_losses++; release_shared_device(s,TRUE); release_device(s);}
     }
     return hr;
 }
-static HRESULT create_device(State *s) {
-    IDXGIDevice *dxgi = NULL;
+/* The windows' renderers share one Direct3D 11 device for each driver: a
+   device costs the driver tens of megabytes, which a window each would
+   multiply. Each renderer keeps its own Direct2D factory, device and context
+   on it, its swap chain and what its frames change; the device goes with
+   the last renderer holding it, as each holds a reference. They draw on the
+   window thread; the device is multithread protected all the same, so that
+   DXGI's calls on a swap chain from another thread are serialized with the
+   immediate context's. A renderer that loses the device takes it out of the
+   slot, so the next one made makes another; those still holding the old one
+   fail their next frame and make their device again on the new one. */
+static struct {ID3D11Device *d3d;unsigned users;} shared_devices[2];
+static LONG shared_device_creations;
+static HRESULT acquire_shared_device(int driver,ID3D11Device **out){
+    *out=NULL;
+    if(shared_devices[driver].d3d){
+        if(SUCCEEDED(ID3D11Device_GetDeviceRemovedReason(shared_devices[driver].d3d))){
+            *out=shared_devices[driver].d3d;ID3D11Device_AddRef(*out);shared_devices[driver].users++;return S_OK;
+        }
+        shared_devices[driver].d3d=NULL;shared_devices[driver].users=0;
+    }
     D3D_FEATURE_LEVEL level;
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
+    HRESULT hr = D3D11CreateDevice(NULL, driver ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE,
+        NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        levels, sizeof(levels)/sizeof(levels[0]), D3D11_SDK_VERSION, out, &level, NULL);
+    if(FAILED(hr)){if(*out){ID3D11Device_Release(*out);*out=NULL;}return hr;}
+    ID3D10Multithread *multithread=NULL;
+    if(SUCCEEDED(ID3D11Device_QueryInterface(*out,&IID_ID3D10Multithread,(void **)&multithread))&&multithread){
+        ID3D10Multithread_SetMultithreadProtected(multithread,TRUE);ID3D10Multithread_Release(multithread);
+    }
+    shared_devices[driver].d3d=*out;shared_devices[driver].users=1;
+    InterlockedIncrement(&shared_device_creations);
+    return S_OK;
+}
+/* Gives back a renderer's share of the device; the slot forgets a device
+   lost, or one no renderer holds any longer. */
+static void release_shared_device(State *s,BOOL lost){
+    if(s->domain||!s->d3d||!s->shares_device)return;
+    s->shares_device=0;
+    const int d=s->driver;
+    if(shared_devices[d].d3d!=s->d3d)return;
+    if(lost||--shared_devices[d].users==0){shared_devices[d].d3d=NULL;shared_devices[d].users=0;}
+}
+unsigned zgpu_shared_device_users(int driver){return driver==0||driver==1?shared_devices[driver].users:0;}
+long zgpu_shared_device_creations(void){return shared_device_creations;}
+int zgpu_shares_device(State *a,State *b){return a&&b&&a->d3d&&a->d3d==b->d3d;}
+
+static HRESULT create_device(State *s) {
+    IDXGIDevice *dxgi = NULL;
     HRESULT hr;
     if(s->domain){
         if(s->domain->epoch->status!=1)return DXGI_ERROR_DEVICE_REMOVED;
@@ -272,11 +353,10 @@ static HRESULT create_device(State *s) {
         s->device=s->domain->device;IUnknown_AddRef((IUnknown *)s->device);OWN(s->device);
         hr=S_OK;
     }else{
-    hr = D3D11CreateDevice(NULL, s->driver ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE,
-        NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED,
-        levels, sizeof(levels)/sizeof(levels[0]), D3D11_SDK_VERSION, &s->d3d, &level, NULL);
+    hr = acquire_shared_device(s->driver, &s->d3d);
     OWN(s->d3d);
     if (FAILED(hr)) goto failed;
+    s->shares_device = 1;
     hr = ID3D11Device_QueryInterface(s->d3d, &IID_IDXGIDevice, (void **)&dxgi);
     OWN(dxgi);
     if (FAILED(hr)) goto failed;
@@ -298,7 +378,7 @@ static HRESULT create_device(State *s) {
     s->gradient_creations++;
     /* Explicit residency retains bounded CPU descriptors across device loss.
        Recovery rebuilds that resident set; ordinary draws never upload. */
-    for(unsigned i=0;i<s->image_capacity;i++)if(s->images[i].count){hr=create_image_objects(s,&s->images[i],0);if(FAILED(hr))goto failed;if(s->images[i].is_coverage)s->coverage_restores++;else s->image_restores++;}
+    for(unsigned i=0;i<s->image_capacity;i++)if(s->images[i].count&&!s->images[i].video){hr=create_image_objects(s,&s->images[i],0);if(FAILED(hr))goto failed;if(s->images[i].is_coverage)s->coverage_restores++;else s->image_restores++;}
     if(s->layers){hr=gpu_layer_objects(s,s->layers,0);if(FAILED(hr))goto failed;s->layers->stats.native_restores++;}
     DROP(dxgi);
     s->device_creations++;
@@ -534,15 +614,72 @@ HRESULT zgpu_begin_composed(State *s, HWND hwnd, UINT width, UINT height, FLOAT 
         if (FAILED(hr)) return failure(s, hr);
         s->target_creations++;
     }
-    s->context->lpVtbl->SetTarget(s->context, (struct ID2D1Image *)s->target);
+    const int use_plane = s->keep_plane && !s->layers;
+    if (s->plane && (!use_plane || s->plane_width != width || s->plane_height != height || s->plane_dpi != dpi || s->plane_composed != composed)) drop_plane(s);
+    if (use_plane && !s->plane) {
+        D2D1_BITMAP_PROPERTIES1 properties = {0};
+        properties.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        properties.pixelFormat.alphaMode = composed ? D2D1_ALPHA_MODE_PREMULTIPLIED : D2D1_ALPHA_MODE_IGNORE;
+        properties.dpiX = properties.dpiY = dpi;
+        properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+        const D2D1_SIZE_U size = {width, height};
+        hr = s->context->lpVtbl->CreateBitmap(s->context, size, NULL, 0, &properties, &s->plane); OWN(s->plane);
+        if (FAILED(hr)) return failure(s, hr);
+        s->plane_width = width; s->plane_height = height; s->plane_dpi = dpi; s->plane_composed = composed;
+        s->plane_valid = 0; s->plane_serial++;
+    }
+    s->plane_drawing = use_plane; s->plane_touched = 0;
+    s->context->lpVtbl->SetTarget(s->context, (struct ID2D1Image *)(use_plane ? s->plane : s->target));
     if(s->layers)gpu_layer_begin(s);
     else ID2D1RenderTarget_SetTextAntialiasMode(RT(s),D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
     ID2D1RenderTarget_SetDpi(RT(s), dpi, dpi);
     s->dpi = dpi; s->clips = 0;
     ID2D1RenderTarget_BeginDraw(RT(s)); s->drawing = TRUE;
+    /* The kept plane is cleared by the frame drawn whole (zgpu_plane_whole)
+       and keeps its pixels for one drawn in part (zgpu_plane_part). */
+    if (!use_plane) clear_frame(s);
+    return S_OK;
+}
+static void clear_frame(State *s) {
     const D2D1_COLOR_F background = {1,1,1,1}, clear = {0,0,0,0};
     ID2D1RenderTarget_Clear(RT(s), s->composed ? &clear : &background);
-    return S_OK;
+}
+/* Whether the frame drawing keeps the last one: it may draw only what
+   changed. */
+int zgpu_plane_kept(State *s, uint64_t *generation) {
+    *generation = s ? s->plane_serial : 0;
+    return s && s->drawing && s->plane_drawing && s->plane_valid;
+}
+void zgpu_set_keep_plane(State *s, int keep) { if (s) s->keep_plane = keep != 0; }
+/* The frame is drawn whole: clear the plane first. */
+void zgpu_plane_whole(State *s) {
+    if (!s || !s->drawing) return;
+    s->plane_touched = 1;
+    clear_frame(s);
+}
+/* The frame draws only where it changed, over the last one. */
+void zgpu_plane_part(State *s) {
+    if (!s || !s->drawing) return;
+    s->plane_touched = 1;
+    s->plane_partial_frames++;
+}
+/* Clears a transparent plane within the clip pushed around a box of it. */
+void zgpu_plane_clear_box(State *s) {
+    if (!s || !s->drawing) return;
+    const D2D1_COLOR_F clear = {0,0,0,0};
+    ID2D1RenderTarget_Clear(RT(s), &clear);
+}
+uint64_t zgpu_plane_partial_frames(State *s) { return s ? s->plane_partial_frames : 0; }
+/* Shows the plane drawn in the swap chain's back buffer. */
+static HRESULT plane_copy_window(State *s) {
+    s->context->lpVtbl->SetTarget(s->context, (ID2D1Image *)s->target);
+    ID2D1RenderTarget_BeginDraw(RT(s));
+    const D2D1_MATRIX_3X2_F identity = {1,0,0,1,0,0};
+    ID2D1RenderTarget_SetTransform(RT(s), &identity);
+    const D2D1_COLOR_F clear = {0,0,0,0};
+    ID2D1RenderTarget_Clear(RT(s), &clear);
+    ID2D1RenderTarget_DrawBitmap(RT(s), (ID2D1Bitmap *)s->plane, NULL, 1, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL);
+    return ID2D1RenderTarget_EndDraw(RT(s), NULL, NULL);
 }
 HRESULT zgpu_begin(State *s, HWND hwnd, UINT width, UINT height, FLOAT dpi) {return zgpu_begin_composed(s,hwnd,width,height,dpi,0);}
 
@@ -761,6 +898,8 @@ HRESULT zgpu_prepare_coverage(State *s,const ZgCoverage *coverage){
     s->image_candidate=candidate;s->image_candidate.levels=&s->image_candidate.coverage_level;return S_OK;
 }
 HRESULT zgpu_update_image(State *s,uint32_t slot,const ZiImageLevel *levels,uint32_t count){
+    /* A frame of video shared before: another kind of image, uploaded anew. */
+    if(!s->drawing&&slot<s->image_capacity&&s->images[slot].video)return S_FALSE;
     if(s->drawing||slot>=s->image_capacity||!s->images[slot].dynamic||s->images[slot].count!=count)return E_INVALIDARG;
     if(s->image_loss_fault){s->image_loss_fault=FALSE;return failure(s,DXGI_ERROR_DEVICE_REMOVED);}
     HRESULT hr=S_OK;if(!s->context){hr=create_device(s);if(FAILED(hr))return hr;}
@@ -787,7 +926,73 @@ void zgpu_release_image(State *s,uint32_t slot){if(slot<s->image_capacity)drop_i
 void zgpu_image_fault(State *s,uint32_t mip){s->image_fault=mip;}
 void zgpu_image_loss_fault(State *s){s->image_loss_fault=TRUE;}
 void zgpu_image_update_loss_at(State *s,uint32_t mip){s->image_update_loss_mip=mip;}
+static void drop_video(SharedVideo *v){
+    if(v->acquired){IDXGIKeyedMutex_ReleaseSync(v->mutex,0);v->acquired=0;}
+    DROP(v->bitmap);DROP(v->mutex);v->id=0;
+}
+static void drop_videos(State *s){for(unsigned i=0;i<SHARED_VIDEOS;i++)drop_video(&s->videos[i]);}
+/* After the frame's draws are issued: the decoder may write them again. */
+static void release_videos(State *s){
+    for(unsigned i=0;i<SHARED_VIDEOS;i++)if(s->videos[i].acquired){IDXGIKeyedMutex_ReleaseSync(s->videos[i].mutex,0);s->videos[i].acquired=0;}
+}
+/* The decoder's texture `id`, opened on this device once by its handle. */
+static SharedVideo *open_video(State *s,uint32_t id,HANDLE handle){
+    SharedVideo *slot=NULL;
+    for(unsigned i=0;i<SHARED_VIDEOS;i++){
+        SharedVideo *v=&s->videos[i];
+        if(v->id==id&&v->bitmap){v->used=++s->video_clock;return v;}
+        if(v->acquired)continue;
+        if(!slot||!v->id||(slot->id&&v->used<slot->used))slot=v;
+    }
+    if(!slot||!handle)return NULL;
+    drop_video(slot);
+    ID3D11Device1 *device1=NULL;ID3D11Texture2D *texture=NULL;IDXGISurface *surface=NULL;
+    HRESULT hr=ID3D11Device_QueryInterface(s->d3d,&IID_ID3D11Device1,(void **)&device1);
+    if(SUCCEEDED(hr))hr=ID3D11Device1_OpenSharedResource1(device1,handle,&IID_ID3D11Texture2D,(void **)&texture);
+    if(SUCCEEDED(hr))hr=ID3D11Texture2D_QueryInterface(texture,&IID_IDXGIKeyedMutex,(void **)&slot->mutex);OWN(slot->mutex);
+    if(SUCCEEDED(hr))hr=ID3D11Texture2D_QueryInterface(texture,&IID_IDXGISurface,(void **)&surface);
+    if(SUCCEEDED(hr)){
+        D2D1_BITMAP_PROPERTIES1 properties={0};
+        properties.pixelFormat.format=DXGI_FORMAT_B8G8R8A8_UNORM;properties.pixelFormat.alphaMode=D2D1_ALPHA_MODE_IGNORE;
+        properties.dpiX=properties.dpiY=96;
+        hr=s->context->lpVtbl->CreateBitmapFromDxgiSurface(s->context,surface,&properties,&slot->bitmap);OWN(slot->bitmap);
+    }
+    if(surface)IDXGISurface_Release(surface);
+    if(texture)ID3D11Texture2D_Release(texture);
+    if(device1)ID3D11Device1_Release(device1);
+    if(FAILED(hr)){drop_video(slot);return NULL;}
+    slot->id=id;slot->used=++s->video_clock;s->video_opens++;
+    return slot;
+}
+int zgpu_takes_video(const ZiVideoPicture *v){return v->native&&v->native_id?1:0;}
+HRESULT zgpu_prepare_video(State *s,const ZiVideoPicture *v){
+    if(s->drawing||s->image_candidate.count||!zgpu_takes_video(v))return E_INVALIDARG;
+    HRESULT hr=S_OK;if(!s->context){hr=create_device(s);if(FAILED(hr))return hr;}
+    CachedImage candidate={0};candidate.count=1;candidate.dynamic=1;candidate.video=v->native_id;candidate.video_handle=v->native;
+    s->image_candidate=candidate;return S_OK;
+}
+/* 0 when the slot shows the picture now, 1 when it is another kind of
+   image, to upload anew. */
+int zgpu_update_video(State *s,uint32_t slot,const ZiVideoPicture *v){
+    if(s->drawing||slot>=s->image_capacity||!s->images[slot].video||!zgpu_takes_video(v))return 1;
+    s->images[slot].video=v->native_id;s->images[slot].video_handle=v->native;return 0;
+}
+uint64_t zgpu_video_opens(State *s){return s?s->video_opens:0;}
+static HRESULT draw_video(State *s,const CachedImage *image,const ZiImagePlan *plan){
+    SharedVideo *v=open_video(s,image->video,image->video_handle);
+    /* A picture that cannot be opened, or that the decoder holds past the
+       wait, leaves its place empty this frame. */
+    if(!v)return S_OK;
+    if(!v->acquired){
+        if(IDXGIKeyedMutex_AcquireSync(v->mutex,0,100)!=S_OK)return S_OK;
+        v->acquired=1;
+    }
+    const D2D1_RECT_F destination=rectangle(plan->destination.x,plan->destination.y,plan->destination.width,plan->destination.height),source=rectangle(plan->source.x,plan->source.y,plan->source.width,plan->source.height);
+    ID2D1RenderTarget_DrawBitmap(RT(s),(ID2D1Bitmap *)v->bitmap,&destination,plan->opacity,plan->sampling?D2D1_BITMAP_INTERPOLATION_MODE_LINEAR:D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,&source);
+    return S_OK;
+}
 HRESULT zgpu_image(State *s,uint32_t slot,const ZiImagePlan *plan){
+    if(s->drawing&&slot<s->image_capacity&&s->images[slot].video&&plan->level==0)return draw_video(s,&s->images[slot],plan);
     if(!s->drawing||slot>=s->image_capacity||plan->level>=s->images[slot].count||!s->images[slot].bitmaps[s->images[slot].active][plan->level])return E_INVALIDARG;
     const D2D1_RECT_F destination=rectangle(plan->destination.x,plan->destination.y,plan->destination.width,plan->destination.height),source=rectangle(plan->source.x,plan->source.y,plan->source.width,plan->source.height);
     ID2D1RenderTarget_DrawBitmap(RT(s),s->images[slot].bitmaps[s->images[slot].active][plan->level],&destination,plan->opacity,plan->sampling?D2D1_BITMAP_INTERPOLATION_MODE_LINEAR:D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,&source);return S_OK;
@@ -832,13 +1037,19 @@ static HRESULT end_frame(State *s,int offscreen) {
     if(s->layers&&s->layers->depth){finish_draw(s);return E_UNEXPECTED;}
     while (s->clips) { ID2D1RenderTarget_PopAxisAlignedClip(RT(s)); s->clips--; }
     HRESULT hr = ID2D1RenderTarget_EndDraw(RT(s), NULL, NULL); s->drawing = FALSE;
+    release_videos(s);
     sweep(s);
-    if(s->layers)s->context->lpVtbl->SetTarget(s->context,(ID2D1Image *)s->target);
+    const int from_plane = s->plane_drawing; s->plane_drawing = 0;
+    /* Until it is presented, the plane holds a frame the tracker did not
+       see drawn. */
+    if (from_plane) s->plane_valid = 0;
+    if(s->layers||from_plane)s->context->lpVtbl->SetTarget(s->context,(ID2D1Image *)s->target);
     if (FAILED(hr)) {gpu_layer_abort_metadata(s);return failure(s, hr);}
     if (s->fault == 1) { s->fault = 0;gpu_layer_abort_metadata(s);return failure(s, DXGI_ERROR_DEVICE_REMOVED); }
     if(offscreen)return S_OK;
     if (s->fault == 3) { s->fault=0;s->busy_presents++;gpu_layer_abort_metadata(s);return DXGI_ERROR_WAS_STILL_DRAWING; }
     if(s->layers){hr=gpu_layer_copy_window(s);if(FAILED(hr)){gpu_layer_abort_metadata(s);return failure(s,hr);}}
+    if(from_plane){hr=plane_copy_window(s);if(FAILED(hr))return failure(s,hr);}
     BOOL was_visible=(GetWindowLongW(s->surface,GWL_STYLE)&WS_VISIBLE)!=0;
     if (!was_visible) ShowWindow(s->surface, SW_SHOWNOACTIVATE);
     hr = IDXGISwapChain1_Present(s->swapchain, 0, DXGI_PRESENT_DO_NOT_WAIT);
@@ -852,6 +1063,7 @@ static HRESULT end_frame(State *s,int offscreen) {
         if(!s->layers)hide_surface(s); return failure(s, hr);
     }
     if(s->layers){GpuLayers *l=s->layers;unsigned previous=l->front;l->front=l->work;l->work=previous;l->active=0;l->stats.committed_frames++;}
+    if(from_plane)s->plane_valid=1;
     s->presents++;
     return hr;
 }
@@ -888,12 +1100,23 @@ HWND zgpu_test_swapchain_window(State *s) {
     return hwnd;
 }
 
+/* The texture the frame drawing draws in: the kept plane, or the swap
+   chain's back buffer. */
+static HRESULT frame_texture(State *s, ID3D11Texture2D **out) {
+    *out = NULL;
+    if (!s->plane_drawing || !s->plane) return IDXGISwapChain1_GetBuffer(s->swapchain, 0, &IID_ID3D11Texture2D, (void **)out);
+    IDXGISurface *surface = NULL;
+    HRESULT hr = ID2D1Bitmap1_GetSurface(s->plane, &surface);
+    if (SUCCEEDED(hr)) hr = IUnknown_QueryInterface((IUnknown *)surface, &IID_ID3D11Texture2D, (void **)out);
+    if (surface) IDXGISurface_Release(surface);
+    return hr;
+}
 /* Explicit synchronous readback for hidden integration tests only. */
 HRESULT zgpu_test_pixels(State *s,UINT width,UINT height,uint32_t *rgb){
     if(!s||!s->drawing||width!=s->width||height!=s->height||!rgb)return E_INVALIDARG;
     HRESULT hr=ID2D1RenderTarget_Flush(RT(s),NULL,NULL);if(FAILED(hr))return failure(s,hr);
     ID3D11Texture2D *back=NULL,*staging=NULL;ID3D11DeviceContext *context=NULL;
-    hr=IDXGISwapChain1_GetBuffer(s->swapchain,0,&IID_ID3D11Texture2D,(void **)&back);OWN(back);if(FAILED(hr))goto done;
+    hr=frame_texture(s,&back);OWN(back);if(FAILED(hr))goto done;
     D3D11_TEXTURE2D_DESC desc={0};desc.Width=width;desc.Height=height;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
     desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     hr=ID3D11Device_CreateTexture2D(s->d3d,&desc,NULL,&staging);OWN(staging);if(FAILED(hr))goto done;
@@ -909,13 +1132,40 @@ HRESULT zgpu_test_pixels(State *s,UINT width,UINT height,uint32_t *rgb){
     }
 done:DROP(context);DROP(staging);DROP(back);return failure(s,hr);
 }
+/* The kept plane's pixel, between frames; tests only. */
+HRESULT zgpu_test_plane_pixel(State *s, UINT x, UINT y, uint32_t *rgb) {
+    if (!s || s->drawing || !s->plane || x >= s->plane_width || y >= s->plane_height) return E_INVALIDARG;
+    s->plane_drawing = 1;
+    ID3D11Texture2D *plane = NULL, *staging = NULL;
+    ID3D11DeviceContext *context = NULL;
+    HRESULT hr = frame_texture(s, &plane); OWN(plane);
+    s->plane_drawing = 0;
+    if (FAILED(hr)) goto done;
+    D3D11_TEXTURE2D_DESC desc = {0};
+    desc.Width=desc.Height=desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
+    desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM; desc.Usage=D3D11_USAGE_STAGING; desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(s->d3d, &desc, NULL, &staging); OWN(staging);
+    if (FAILED(hr)) goto done;
+    ID3D11Device_GetImmediateContext(s->d3d, &context); OWN(context);
+    const D3D11_BOX box = {x,y,0,x+1,y+1,1};
+    ID3D11DeviceContext_CopySubresourceRegion(context, (ID3D11Resource *)staging, 0,0,0,0,(ID3D11Resource *)plane,0,&box);
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    hr = ID3D11DeviceContext_Map(context,(ID3D11Resource *)staging,0,D3D11_MAP_READ,0,&mapped);
+    if (SUCCEEDED(hr)) {
+        const unsigned char *pixel = mapped.pData;
+        *rgb = ((uint32_t)pixel[2]<<16) | ((uint32_t)pixel[1]<<8) | pixel[0];
+        ID3D11DeviceContext_Unmap(context,(ID3D11Resource *)staging,0);
+    }
+done:
+    DROP(context); DROP(staging); DROP(plane); return hr;
+}
 HRESULT zgpu_test_pixel(State *s, UINT x, UINT y, uint32_t *rgb) {
     if (!s || !s->drawing || x >= s->width || y >= s->height) return E_INVALIDARG;
     HRESULT hr = ID2D1RenderTarget_Flush(RT(s), NULL, NULL);
     if (FAILED(hr)) return failure(s, hr);
     ID3D11Texture2D *back = NULL, *staging = NULL;
     ID3D11DeviceContext *context = NULL;
-    hr = IDXGISwapChain1_GetBuffer(s->swapchain, 0, &IID_ID3D11Texture2D, (void **)&back); OWN(back);
+    hr = frame_texture(s, &back); OWN(back);
     if (FAILED(hr)) goto done;
     D3D11_TEXTURE2D_DESC desc = {0};
     desc.Width=desc.Height=desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
@@ -942,7 +1192,7 @@ HRESULT zgpu_test_text_pixels(State *s, UINT x, UINT y, UINT width, UINT height,
     if (FAILED(hr)) return failure(s, hr);
     ID3D11Texture2D *back = NULL, *staging = NULL;
     ID3D11DeviceContext *context = NULL;
-    hr = IDXGISwapChain1_GetBuffer(s->swapchain, 0, &IID_ID3D11Texture2D, (void **)&back); OWN(back);
+    hr = frame_texture(s, &back); OWN(back);
     if (FAILED(hr)) goto done;
     D3D11_TEXTURE2D_DESC desc = {0};
     desc.Width=width; desc.Height=height; desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
