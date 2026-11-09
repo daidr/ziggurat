@@ -188,6 +188,8 @@ pub const Host = struct {
     ids: [types.max_menu_items]u64 = undefined,
     enabled: [types.max_menu_items]bool = undefined,
     count: usize = 0,
+    /// The menu came from startMenu: complete with its commands as they are.
+    raw: bool = false,
     tracking: bool = false,
     cancelled: bool = false,
     last_error: u32 = 0,
@@ -210,24 +212,40 @@ pub const Host = struct {
         defer if (owned) {
             _ = c.DestroyMenu(built.menu);
         };
+        try self.begin(request, built.menu, target, placement);
+        owned = false;
+        self.count = built.count;
+        self.raw = false;
+        for (entries[0..built.count], 0..) |entry, index| {
+            self.ids[index] = entry.id;
+            self.enabled[index] = entry.enabled;
+        }
+    }
+
+    /// Tracks a menu the caller built, which the Host then owns and destroys;
+    /// on error the caller keeps it.
+    /// The request completes with the chosen native command itself, or null.
+    pub fn startMenu(self: *Host, request: u64, menu: c.HMENU, target: c.HWND, placement: Placement) !void {
+        if (self.pending()) return error.MenuAlreadyPending;
+        if (request == 0) return error.InvalidRequestId;
+        try self.begin(request, menu, target, placement);
+        self.count = 0;
+        self.raw = true;
+    }
+
+    fn begin(self: *Host, request: u64, menu: c.HMENU, target: c.HWND, placement: Placement) !void {
         const helper = try createHelper(self);
         if (c.PostMessageW(helper, start_message, 0, 0) == 0) {
             self.last_error = c.GetLastError();
             _ = c.DestroyWindow(helper);
             return error.MenuStartFailed;
         }
-        owned = false;
         self.helper = helper;
-        self.menu = built.menu;
+        self.menu = menu;
         self.target = target orelse helper;
         self.request = request;
         self.placement = placement;
-        self.count = built.count;
         self.cancelled = false;
-        for (entries[0..built.count], 0..) |entry, index| {
-            self.ids[index] = entry.id;
-            self.enabled[index] = entry.enabled;
-        }
     }
 
     /// Closes the menu; the request still completes with `selected = null`.
@@ -263,7 +281,9 @@ pub const Host = struct {
 
     fn finish(self: *Host, command: usize) void {
         const request = self.request;
-        const selected: ?u64 = if (command >= 1 and command <= self.count and self.enabled[command - 1]) self.ids[command - 1] else null;
+        const selected: ?u64 = if (self.raw)
+            (if (command != 0) command else null)
+        else if (command >= 1 and command <= self.count and self.enabled[command - 1]) self.ids[command - 1] else null;
         const helper = self.helper;
         const menu = self.menu;
         self.reset();
@@ -341,6 +361,37 @@ fn helperProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callcon
     host.tracking = false;
     host.finish(@intCast(@max(command, 0)));
     return 0;
+}
+
+/// Appends copies of `source`'s items to `into`, submenus copied in turn,
+/// with the same commands, labels, states and bitmaps. Bitmaps stay shared:
+/// destroying the copy leaves them to `source`'s owner.
+pub fn copyItems(source: c.HMENU, into: c.HMENU) bool {
+    const count = c.GetMenuItemCount(source);
+    if (count < 0) return false;
+    for (0..@intCast(count)) |index| {
+        var label: [256]u16 = undefined;
+        var info = std.mem.zeroes(c.MENUITEMINFOW);
+        info.cbSize = @sizeOf(c.MENUITEMINFOW);
+        info.fMask = @intCast(c.MIIM_FTYPE | c.MIIM_STATE | c.MIIM_ID | c.MIIM_STRING | c.MIIM_SUBMENU | c.MIIM_BITMAP | c.MIIM_CHECKMARKS | c.MIIM_DATA);
+        info.dwTypeData = &label;
+        info.cch = label.len;
+        if (c.GetMenuItemInfoW(source, @intCast(index), c.TRUE, &info) == 0) return false;
+        if (info.hSubMenu) |submenu| {
+            const copied = c.CreatePopupMenu() orelse return false;
+            if (!copyItems(submenu, copied)) {
+                _ = c.DestroyMenu(copied);
+                return false;
+            }
+            info.hSubMenu = copied;
+        }
+        if (info.fType & @as(c.UINT, @intCast(c.MFT_SEPARATOR)) != 0) info.fMask &= ~@as(c.UINT, @intCast(c.MIIM_STRING));
+        if (c.InsertMenuItemW(into, @intCast(index), c.TRUE, &info) == 0) {
+            if (info.hSubMenu) |copied| _ = c.DestroyMenu(copied);
+            return false;
+        }
+    }
+    return true;
 }
 
 /// How far from the taskbar, in DIPs, Windows 11 opens the menus of the

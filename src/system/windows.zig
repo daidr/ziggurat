@@ -51,6 +51,8 @@ pub const Owner = struct {
     barless: bool = false,
     /// The letter of Alt and a letter that opened the bar popup, and the popup.
     menu_key: struct { popup: c.HMENU = null, key: usize = 0 } = .{},
+    /// The bar's menus in a popup, for a window without a menu bar.
+    bar_popup: native_menu.Host = .{ .context = undefined, .done = barPopupDone },
 
     pub fn init(context: *anyopaque, on_action: *const fn (*anyopaque, z.Window, types.Action) void) Owner {
         return .{ .context = context, .on_action = on_action };
@@ -82,6 +84,8 @@ pub const Owner = struct {
         self.picker.detach();
         self.message_dialog.detach();
         self.popup.detach();
+        self.bar_popup.detach();
+        self.menu_key = .{};
         if (self.window == null) return;
         try self.clearHotkeys();
         try self.clearNotification();
@@ -440,6 +444,8 @@ pub const Owner = struct {
         self.picker.detach();
         self.message_dialog.detach();
         self.popup.detach();
+        self.bar_popup.detach();
+        self.menu_key = .{};
         while (self.hotkey_count != 0) {
             self.hotkey_count -= 1;
             _ = c.UnregisterHotKey(self.hwnd, self.hotkeys[self.hotkey_count].native_id);
@@ -467,48 +473,41 @@ pub const Owner = struct {
     }
     /// Shows the bar's menus in a popup at the top of the client area. The
     /// submenus are the bar's own, taken back before the popup is destroyed.
-    fn popupMenuBar(self: *Owner, window: z.Window, key: usize) void {
+    fn popupMenuBar(self: *Owner, key: usize) void {
         const bar = self.menu orelse return;
-        const count = c.GetMenuItemCount(bar);
-        if (count <= 0) return;
+        if (self.bar_popup.pending() or self.popup.pending()) return;
+        // A copy, so the bar may change or go while the popup is open.
         const popup = c.CreatePopupMenu() orelse return;
-        defer {
-            var index = count;
-            while (index > 0) {
-                index -= 1;
-                _ = c.RemoveMenu(popup, @intCast(index), c.MF_BYPOSITION);
-            }
+        if (!native_menu.copyItems(bar, popup)) {
             _ = c.DestroyMenu(popup);
-        }
-        for (0..@intCast(count)) |index| {
-            var label: [256]u16 = undefined;
-            if (c.GetMenuStringW(bar, @intCast(index), &label, label.len, c.MF_BYPOSITION) < 0) label[0] = 0;
-            const state: c.UINT = c.GetMenuState(bar, @intCast(index), c.MF_BYPOSITION);
-            var flags: c.UINT = @as(c.UINT, c.MF_STRING) | (state & @as(c.UINT, c.MF_GRAYED));
-            var item: usize = 0;
-            if (c.GetSubMenu(bar, @intCast(index))) |submenu| {
-                flags |= @as(c.UINT, c.MF_POPUP);
-                item = @intFromPtr(submenu);
-            } else item = c.GetMenuItemID(bar, @intCast(index));
-            if (state & @as(c.UINT, c.MF_SEPARATOR) != 0) flags = c.MF_SEPARATOR;
-            _ = c.AppendMenuW(popup, flags, item, &label);
+            return;
         }
         var point: c.POINT = .{ .x = 0, .y = 0 };
         _ = c.ClientToScreen(self.hwnd, &point);
+        // The menu loop starts from a posted message outside this window's
+        // callback, so App tasks keep running while the menu is open.
+        self.bar_popup.context = self;
+        self.bar_popup.startMenu(1, popup, self.hwnd, .{ .x = point.x, .y = point.y, .alignment = c.TPM_LEFTALIGN | c.TPM_TOPALIGN }) catch {
+            _ = c.DestroyMenu(popup);
+            return;
+        };
         if (key != 0) {
-            // The menu loop takes the letter as typed in the popup.
+            // The menu loop takes the letter as typed in the popup; it is
+            // posted after the message that starts the loop.
             self.menu_key = .{ .popup = popup, .key = key };
             _ = c.PostMessageW(self.hwnd, c.WM_CHAR, key, 0);
         }
-        // The menu loop only dispatches messages: a wake whose message the
-        // main loop dropped this turn would leave App tasks waiting until
-        // the menu closes.
-        window.app.enterNativeLoop();
-        const command = c.TrackPopupMenuEx(popup, c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, point.x, point.y, self.hwnd, null);
+    }
+    fn barPopupDone(ptr: *anyopaque, _: u64, selected: ?u64) void {
+        const self: *Owner = @ptrCast(@alignCast(ptr));
         self.menu_key = .{};
-        if (command <= 0 or window.isClosed() or self.window == null) return;
+        const command = selected orelse return;
+        const window = self.window orelse return;
+        const scope = window.beginCallback() orelse return;
+        defer scope.end();
+        if (window.isClosed()) return;
         for (self.entries[0..self.entry_count]) |entry| if (entry.command == command) {
-            if (entry.enabled) self.on_action(self.context, window, .{ .menu = entry.id });
+            if (entry.enabled and editRoleEnabled(window, entry)) self.on_action(self.context, window, .{ .menu = entry.id });
             return;
         };
     }
@@ -527,14 +526,15 @@ pub const Owner = struct {
             // Alt or F10 alone (lp 0) take the keyboard to the menus, and Alt
             // and a letter (lp the letter) open the menu of the letter; Alt
             // and Space keep opening the window menu.
-            self.popupMenuBar(window, @bitCast(lp));
+            self.popupMenuBar(@bitCast(lp));
             return 0;
         }
         if (native_message == c.WM_INITMENUPOPUP and self.entry_count != 0) {
             // The Edit roles are enabled as the focus can act on them as
-            // their menu opens; those the app disabled stay so.
+            // their menu opens; those the app disabled stay so. The bar
+            // popup's menus are copies: its commands are looked up in them.
             const opened: c.HMENU = @ptrFromInt(wp);
-            for (self.entries[0..self.entry_count]) |entry| if (entry.menu == opened) if (roles.Role.fromId(entry.id)) |role| if (role.editCommand() != null) {
+            for (self.entries[0..self.entry_count]) |entry| if (entry.menu == opened or self.bar_popup.pending()) if (roles.Role.fromId(entry.id)) |role| if (role.editCommand() != null) {
                 const enabled = entry.enabled and entry.ancestor_enabled and editRoleEnabled(window, entry);
                 _ = c.EnableMenuItem(opened, entry.command, @as(c.UINT, @intCast(c.MF_BYCOMMAND | (if (enabled) c.MF_ENABLED else c.MF_GRAYED))));
             };
