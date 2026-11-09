@@ -180,6 +180,9 @@ pub const Placement = struct {
 pub const Host = struct {
     context: *anyopaque,
     done: Done,
+    /// Runs just before the menu loop starts, which dispatches only
+    /// messages: an App whose wake has no message queued re-posts it here.
+    entering: ?*const fn (*anyopaque) void = null,
     helper: c.HWND = null,
     menu: c.HMENU = null,
     target: c.HWND = null,
@@ -341,6 +344,7 @@ fn helperProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callcon
     const menu = host.menu;
     const target = host.target;
     const placement = host.placement;
+    if (host.entering) |entering| entering(host.context);
     host.tracking = true;
     tracking_depth += 1;
     if (placement.foreground) _ = c.SetForegroundWindow(target);

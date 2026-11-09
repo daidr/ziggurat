@@ -44,7 +44,7 @@ pub const Owner = struct {
     taskbar_created: u32 = 0,
     last_error: u32 = 0,
     picker: picker_api.Picker = .{},
-    popup: native_menu.Host = .{ .context = undefined, .done = popupDone },
+    popup: native_menu.Host = .{ .context = undefined, .done = popupDone, .entering = enteringMenu },
     message_dialog: message_api.Message = .{},
     /// A window that shows a material has no menu bar: the menu stays here
     /// and Alt or F10 open it in a popup.
@@ -52,7 +52,7 @@ pub const Owner = struct {
     /// The letter of Alt and a letter that opened the bar popup, and the popup.
     menu_key: struct { popup: c.HMENU = null, key: usize = 0 } = .{},
     /// The bar's menus in a popup, for a window without a menu bar.
-    bar_popup: native_menu.Host = .{ .context = undefined, .done = barPopupDone },
+    bar_popup: native_menu.Host = .{ .context = undefined, .done = barPopupDone, .entering = enteringMenu },
 
     pub fn init(context: *anyopaque, on_action: *const fn (*anyopaque, z.Window, types.Action) void) Owner {
         return .{ .context = context, .on_action = on_action };
@@ -497,6 +497,10 @@ pub const Owner = struct {
             self.menu_key = .{ .popup = popup, .key = key };
             _ = c.PostMessageW(self.hwnd, c.WM_CHAR, key, 0);
         }
+    }
+    fn enteringMenu(ptr: *anyopaque) void {
+        const self: *Owner = @ptrCast(@alignCast(ptr));
+        if (self.window) |window| window.app.enterNativeLoop();
     }
     fn barPopupDone(ptr: *anyopaque, _: u64, selected: ?u64) void {
         const self: *Owner = @ptrCast(@alignCast(ptr));

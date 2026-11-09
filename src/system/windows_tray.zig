@@ -29,13 +29,17 @@ pub const Tray = struct {
     taskbar_created: u32 = 0,
     stop_node: z.StopParticipant = undefined,
     stop_token: ?z.StopToken = null,
-    popup: native_menu.Host = .{ .context = undefined, .done = popupDone },
+    popup: native_menu.Host = .{ .context = undefined, .done = popupDone, .entering = enteringMenu },
     /// The item's own menu, opened by a right click after `.context`.
     menu: menus.Snapshot = .{},
     /// The pending popup is the item's own menu, not a popupMenu request.
     menu_pending: bool = false,
     last_error: u32 = 0,
 
+    fn enteringMenu(ptr: *anyopaque) void {
+        const self: *Tray = @ptrCast(@alignCast(ptr));
+        if (self.app) |app| app.enterNativeLoop();
+    }
     pub fn init(context: *anyopaque, on_action: *const fn (*anyopaque, *Tray, types.TrayAction) void) Tray {
         return .{ .context = context, .on_action = on_action };
     }
