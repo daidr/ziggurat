@@ -2,10 +2,13 @@
    frame-server mode, which decodes on a Direct3D 11 device of the engine's
    own (in hardware, through DXVA, where the GPU has it), plays the sound and
    keeps the clock. As each frame of the window builds, the engine converts
-   the picture due into a BGRA texture (TransferVideoFrame, on the GPU),
-   which is read back into a ring of three pictures in memory that every
-   renderer draws. The engine's events come on Media Foundation's threads,
-   through one notify object of each engine, and wake the player. */
+   the picture due into a BGRA texture of a ring of three (TransferVideoFrame,
+   on the GPU), which it shares by an NT handle under a keyed mutex (key 0):
+   Direct3D 11 opens it on its own device and samples it where the engine
+   left it, and the CPU renderer has it read back (zv_mf_read). Where the
+   device cannot share textures, each picture is read back into memory as it
+   comes. The engine's events come on Media Foundation's threads, through
+   one notify object of each engine, and wake the player. */
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #define CINTERFACE
@@ -13,6 +16,7 @@
 #include <ole2.h>
 #include <d3d10.h>
 #include <d3d11.h>
+#include <dxgi1_2.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfmediaengine.h>
@@ -28,6 +32,8 @@ static const GUID iid_notify = {0xfee7c112, 0xe776, 0x42b5, {0x9b, 0xbf, 0x00, 0
 static const GUID iid_engine_ex = {0x83015ead, 0xb1e6, 0x40d0, {0xa9, 0x8a, 0x37, 0x14, 0x5f, 0xfe, 0x1a, 0xd1}};
 static const GUID iid_unknown = {0, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
 static const GUID iid_multithread = {0x9b7e4e00, 0x342c, 0x4106, {0xa1, 0x9f, 0x4f, 0x27, 0x04, 0xf6, 0x89, 0xf0}};
+static const GUID iid_resource1 = {0x30961379, 0x4609, 0x4a41, {0x99, 0x8e, 0x54, 0xfe, 0x56, 0x7e, 0xe0, 0xc1}};
+static const GUID iid_keyed_mutex = {0x9d8e1289, 0xd7b3, 0x465f, {0x81, 0x26, 0x25, 0x0e, 0x34, 0x9a, 0xf8, 0x5d}};
 static const GUID attr_callback = {0xc60381b8, 0x83a4, 0x41f8, {0xa3, 0xd0, 0xde, 0x05, 0x07, 0x68, 0x49, 0xa9}};
 static const GUID attr_dxgi_manager = {0x065702da, 0x1094, 0x486d, {0x86, 0x17, 0xee, 0x7c, 0xc4, 0xee, 0x46, 0x48}};
 static const GUID attr_output_format = {0x5066893c, 0x8cf9, 0x42bc, {0x8b, 0x8a, 0x47, 0x22, 0x12, 0xe5, 0x27, 0x26}};
@@ -70,7 +76,19 @@ static BOOL CALLBACK load(PINIT_ONCE once, PVOID parameter, PVOID *context) {
 
 enum { LOADING = 0, READY = 1, BUFFERING = 2, ENDED = 3, FAILED_STATE = 4 };
 
-typedef struct Picture { uint8_t *pixels; uint32_t width, height; } Picture;
+/* A picture of the ring: in memory, or in a shared texture (its NT handle
+   and keyed mutex, and an identity no other texture of the process has). */
+typedef struct Picture {
+    uint8_t *pixels;
+    uint32_t width, height;
+    ID3D11Texture2D *texture;
+    IDXGIKeyedMutex *mutex;
+    HANDLE handle;
+    uint32_t id;
+} Picture;
+static LONG texture_serial;
+/* How long a picture waits, in ms, for the renderer reading its texture. */
+#define ACQUIRE_TIMEOUT 100
 
 typedef struct ZvMf ZvMf;
 typedef struct Notify { IMFMediaEngineNotifyVtbl *lpVtbl; ZvMf *owner; } Notify;
@@ -84,6 +102,11 @@ struct ZvMf {
     IMFDXGIDeviceManager *manager;
     ID3D11Texture2D *target, *staging;
     uint32_t target_width, target_height;
+    /* Pictures go in shared textures: 1 while they can, 0 once one could
+       not be made. */
+    int share;
+    ID3D11Texture2D *read_staging;
+    uint32_t read_width, read_height;
     Picture ring[RING];
     int shown;
     uint32_t width, height;
@@ -150,10 +173,18 @@ static IMFMediaEngineNotifyVtbl notify_vtbl = {notify_query, notify_add, notify_
 
 #define DROP(p) do { if (p) { IUnknown_Release((IUnknown *)(p)); (p) = NULL; } } while (0)
 
+static void drop_shared(Picture *p) {
+    DROP(p->mutex);
+    DROP(p->texture);
+    if (p->handle) { CloseHandle(p->handle); p->handle = NULL; }
+    p->id = 0;
+}
 static void release(ZvMf *s) {
     DROP(s->ex);
     DROP(s->engine);
     DROP(s->staging);
+    DROP(s->read_staging);
+    for (int i = 0; i < RING; i++) drop_shared(&s->ring[i]);
     DROP(s->target);
     DROP(s->manager);
     DROP(s->context);
@@ -199,6 +230,7 @@ int zv_mf_open(const WCHAR *url, const uint8_t *bytes, size_t length, ZvMf **out
     if (!s) return 2;
     InitializeSRWLock(&s->lock);
     s->shown = -1;
+    s->share = 1;
     s->notify.lpVtbl = &notify_vtbl;
     s->notify.owner = s;
     if (FAILED(new_device(s))) { release(s); return 1; }
@@ -245,9 +277,47 @@ void zv_mf_set_wake(ZvMf *s, void (*wake)(void *), void *context) {
     ReleaseSRWLockExclusive(&s->lock);
 }
 
+/* Makes picture p's shared texture of width × height; 0 when the device
+   cannot share one. */
+static int share_texture(ZvMf *s, Picture *p, uint32_t width, uint32_t height) {
+    if (p->texture && p->width == width && p->height == height) return 1;
+    drop_shared(p);
+    D3D11_TEXTURE2D_DESC desc = {width, height, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX};
+    IDXGIResource1 *resource = NULL;
+    HRESULT hr = ID3D11Device_CreateTexture2D(s->device, &desc, NULL, &p->texture);
+    if (SUCCEEDED(hr)) hr = ID3D11Texture2D_QueryInterface(p->texture, &iid_resource1, (void **)&resource);
+    if (SUCCEEDED(hr)) hr = IDXGIResource1_CreateSharedHandle(resource, NULL, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, NULL, &p->handle);
+    DROP(resource);
+    if (SUCCEEDED(hr)) hr = ID3D11Texture2D_QueryInterface(p->texture, &iid_keyed_mutex, (void **)&p->mutex);
+    if (FAILED(hr)) { drop_shared(p); return 0; }
+    HeapFree(GetProcessHeap(), 0, p->pixels);
+    p->pixels = NULL;
+    p->width = width;
+    p->height = height;
+    p->id = (uint32_t)InterlockedIncrement(&texture_serial);
+    return 1;
+}
+/* Converts the picture due into picture i's shared texture. */
+static int transfer_shared(ZvMf *s, int i, uint32_t width, uint32_t height) {
+    Picture *p = &s->ring[i];
+    if (!share_texture(s, p, width, height)) return -1;
+    if (IDXGIKeyedMutex_AcquireSync(p->mutex, 0, ACQUIRE_TIMEOUT) != S_OK) return 0;
+    RECT rect = {0, 0, (LONG)width, (LONG)height};
+    MFARGB border = {0, 0, 0, 255}; /* opaque black */
+    const HRESULT hr = IMFMediaEngine_TransferVideoFrame(s->engine, (IUnknown *)p->texture, NULL, &rect, &border);
+    IDXGIKeyedMutex_ReleaseSync(p->mutex, 0);
+    return SUCCEEDED(hr) ? 1 : 0;
+}
 /* Converts the picture due into picture i of the ring, through the BGRA
    texture the engine draws into and a staging copy read back. */
 static int transfer(ZvMf *s, int i, uint32_t width, uint32_t height) {
+    if (s->share) {
+        const int shared = transfer_shared(s, i, width, height);
+        if (shared >= 0) return shared;
+        /* The device shares no textures: pictures go in memory. */
+        s->share = 0;
+        for (int j = 0; j < RING; j++) { drop_shared(&s->ring[j]); s->ring[j].width = s->ring[j].height = 0; }
+    }
     if (!s->target || s->target_width != width || s->target_height != height) {
         DROP(s->target);
         DROP(s->staging);
@@ -286,8 +356,10 @@ static int transfer(ZvMf *s, int i, uint32_t width, uint32_t height) {
 
 /* The picture to show: 1 with it in `pixels`, `width` and `height`, and
    `changed` when it is new; 0 while there is none yet. */
-int zv_mf_frame(ZvMf *s, const uint8_t **pixels, uint32_t *width, uint32_t *height, int *changed) {
+int zv_mf_frame(ZvMf *s, const uint8_t **pixels, uint32_t *width, uint32_t *height, int *changed, HANDLE *handle, uint32_t *id) {
     *changed = 0;
+    *handle = NULL;
+    *id = 0;
     LONGLONG pts = 0;
     const int fresh = IMFMediaEngine_OnVideoStreamTick(s->engine, &pts) == S_OK;
     AcquireSRWLockExclusive(&s->lock);
@@ -321,6 +393,35 @@ int zv_mf_frame(ZvMf *s, const uint8_t **pixels, uint32_t *width, uint32_t *heig
     *pixels = s->ring[s->shown].pixels;
     *width = s->ring[s->shown].width;
     *height = s->ring[s->shown].height;
+    *handle = s->ring[s->shown].handle;
+    *id = s->ring[s->shown].id;
+    return 1;
+}
+/* Reads the shared picture `id` back as opaque BGRA rows of `stride`
+   bytes, for the CPU renderer; 0 when the ring no longer holds it. */
+int zv_mf_read(ZvMf *s, uint32_t id, uint8_t *pixels, uint32_t stride) {
+    Picture *p = NULL;
+    for (int i = 0; i < RING; i++) if (s->ring[i].texture && s->ring[i].id == id) p = &s->ring[i];
+    if (!p || !id) return 0;
+    if (!s->read_staging || s->read_width != p->width || s->read_height != p->height) {
+        DROP(s->read_staging);
+        D3D11_TEXTURE2D_DESC desc = {p->width, p->height, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, {1, 0}, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0};
+        if (FAILED(ID3D11Device_CreateTexture2D(s->device, &desc, NULL, &s->read_staging))) return 0;
+        s->read_width = p->width;
+        s->read_height = p->height;
+    }
+    if (IDXGIKeyedMutex_AcquireSync(p->mutex, 0, ACQUIRE_TIMEOUT) != S_OK) return 0;
+    ID3D11DeviceContext_CopyResource(s->context, (ID3D11Resource *)s->read_staging, (ID3D11Resource *)p->texture);
+    IDXGIKeyedMutex_ReleaseSync(p->mutex, 0);
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(ID3D11DeviceContext_Map(s->context, (ID3D11Resource *)s->read_staging, 0, D3D11_MAP_READ, 0, &mapped))) return 0;
+    for (uint32_t y = 0; y < p->height; y++) {
+        const uint8_t *row = (const uint8_t *)mapped.pData + (size_t)y * mapped.RowPitch;
+        uint8_t *to = pixels + (size_t)y * stride;
+        memcpy(to, row, (size_t)p->width * 4);
+        for (uint32_t x = 0; x < p->width; x++) to[x * 4 + 3] = 255;
+    }
+    ID3D11DeviceContext_Unmap(s->context, (ID3D11Resource *)s->read_staging, 0);
     return 1;
 }
 

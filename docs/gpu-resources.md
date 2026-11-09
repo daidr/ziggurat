@@ -17,6 +17,8 @@ try context.attach(window);
 
 DeviceDomain、Texture、Context、renderer 和所有回调只在 App 的 owner 主线程使用。Domain 只能挂接同一个 App 的 Context；配置在 attach 时冻结到 renderer，之后修改 Context.gpu_domain 不会改变已有设备。hardware 与 WARP 是显式创建选项，不互相自动重试。Domain 的 driver 是设备权威：Raw Renderer.Options.driver 仅用于未指定 Domain 的路径；Context 显式指定 hardware/warp 且与 Domain 不符时返回 DomainDriverMismatch，automatic 接受已选 Domain。显式 Domain 初始化失败会使 attach 回滚，不降级为无 Domain 的 renderer。每个 renderer 有独立 D2D device context、窗口 target 与既有 cache，同一个 Domain 的纹理和 contexts 来自同一 D2D device。[Direct2D 资源域](https://learn.microsoft.com/en-us/windows/win32/direct2d/resources-and-resource-domains)允许这种共享；跨 Domain 的纹理明确失败。
 
+未指定 Domain 的 Direct3D 11 窗口 renderer 按 driver 共享进程内同一个 D3D11 device（一个 device 在驱动里占几十 MB，每个窗口一个会成倍增加）；各自保留 D2D factory、device、context、swap chain 与缓存。device 随最后一个持有它的 renderer 释放，并开启 `ID3D10Multithread` 保护，使其他线程对 swap chain 的 DXGI 调用与 immediate context 串行。某个 renderer 发现 device 丢失时把它移出共享槽：之后新建的 renderer 另建一个，仍持有旧 device 的 renderer 在下一帧失败后改用新的。共享 device 不能跨 renderer 采样纹理，跨窗口共享纹理仍需显式 Domain。
+
 ## 拥有与借用
 
 `Domain.upload(ImageView)` 同步上传已有预乘 BGRA8 mip 链。调用开始后先独立 pin CPU 源，再进入 allocator；成功返回的 Texture 不再保留 CPU 描述符或 pixels。普通 Frame 回放只借用已上传的 native bitmap，不解码、上传、分配纹理、读取 GPU pixels 或重新调用业务 draw。

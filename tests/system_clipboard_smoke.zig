@@ -4,6 +4,26 @@ const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const Watchdog = @import("watchdog.zig").Watchdog;
 const clipboard = system.clipboard;
+const zio = @import("ziggurat_io");
+
+/// The Windows clipboard is one desktop-wide lock, and other smokes running
+/// beside this one (system details, document fields) take it briefly. Another
+/// owner holding it is not this smoke's failure, so writes wait it out and
+/// reads use the longest native retry.
+const patient: clipboard.ReadOptions = .{ .attempts = clipboard.max_retry_attempts, .interval_ms = 100 };
+fn retryBusy(comptime call: anytype, args: anytype) !void {
+    var tries: u32 = 0;
+    while (true) : (tries += 1) {
+        @call(.auto, call, args) catch |err| {
+            if (err == error.ClipboardBusy and tries < 100) {
+                zio.sleep(20 * std.time.ns_per_ms);
+                continue;
+            }
+            return err;
+        };
+        return;
+    }
+}
 
 pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
@@ -74,16 +94,16 @@ const Script = struct {
         }
     }
     fn read(self: *Script, format: clipboard.Format, destination: []u8) !void {
-        try self.board.read(&self.request, format, destination, self, result, .{});
+        try self.board.read(&self.request, format, destination, self, result, patient);
     }
     fn begin(self: *Script) !void {
-        try self.board.write(&.{
+        try retryBusy(clipboard.Board.write, .{ &self.board, &[_]clipboard.Entry{
             .{ .format = .{ .kind = .text }, .data = text },
             .{ .format = .{ .kind = .html }, .data = html },
             .{ .format = .{ .kind = .png }, .data = png },
             .{ .format = custom, .data = custom_bytes },
             .{ .format = .{ .kind = .files }, .data = files },
-        });
+        } });
         try self.board.formats(&self.request, self, result);
         try std.testing.expectError(error.RequestPending, self.read(.{ .kind = .text }, &self.buffer));
         // A cancelled slot never calls back, even though native work continues.
@@ -152,7 +172,7 @@ const Script = struct {
                     else => try std.testing.expect(value == .data),
                 }
                 self.step = .lazy;
-                try self.board.offer(.{ .context = self, .render = render, .released = release }, &.{ .{ .kind = .text }, custom });
+                try retryBusy(clipboard.Board.offer, .{ &self.board, clipboard.Provider{ .context = self, .render = render, .released = release }, &[_]clipboard.Format{ .{ .kind = .text }, custom } });
                 try std.testing.expect(self.board.offering());
                 try std.testing.expectEqual(@as(u32, 0), self.renders);
                 try self.read(.{ .kind = .text }, &self.buffer);
@@ -161,7 +181,7 @@ const Script = struct {
                 try expectData(value, "lazy " ++ text);
                 try std.testing.expect(self.renders >= 1 and self.released == 0);
                 // An eager write replaces the offer and releases its provider once.
-                try self.board.write(&.{.{ .format = .{ .kind = .text }, .data = "eager" }});
+                try retryBusy(clipboard.Board.write, .{ &self.board, &[_]clipboard.Entry{.{ .format = .{ .kind = .text }, .data = "eager" }} });
                 if (builtin.os.tag == .macos) try std.testing.expectEqual(@as(c_int, 0), zsc_test_last_host_only());
                 try std.testing.expectEqual(@as(u32, 1), self.released);
                 try std.testing.expect(!self.board.offering());
@@ -170,7 +190,7 @@ const Script = struct {
             },
             .replace => {
                 try expectData(value, "eager");
-                try self.board.offer(.{ .context = self, .render = render, .released = release }, &.{.{ .kind = .text }});
+                try retryBusy(clipboard.Board.offer, .{ &self.board, clipboard.Provider{ .context = self, .render = render, .released = release }, &[_]clipboard.Format{.{ .kind = .text }} });
                 self.board.revoke();
                 self.board.revoke();
                 try std.testing.expectEqual(@as(u32, 2), self.released);
@@ -182,7 +202,7 @@ const Script = struct {
                 // NSPasteboard has no change notification.
                 try std.testing.expect((self.changes >= 1 or !clipboard.capabilities.change_events) and self.spare_calls == 0);
                 // Leave a pending read and a live offer for App stop to reclaim.
-                try self.board.offer(.{ .context = self, .render = render, .released = release }, &.{.{ .kind = .text }});
+                try retryBusy(clipboard.Board.offer, .{ &self.board, clipboard.Provider{ .context = self, .render = render, .released = release }, &[_]clipboard.Format{.{ .kind = .text }} });
                 self.step = .done;
                 try self.read(.{ .kind = .text }, &self.buffer);
                 self.app.quit();
@@ -239,8 +259,8 @@ const Round = struct {
     }
     fn start(context: *anyopaque) void {
         const self: *Round = @ptrCast(@alignCast(context));
-        self.board.write(&.{.{ .format = .{ .kind = .text }, .data = "round" }}) catch self.app.quit();
-        self.board.read(&self.request, .{ .kind = .text }, &self.buffer, self, result, .{}) catch self.app.quit();
+        retryBusy(clipboard.Board.write, .{ &self.board, &[_]clipboard.Entry{.{ .format = .{ .kind = .text }, .data = "round" }} }) catch self.app.quit();
+        self.board.read(&self.request, .{ .kind = .text }, &self.buffer, self, result, patient) catch self.app.quit();
     }
 };
 fn rounds(allocator: std.mem.Allocator) !void {

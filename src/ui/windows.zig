@@ -60,6 +60,11 @@ pub const Renderer = struct {
     /// for each one that opened on a masked layer.
     layer_level: u32 = 0,
     masked_spans: u64 = 0,
+    /// The box a frame drawn in part draws within: drawings outside it are
+    /// skipped.
+    cull: ?damage.Box = null,
+    /// Changes whenever the plane is made again.
+    plane_serial: u64 = 0,
     const VariantFont = struct { key: u32 = 0, scale: f32 = 0, font: c.HFONT = null };
     pub const LayerCandidate = *windows_layers.Workspace;
     pub fn layerMetadataBytes() usize {
@@ -412,6 +417,30 @@ pub const Renderer = struct {
         return self.dc != null;
     }
 
+    /// Whether the plane keeps its pixels from one frame to the next, so a
+    /// frame can draw only what changed: not while layers retarget it, nor
+    /// on a transparent window, whose plane each frame clears.
+    pub fn planeKept(self: *const Renderer) bool {
+        return self.layer_workspace == null and !self.window_transparent and self.hasSurface();
+    }
+    /// Changes whenever the plane is made again.
+    pub fn planeGeneration(self: *const Renderer) u64 {
+        return self.plane_serial;
+    }
+    /// Draws `buffer` within `region` only, each rectangle on its own under
+    /// a clip on its pixels; the rest of the plane keeps the last frame's.
+    pub fn replayDamage(self: *Renderer, buffer: *const commands.Buffer, region: *const damage.Damage, transparent_window: bool) !void {
+        _ = transparent_window;
+        if (region.full or !self.planeKept()) return self.replayBuffer(buffer);
+        defer self.cull = null;
+        for (region.slice()) |box| {
+            if (c.SaveDC(self.dc) == 0) return error.SaveClipFailed;
+            defer _ = c.RestoreDC(self.dc, -1);
+            if (c.IntersectClipRect(self.dc, box.x0, box.y0, box.x1, box.y1) == c.ERROR) return error.SetClipFailed;
+            self.cull = box;
+            try self.replayBuffer(buffer);
+        }
+    }
     pub fn begin(self: *Renderer, paint: z.Paint) !void {
         _ = try geometry.validateSurface(paint.size.width, paint.size.height, paint.size.scale);
         if (paint.transparent != self.window_transparent) {
@@ -457,6 +486,7 @@ pub const Renderer = struct {
             self.width = paint.size.width;
             self.height = paint.size.height;
             self.scale = paint.size.scale;
+            self.plane_serial +%= 1;
         }
     }
     pub fn end(self: *Renderer, paint: z.Paint) void {
@@ -837,6 +867,7 @@ pub const Renderer = struct {
         const box_sources: damage.Sources = .{ .prepared = prepared, .coverage = coverage_resources, .indicators = if (self.backdrop_source) |source| source.indicator_storage[0..source.indicator_len] else &.{} };
         var index: usize = 0;
         while (index < list.len) : (index += 1) {
+            if (self.cull) |box| if (damage.commandBox(list[index], box_sources, self.scale)) |extent| if (!extent.intersects(box)) continue;
             // Each drawing inside a masked clip or an opacity is mixed by
             // itself.
             if (self.masks.len != 0) {

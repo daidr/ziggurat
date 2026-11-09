@@ -44,6 +44,16 @@ test "gradient spread GPU preflight rejects the whole used buffer and skips iner
 const c = @import("ziggurat_c_win32");
 
 extern fn zgpu_create(c_int, *i32) ?*anyopaque;
+extern fn zgpu_shared_device_users(c_int) c_uint;
+extern fn zgpu_plane_kept(*anyopaque, *u64) c_int;
+extern fn zgpu_set_keep_plane(*anyopaque, c_int) void;
+extern fn zgpu_plane_whole(*anyopaque) void;
+extern fn zgpu_plane_part(*anyopaque) void;
+extern fn zgpu_plane_clear_box(*anyopaque) void;
+extern fn zgpu_plane_partial_frames(*anyopaque) u64;
+extern fn zgpu_test_plane_pixel(*anyopaque, c_uint, c_uint, *u32) i32;
+extern fn zgpu_shared_device_creations() c_long;
+extern fn zgpu_shares_device(?*anyopaque, ?*anyopaque) c_int;
 extern fn zgpu_create_in_domain(*anyopaque, *i32) ?*anyopaque;
 extern fn zgpu_create_offscreen(*anyopaque, *i32) ?*anyopaque;
 extern fn zgpu_begin_offscreen(*anyopaque) i32;
@@ -91,6 +101,10 @@ extern fn zgpu_test_unscaled(*anyopaque) c_int;
 extern fn zgpu_test_swapchain_window(*anyopaque) ?*anyopaque;
 extern fn zgpu_frame_ready(*anyopaque) ?*anyopaque;
 extern fn zgpu_prepare_image(*anyopaque, [*]const drawing.ImageLevel, u32) i32;
+extern fn zgpu_takes_video(*const drawing.VideoPicture) c_int;
+extern fn zgpu_prepare_video(*anyopaque, *const drawing.VideoPicture) i32;
+extern fn zgpu_update_video(*anyopaque, u32, *const drawing.VideoPicture) c_int;
+extern fn zgpu_video_opens(*anyopaque) u64;
 extern fn zgpu_prepare_dynamic_image(*anyopaque, [*]const drawing.ImageLevel, u32) i32;
 extern fn zgpu_update_image(*anyopaque, u32, [*]const drawing.ImageLevel, u32) i32;
 extern fn zgpu_reserve_images(*anyopaque, u32) i32;
@@ -620,7 +634,9 @@ pub const Renderer = struct {
         errdefer view.lease.releaseResidency();
         self.images.stats.peak_reserved_bytes = @max(self.images.stats.peak_reserved_bytes, self.images.stats.pixel_bytes + charge);
         self.images.reserveCandidate(charge);
-        try self.result(if (dynamic) zgpu_prepare_dynamic_image(native, view.levels.ptr, @intCast(view.levels.len)) else zgpu_prepare_image(native, view.levels.ptr, @intCast(view.levels.len)));
+        if (try self.videoPicture(view)) |picture| {
+            try self.result(zgpu_prepare_video(native, picture));
+        } else try self.result(if (dynamic) zgpu_prepare_dynamic_image(native, view.levels.ptr, @intCast(view.levels.len)) else zgpu_prepare_image(native, view.levels.ptr, @intCast(view.levels.len)));
         while (self.images.needsEviction(charge)) self.dropImage(self.images.victim() orelse break, true);
         const slot = self.images.empty().?;
         zgpu_commit_image(native, @intCast(slot));
@@ -635,8 +651,38 @@ pub const Renderer = struct {
         if (self.images.entries[slot].?.view.identity == view.identity) return;
         try view.lease.acquireResidency();
         errdefer view.lease.releaseResidency();
-        try self.result(zgpu_update_image(native, @intCast(slot), view.levels.ptr, @intCast(view.levels.len)));
+        if (try self.videoPicture(view)) |picture| {
+            // A picture of another kind does not fit the slot: it uploads
+            // again.
+            if (zgpu_update_video(native, @intCast(slot), picture) != 0) {
+                self.dropImage(slot, false);
+                return error.ImageNotUploaded;
+            }
+        } else {
+            const hr = zgpu_update_image(native, @intCast(slot), view.levels.ptr, @intCast(view.levels.len));
+            if (hr == 1) {
+                self.dropImage(slot, false);
+                return error.ImageNotUploaded;
+            }
+            try self.result(hr);
+        }
         self.images.replace(slot, view);
+    }
+    /// Frames of video a decoder shares as a texture are sampled where it
+    /// left them (`drawing.VideoPicture.native`); others upload converted.
+    pub const samples_video = true;
+    /// The picture of a frame of video Direct3D 11 opens where it is, or
+    /// null for an image, or for a picture it takes converted into the
+    /// view's levels.
+    fn videoPicture(_: *Renderer, view: drawing.ImageView) !?*const drawing.VideoPicture {
+        const source = view.video orelse return null;
+        if (zgpu_takes_video(&source.picture) != 0) return &source.picture;
+        if (!source.ensure(view)) return error.ImageUploadFailed;
+        return null;
+    }
+    /// Shared textures of video opened on the device so far.
+    pub fn videoOpens(self: *const Renderer) u64 {
+        return if (self.native) |native| zgpu_video_opens(native) else 0;
     }
     fn dropImage(self: *Renderer, slot: usize, eviction: bool) void {
         zgpu_release_image(self.native.?, @intCast(slot));
@@ -999,6 +1045,57 @@ pub const Renderer = struct {
     /// Shader passes run on the GPU since the device was created.
     pub fn effectPasses(self: *const Renderer) u64 {
         return if (self.native) |native| zgpu_effect_passes(native) else 0;
+    }
+    /// Whether window frames draw into a plane kept from one frame to the
+    /// next, so a frame can draw only what changed (`replayDamage`): the
+    /// UI sets it; frames with layers draw through those instead.
+    pub fn setKeepPlane(self: *Renderer, keep: bool) void {
+        if (self.native) |native| zgpu_set_keep_plane(native, @intFromBool(keep));
+    }
+    /// Whether the frame drawing holds the last frame presented, so it may
+    /// draw only what changed over it.
+    pub fn planeKept(self: *const Renderer) bool {
+        const native = self.native orelse return false;
+        var generation: u64 = 0;
+        return self.active and zgpu_plane_kept(native, &generation) != 0;
+    }
+    /// Changes whenever the kept plane is made again.
+    pub fn planeGeneration(self: *const Renderer) u64 {
+        var generation: u64 = 0;
+        if (self.native) |native| _ = zgpu_plane_kept(native, &generation);
+        // Apart from the software plane's generations.
+        return generation | (1 << 62);
+    }
+    /// The kept plane's pixel between frames, as 0xRRGGBB; tests only.
+    pub fn planePixelForTest(self: *Renderer, x: u32, y: u32) !u32 {
+        var rgb: u32 = undefined;
+        if (zgpu_test_plane_pixel(self.native orelse return error.NotInitialized, x, y, &rgb) < 0) return error.NoPlane;
+        return rgb;
+    }
+    /// Frames drawn only where they changed, over the kept plane.
+    pub fn partialFrames(self: *const Renderer) u64 {
+        return if (self.native) |native| zgpu_plane_partial_frames(native) else 0;
+    }
+    /// Draws `buffer` again only inside `region`, over the frame kept from
+    /// the last one, as the software renderer's `replayDamage` does; a
+    /// transparent frame's damage is cleared first. A whole region, or a
+    /// plane that does not hold the last frame, draws the frame whole.
+    pub fn replayDamage(self: *Renderer, buffer: *const commands.Buffer, region: *const damage.Damage, transparent: bool) !void {
+        if (!self.active) return error.NotDrawing;
+        const native = self.native.?;
+        if (region.full or !self.planeKept()) {
+            zgpu_plane_whole(native);
+            return self.replayBuffer(buffer);
+        }
+        zgpu_plane_part(native);
+        const scale = zgpu_scale(native);
+        for (region.slice()) |box| {
+            const r = box.dip(scale);
+            zgpu_push_clip(native, r.x, r.y, r.width, r.height);
+            defer if (self.active) zgpu_pop_clip(native);
+            if (transparent) zgpu_plane_clear_box(native);
+            try self.replayBuffer(buffer);
+        }
     }
     pub fn replay(self: *Renderer, ops: []const command.Command, text: []const u8) !void {
         try self.replayWithResources(ops, text, &.{});
@@ -1506,6 +1603,19 @@ pub const Renderer = struct {
         }
     }
 
+    /// Whether two window renderers draw on the same Direct3D 11 device:
+    /// those made without a device domain share one for each driver.
+    pub fn sharesDeviceForTest(self: *const Renderer, other: *const Renderer) bool {
+        return zgpu_shares_device(self.native, other.native) != 0;
+    }
+    /// The renderers holding the shared device of `driver`, and the shared
+    /// devices made so far.
+    pub fn sharedDeviceUsersForTest(driver: Driver) u32 {
+        return zgpu_shared_device_users(if (driver == .warp) 1 else 0);
+    }
+    pub fn sharedDeviceCreationsForTest() u32 {
+        return @intCast(zgpu_shared_device_creations());
+    }
     /// Fault injection exercises the same cleanup path as a removed device.
     pub fn injectDeviceLoss(self: *Renderer) void {
         if (self.native) |native| zgpu_inject_loss(native, 0);

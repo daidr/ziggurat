@@ -840,7 +840,6 @@ const Counter = struct {
 };
 
 fn runDamage(allocator: std.mem.Allocator) !void {
-    if (builtin.os.tag == .windows) return;
     const app = try z.App.init(allocator);
     defer app.deinit();
     var state: Counter = .{};
@@ -859,6 +858,17 @@ fn runDamage(allocator: std.mem.Allocator) !void {
     try std.testing.expect(!stats.last.full and stats.last.len >= 1);
     const size = try window.contentSize();
     try std.testing.expect(stats.last.pixels(size.width, size.height) * 4 < @as(u64, size.width) * size.height);
+    if (builtin.os.tag == .windows) {
+        // The frame drawn in part shows the same pixels as one drawn whole.
+        const renderer = &host.context.renderer;
+        const len = @as(usize, renderer.width) * renderer.height;
+        const partial = try allocator.dupe(u32, renderer.pixels.?[0..len]);
+        defer allocator.free(partial);
+        host.context.damage_tracker.invalidate();
+        try paint(&host, window);
+        try std.testing.expect(host.context.damageStats().last.full);
+        try std.testing.expectEqualSlices(u32, partial, renderer.pixels.?[0..len]);
+    }
 }
 
 /// A card kept as one image beside a label that counts frames: the card
