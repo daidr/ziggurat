@@ -4,6 +4,9 @@ param()
 # pointing at caches that outlive the job's checkout. The global cache is
 # shared by every job of one Zig version on this machine. The local cache
 # belongs to one workspace path, so two checkouts never share one.
+# ZIGGURAT_CI_CACHE_TIER names a separate local cache for a kind of job
+# (full, webview): pull request core checks, which run without a tier (or
+# with "core"), stay warm while the full suite fills and trims its own.
 #
 # Every build adds to these caches and Zig never removes anything, so each
 # run first trims them:
@@ -12,7 +15,9 @@ param()
 #   removed;
 # - when everything together exceeds ZIGGURAT_CI_CACHE_MAX_MB (default
 #   12288), or the disk has less than ZIGGURAT_CI_CACHE_MIN_FREE_MB (default
-#   8192) free, the local caches are removed, then the global cache.
+#   8192) free, local caches are removed until it fits: other tiers'
+#   caches, this job's own when it has a tier, other core caches, this job's
+#   own, and last the global cache.
 $ErrorActionPreference = 'Stop'
 $version = '0.17.0'
 $maxMb = if ($env:ZIGGURAT_CI_CACHE_MAX_MB) { [long]$env:ZIGGURAT_CI_CACHE_MAX_MB } else { 12288 }
@@ -34,7 +39,10 @@ function Resolve-Physical([string]$Path) {
 }
 $root = Resolve-Physical ([System.IO.Path]::GetFullPath($root))
 $ci = Split-Path -Parent $root
-$local = Join-Path $root "local-$key"
+$tier = if ($env:ZIGGURAT_CI_CACHE_TIER) { $env:ZIGGURAT_CI_CACHE_TIER } else { 'core' }
+if ($tier -cnotmatch '^[a-z0-9]+$') { throw 'ZIGGURAT_CI_CACHE_TIER must be lowercase letters and digits' }
+$localName = if ($tier -eq 'core') { "local-$key" } else { "local-$key-$tier" }
+$local = Join-Path $root $localName
 
 function Remove-Cache([string]$Path) {
     if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
@@ -55,14 +63,22 @@ Get-ChildItem -LiteralPath $root -Directory -Filter 'local-*' | ForEach-Object {
     $used = Join-Path $_.FullName '.used'
     if (!(Test-Path -LiteralPath $created) -or (Get-Item -Force -LiteralPath $created).LastWriteTimeUtc -lt $now.AddDays(-7)) {
         Remove-Cache $_.FullName
-    } elseif ($_.Name -ne "local-$key" -and (Test-Path -LiteralPath $used) -and (Get-Item -Force -LiteralPath $used).LastWriteTimeUtc -lt $now.AddDays(-2)) {
+    } elseif ($_.Name -ne $localName -and (Test-Path -LiteralPath $used) -and (Get-Item -Force -LiteralPath $used).LastWriteTimeUtc -lt $now.AddDays(-2)) {
         Remove-Cache $_.FullName
     }
 }
 
-if (Test-Over) {
-    Get-ChildItem -LiteralPath $root -Directory -Filter 'local-*' | Where-Object { $_.Name -ne "local-$key" } | ForEach-Object { Remove-Cache $_.FullName }
+# A core cache is named local-<key> with no tier suffix.
+function Test-Core([string]$Name) { $Name -notmatch '^local-[^-]+-' }
+function Remove-Others([bool]$Core) {
+    foreach ($dir in @(Get-ChildItem -LiteralPath $root -Directory -Filter 'local-*')) {
+        if (!(Test-Over)) { return }
+        if ($dir.Name -ne $localName -and (Test-Core $dir.Name) -eq $Core) { Remove-Cache $dir.FullName }
+    }
 }
+Remove-Others $false
+if ((Test-Over) -and !(Test-Core $localName)) { Remove-Cache $local }
+Remove-Others $true
 if (Test-Over) { Remove-Cache $local }
 if (Test-Over) { Remove-Cache (Join-Path $root 'global') }
 Write-Host "ziggurat CI caches: $(Get-UsedMb) MB in $root, $(Get-FreeMb) MB free"
