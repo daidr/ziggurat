@@ -1,6 +1,6 @@
 # 示例应用
 
-`examples/` 下的应用示例只使用公开模块，展示一个桌面应用通常需要的能力。每个示例都在 `build.zig` 的 `app_examples` 表中登记，Windows 与 Linux 上提供：
+`examples/` 下的应用示例只使用公开模块，展示一个桌面应用通常需要的能力。每个示例都在 `build.zig` 的 `app_examples` 表中登记，Windows、Linux 与 macOS 上提供：
 
 - `zig build run-<名称>`：构建并运行；
 - `zig build example-<名称>`：只编译并安装这一个示例到 `zig-out/bin/`；
