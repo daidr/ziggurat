@@ -36,8 +36,10 @@
 #define MIXED 1024
 /* A text box holding a password exposes no text pattern. */
 #define PASSWORD 2048
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU, ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT, ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING, ROLE_GRID, ROLE_TREE_GRID, ROLE_DELETION, ROLE_INSERTION, ROLE_COUNT };
-enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU, ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT, ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING, ROLE_GRID, ROLE_TREE_GRID, ROLE_DELETION, ROLE_INSERTION, ROLE_TAB_PANEL, ROLE_MAIN, ROLE_BANNER, ROLE_CONTENT_INFO, ROLE_COMPLEMENTARY, ROLE_COUNT };
+enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256,
+    /* Grid and Table of a table or grid; GridItem and TableItem of its cells. */
+    PATTERN_GRID = 512, PATTERN_GRID_ITEM = 1024 };
 
 typedef struct Node {
     uint64_t id, parent;
@@ -88,6 +90,7 @@ typedef struct Geometry {
 _Static_assert(sizeof(GeometrySpace)==48,"semantic space ABI");
 _Static_assert(sizeof(GeometryRef)==40,"semantic clip ABI");
 _Static_assert(sizeof(Geometry)==16472,"semantic geometry ABI");
+enum { PAGE_CAP = 16 };
 typedef struct State State;
 typedef struct Provider Provider;
 typedef struct Range Range;
@@ -130,11 +133,17 @@ struct State {
     Geometry *geometry;
     BOOL geometry_active;
     Collections *collections;
+    /* The nodes standing for web pages and WebView2's providers of their
+       trees (zua_pages), each held. */
+    uint64_t page_ids[PAGE_CAP];
+    IUnknown *pages[PAGE_CAP];
+    uint32_t page_count;
 };
 struct Provider {
     IRawElementProviderSimple simple;
     IRawElementProviderFragment fragment;
     IRawElementProviderFragmentRoot root;
+    IRawElementProviderHwndOverride hwnd_override;
     IInvokeProvider invoke;
     IValueProvider value;
     ITextProvider text;
@@ -143,6 +152,10 @@ struct Provider {
     ISelectionProvider selection;
     IRangeValueProvider range_value;
     IExpandCollapseProvider expand_collapse;
+    IGridProvider grid;
+    IGridItemProvider grid_item;
+    ITableProvider table;
+    ITableItemProvider table_item;
     LONG refs;
     State *state;
     uint64_t id;
@@ -183,7 +196,7 @@ void zua_resource_counts(uint32_t *states, uint32_t *providers, uint32_t *ranges
     *actions = (uint32_t)InterlockedCompareExchange(&live_actions, 0, 0);
 }
 static void retain(State *s) { InterlockedIncrement(&s->refs); }
-static void release(State *s) { if (!InterlockedDecrement(&s->refs)) { if (s->host) IRawElementProviderSimple_Release(s->host); zua_geometry_free(s->geometry); zua_collections_free(s->collections); free(s); InterlockedDecrement(&live_states); } }
+static void release(State *s) { if (!InterlockedDecrement(&s->refs)) { if (s->host) IRawElementProviderSimple_Release(s->host); for (uint32_t i = 0; i < s->page_count; ++i) IUnknown_Release(s->pages[i]); zua_geometry_free(s->geometry); zua_collections_free(s->collections); free(s); InterlockedDecrement(&live_states); } }
 static Node *find(State *s, uint64_t id) {
     if (s->closed) return NULL;
     for (uint32_t i = 0; i < s->count; ++i) if (s->nodes[i].id == id) return &s->nodes[i];
@@ -241,13 +254,21 @@ static ULONG provider_release(Provider *p) {
     return refs;
 }
 static HRESULT provider_new(State *, uint64_t, Provider **);
+static HRESULT provider_array(State *, const uint64_t *, uint32_t, SAFEARRAY **);
 static Range *range_new(State *, uint64_t, uint32_t, uint32_t);
 static const ITextRangeProviderVtbl range_vtable;
 /* Check box and radio menu items toggle as their menu chooses them. */
 static BOOL toggle_role(uint32_t role) { return role == ROLE_CHECKBOX || role == ROLE_SWITCH || role == ROLE_MENU_ITEM_CHECKBOX || role == ROLE_MENU_ITEM_RADIO; }
 /* Tabs and list box options select like radios: one selected item per
    chooser container. Trees and tables may allow several (MULTIPLE). */
-static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || role == ROLE_LIST_ITEM || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
+static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || role == ROLE_LIST_ITEM || role == ROLE_OPTION || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
+/* Tables, grids and tree grids, their rows (a header row too) and their
+   cells, the column and row headers included. */
+static BOOL tabular_role(uint32_t role) { return role == ROLE_TABLE || role == ROLE_GRID || role == ROLE_TREE_GRID; }
+static BOOL grid_row_role(uint32_t role) { return role == ROLE_TABLE_ROW || role == ROLE_TABLE_HEADER; }
+static BOOL cell_role(uint32_t role) { return role == ROLE_CELL || role == ROLE_COLUMN_HEADER || role == ROLE_ROW_HEADER; }
+/* A cell chosen or not, as ARIA's gridcells with aria-selected. */
+static BOOL selectable_cell(const Node *n) { return cell_role(n->role) && (n->states & SELECTABLE); }
 static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE || role == ROLE_GRID || role == ROLE_TREE_GRID; }
 static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK || role == ROLE_COLUMN_HEADER || role == ROLE_COLOR_WELL || role == ROLE_MENU_ITEM; }
 /* A combo box expands and collapses its list like a disclosure, and a
@@ -264,6 +285,15 @@ static BOOL has_range(const Node *n) { return range_role(n->role) && !(n->role =
 static BOOL row_request_role(uint32_t role) { return role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
 static BOOL row_request(double number) { return number == 0 || number == 1 || number == 2 || number == 3; }
 static BOOL focusable(uint32_t role) { return actionable(role) || role == ROLE_TOKEN || role == ROLE_TEXT_BOX || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER || role == ROLE_LIST || role == ROLE_CALENDAR; }
+/* Whether a node is selected as its SelectionItem says: a cell by its own
+   state, other items as their chooser checks them. */
+static BOOL item_selected(const Node *n) { return selectable_cell(n) ? (n->states & SELECTED) != 0 : (n->flags & CHECKED) != 0; }
+static BOOL selection_item_node(const Node *n) { return item_role(n->role) || selectable_cell(n); }
+/* What opens a popup (aria-haspopup) expands into it. */
+static BOOL expands(const Node *n) { return expander_role(n->role) || n->role == ROLE_TREE_ITEM || (n->role == ROLE_MENU_ITEM && (n->flags & EXPANDABLE)) || node_popup(n) != POPUP_NONE; }
+/* A range with a text for its value (aria-valuetext) gives it as the Value
+   pattern's beside RangeValue, as Core-AAM maps it. */
+static BOOL range_value_text(const Node *n) { return range_role(n->role) && n->value_text_len > 0; }
 static uint32_t patterns_for_role(uint32_t role) {
     /* A color well opens its picker and reports its color as a value. */
     if (role == ROLE_COLOR_WELL) return PATTERN_INVOKE | PATTERN_EXPAND_COLLAPSE | PATTERN_VALUE;
@@ -287,6 +317,7 @@ static HRESULT provider_query(Provider *p, REFIID iid, void **out) {
     if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IRawElementProviderSimple)) *out = &p->simple;
     else if (IsEqualIID(iid, &IID_IRawElementProviderFragment)) *out = &p->fragment;
     else if (p->id == 0 && IsEqualIID(iid, &IID_IRawElementProviderFragmentRoot)) *out = &p->root;
+    else if (p->id == 0 && IsEqualIID(iid, &IID_IRawElementProviderHwndOverride)) *out = &p->hwnd_override;
     else if ((p->patterns & PATTERN_COLLECTION) && (IsEqualIID(iid, &IID_IItemContainerProvider) || IsEqualIID(iid, &IID_ISelectionProvider) || IsEqualIID(iid, &IID_ISelectionProvider2))) return collection_container_new(p, iid, out);
     else {
         /* COM's interface set is immutable even after the semantic node leaves
@@ -299,6 +330,10 @@ static HRESULT provider_query(Provider *p, REFIID iid, void **out) {
         else if ((p->patterns & PATTERN_SELECTION) && IsEqualIID(iid, &IID_ISelectionProvider)) *out = &p->selection;
         else if ((p->patterns & PATTERN_RANGE_VALUE) && IsEqualIID(iid, &IID_IRangeValueProvider)) *out = &p->range_value;
         else if ((p->patterns & PATTERN_EXPAND_COLLAPSE) && IsEqualIID(iid, &IID_IExpandCollapseProvider)) *out = &p->expand_collapse;
+        else if ((p->patterns & PATTERN_GRID) && IsEqualIID(iid, &IID_IGridProvider)) *out = &p->grid;
+        else if ((p->patterns & PATTERN_GRID) && IsEqualIID(iid, &IID_ITableProvider)) *out = &p->table;
+        else if ((p->patterns & PATTERN_GRID_ITEM) && IsEqualIID(iid, &IID_IGridItemProvider)) *out = &p->grid_item;
+        else if ((p->patterns & PATTERN_GRID_ITEM) && IsEqualIID(iid, &IID_ITableItemProvider)) *out = &p->table_item;
     }
     if (!*out) return E_NOINTERFACE;
     provider_add(p);
@@ -312,6 +347,69 @@ static HRESULT provider_query(Provider *p, REFIID iid, void **out) {
 PROVIDER_UNKNOWN(simple, IRawElementProviderSimple, simple)
 PROVIDER_UNKNOWN(fragment, IRawElementProviderFragment, fragment)
 PROVIDER_UNKNOWN(root, IRawElementProviderFragmentRoot, root)
+PROVIDER_UNKNOWN(hwnd_override, IRawElementProviderHwndOverride, hwnd_override)
+
+/* WebView2's provider of the page the node of `id` stands for, held, or
+   NULL: the node answers with it, in the place of the window WebView2 shows
+   the page with (hwnd_override_get). */
+static IRawElementProviderSimple *page_provider(State *s, uint64_t id) {
+    if (id == 0) return NULL;
+    IUnknown *page = NULL;
+    AcquireSRWLockShared(&s->lock);
+    if (!s->closed) for (uint32_t i = 0; i < s->page_count; ++i) if (s->page_ids[i] == id) { page = s->pages[i]; IUnknown_AddRef(page); break; }
+    ReleaseSRWLockShared(&s->lock);
+    if (!page) return NULL;
+    IRawElementProviderSimple *simple = NULL;
+    if (FAILED(IUnknown_QueryInterface(page, &IID_IRawElementProviderSimple, (void **)&simple))) simple = NULL;
+    IUnknown_Release(page);
+    return simple;
+}
+/* The node of the page WebView2 shows with the window `hwnd`, a child of
+   this one's, if one does. */
+static HRESULT STDMETHODCALLTYPE hwnd_override_get(IRawElementProviderHwndOverride *iface, HWND hwnd, IRawElementProviderSimple **out) {
+    if (!out) return E_POINTER;
+    *out = NULL;
+    State *s = hwnd_override_self(iface)->state;
+    uint64_t ids[PAGE_CAP]; uint32_t count = 0;
+    AcquireSRWLockShared(&s->lock);
+    if (!s->closed) for (uint32_t i = 0; i < s->page_count; ++i) ids[count++] = s->page_ids[i];
+    ReleaseSRWLockShared(&s->lock);
+    for (uint32_t i = 0; i < count; ++i) {
+        IRawElementProviderSimple *page = page_provider(s, ids[i]);
+        if (!page) continue;
+        IRawElementProviderSimple *host = NULL;
+        BOOL match = FALSE;
+        if (SUCCEEDED(IRawElementProviderSimple_get_HostRawElementProvider(page, &host)) && host) {
+            VARIANT v; VariantInit(&v);
+            if (SUCCEEDED(IRawElementProviderSimple_GetPropertyValue(host, UIA_NativeWindowHandlePropertyId, &v)) && v.vt == VT_I4 && (HWND)(intptr_t)v.lVal == hwnd) match = TRUE;
+            VariantClear(&v);
+            IRawElementProviderSimple_Release(host);
+        }
+        IRawElementProviderSimple_Release(page);
+        if (!match) continue;
+        Provider *p = NULL;
+        HRESULT hr = provider_new(s, ids[i], &p);
+        if (SUCCEEDED(hr)) *out = &p->simple;
+        return hr == UIA_E_ELEMENTNOTAVAILABLE ? S_OK : hr;
+    }
+    return S_OK;
+}
+static const IRawElementProviderHwndOverrideVtbl hwnd_override_vtable = { hwnd_override_query, hwnd_override_add, hwnd_override_release, hwnd_override_get };
+/* Hold WebView2's providers of the pages inside the nodes of `ids`, and let
+   go of those held before. */
+HRESULT zua_pages(State *s, const uint64_t *ids, void *const *natives, uint32_t count) {
+    if (!s || count > PAGE_CAP || (count && (!ids || !natives))) return E_INVALIDARG;
+    IUnknown *old[PAGE_CAP]; uint32_t old_count;
+    for (uint32_t i = 0; i < count; ++i) IUnknown_AddRef((IUnknown *)natives[i]);
+    AcquireSRWLockExclusive(&s->lock);
+    old_count = s->page_count;
+    memcpy(old, s->pages, sizeof(old[0]) * old_count);
+    for (uint32_t i = 0; i < count; ++i) { s->page_ids[i] = ids[i]; s->pages[i] = (IUnknown *)natives[i]; }
+    s->page_count = count;
+    ReleaseSRWLockExclusive(&s->lock);
+    for (uint32_t i = 0; i < old_count; ++i) IUnknown_Release(old[i]);
+    return S_OK;
+}
 PROVIDER_UNKNOWN(invoke, IInvokeProvider, invoke)
 PROVIDER_UNKNOWN(value, IValueProvider, value)
 PROVIDER_UNKNOWN(text, ITextProvider, text)
@@ -332,8 +430,10 @@ static HRESULT request_registered(State *s, uint64_t id, uint32_t kind, const WC
             ReleaseSRWLockExclusive(&s->lock); return UIA_E_ELEMENTNOTAVAILABLE;
         }
     }
-    if (!(n->flags & ENABLED)) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_ELEMENTNOTENABLED; }
-    if ((kind == 1 && !actionable(n->role)) || (kind == 2 && !focusable(n->role)) || ((kind == 3 || kind == 4) && n->role != ROLE_TEXT_BOX) || (kind == 5 && !range_role(n->role) && !row_request_role(n->role))) {
+    /* One disabled takes no action, but the focus where it keeps it, as one
+       only unavailable does (aria-disabled). */
+    if (!(n->flags & ENABLED) && !(kind == 2 && (n->states & FOCUSABLE_DISABLED))) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_ELEMENTNOTENABLED; }
+    if ((kind == 1 && !actionable(n->role) && !selectable_cell(n)) || (kind == 2 && !focusable(n->role)) || ((kind == 3 || kind == 4) && n->role != ROLE_TEXT_BOX) || (kind == 5 && !range_role(n->role) && !row_request_role(n->role))) {
         ReleaseSRWLockExclusive(&s->lock); return UIA_E_NOTSUPPORTED;
     }
     if (kind == 3 && (n->flags & READ_ONLY)) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_INVALIDOPERATION; }
@@ -408,7 +508,7 @@ int zua_take_action(Action *a, ActionView *out) {
     State *s = a->state;
     AcquireSRWLockShared(&s->lock);
     Node *n = find(s, a->id);
-    BOOL available = !s->closed && a->used && s->context && n && (n->flags & ENABLED);
+    BOOL available = !s->closed && a->used && s->context && n && ((n->flags & ENABLED) || (a->kind == 2 && (n->states & FOCUSABLE_DISABLED)));
     RecipientAuthority captured = {0};
     if (available && s->collections) {
         captured = s->collections->requests[a - s->actions];
@@ -462,8 +562,10 @@ void zua_finish_action(Action *a) {
 }
 
 static HRESULT STDMETHODCALLTYPE simple_options(IRawElementProviderSimple *iface, enum ProviderOptions *out) {
-    (void)iface;
     if (!out) return E_POINTER;
+    Provider *self = simple_self(iface);
+    IRawElementProviderSimple *page = self->listed ? page_provider(self->state, self->id) : NULL;
+    if (page) { HRESULT hr = IRawElementProviderSimple_get_ProviderOptions(page, out); IRawElementProviderSimple_Release(page); return hr; }
     /* UI Automation still queries this immutable COM metadata to disconnect a
        closed provider. It never needs a live semantic node or Zig context. */
     *out = ProviderOptions_ServerSideProvider | ProviderOptions_UseComThreading;
@@ -473,17 +575,25 @@ static HRESULT STDMETHODCALLTYPE simple_pattern(IRawElementProviderSimple *iface
     if (!out) return E_POINTER;
     *out = NULL;
     Provider *p = simple_self(iface);
+    IRawElementProviderSimple *page = page_provider(p->state, p->id);
+    if (page) {
+        HRESULT hr = IRawElementProviderSimple_GetPatternProvider(page, id, out);
+        IRawElementProviderSimple_Release(page);
+        if (hr != E_NOTIMPL) return hr;
+    }
     Node n; HRESULT hr = read_provider_node(p, &n); if (FAILED(hr)) return hr;
     if (n.role == ROLE_LIST && (p->patterns & PATTERN_COLLECTION)) {
         if (id == UIA_ItemContainerPatternId) return collection_container_new(p, &IID_IItemContainerProvider, (void **)out);
         if (id == UIA_SelectionPatternId) return collection_container_new(p, &IID_ISelectionProvider2, (void **)out);
     }
     if (id == UIA_InvokePatternId && invoke_role(n.role)) *out = (IUnknown *)&p->invoke;
-    if (id == UIA_ExpandCollapsePatternId && (expander_role(n.role) || n.role == ROLE_TREE_ITEM || (n.role == ROLE_MENU_ITEM && (n.flags & EXPANDABLE)))) *out = (IUnknown *)&p->expand_collapse;
-    if (id == UIA_ValuePatternId && (n.role == ROLE_TEXT_BOX || n.role == ROLE_COMBO_BOX)) *out = (IUnknown *)&p->value;
+    if (id == UIA_ExpandCollapsePatternId && expands(&n) && (p->patterns & PATTERN_EXPAND_COLLAPSE)) *out = (IUnknown *)&p->expand_collapse;
+    if (id == UIA_ValuePatternId && (n.role == ROLE_TEXT_BOX || n.role == ROLE_COMBO_BOX || (range_value_text(&n) && (p->patterns & PATTERN_VALUE)))) *out = (IUnknown *)&p->value;
     if (id == UIA_TextPatternId && n.role == ROLE_TEXT_BOX && !(n.flags & PASSWORD)) *out = (IUnknown *)&p->text;
     if (id == UIA_TogglePatternId && toggle_role(n.role)) *out = (IUnknown *)&p->toggle;
-    if (id == UIA_SelectionItemPatternId && item_role(n.role)) *out = (IUnknown *)&p->selection_item;
+    if (id == UIA_SelectionItemPatternId && selection_item_node(&n) && (p->patterns & PATTERN_SELECTION_ITEM)) *out = (IUnknown *)&p->selection_item;
+    if ((id == UIA_GridPatternId || id == UIA_TablePatternId) && (p->patterns & PATTERN_GRID)) *out = id == UIA_GridPatternId ? (IUnknown *)&p->grid : (IUnknown *)&p->table;
+    if ((id == UIA_GridItemPatternId || id == UIA_TableItemPatternId) && (p->patterns & PATTERN_GRID_ITEM)) *out = id == UIA_GridItemPatternId ? (IUnknown *)&p->grid_item : (IUnknown *)&p->table_item;
     if (id == UIA_SelectionPatternId && chooser_role(n.role)) *out = (IUnknown *)&p->selection;
     if (id == UIA_RangeValuePatternId && has_range(&n)) *out = (IUnknown *)&p->range_value;
     if (*out) provider_add(p);
@@ -506,6 +616,15 @@ static Node *selection_owner(State *s, const Node *n) {
         if (chooser_role(parent->role)) return parent;
         if (parent->role != ROLE_TREE_ITEM || parent->id == 0) return NULL;
         parent = find(s, parent->parent);
+    }
+    return NULL;
+}
+/* The table, grid or tree grid around a node. Call with the lock held. */
+static const Node *grid_of_locked(State *s, const Node *n) {
+    const Node *up = find(s, n->parent);
+    for (uint32_t depth = 0; up && up->id != 0 && depth < NODE_CAP; ++depth) {
+        if (tabular_role(up->role)) return up;
+        up = find(s, up->parent);
     }
     return NULL;
 }
@@ -561,6 +680,9 @@ static int control_type(uint32_t role) {
         case ROLE_HEADING: return UIA_TextControlTypeId;
         case ROLE_GRID: case ROLE_TREE_GRID: return UIA_DataGridControlTypeId;
         case ROLE_DELETION: case ROLE_INSERTION: return UIA_TextControlTypeId;
+        case ROLE_TAB_PANEL: return UIA_PaneControlTypeId;
+        /* Landmarks are groups, with their landmark types. */
+        case ROLE_MAIN: case ROLE_BANNER: case ROLE_CONTENT_INFO: case ROLE_COMPLEMENTARY: return UIA_GroupControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }
@@ -573,50 +695,126 @@ static void aria_add(WCHAR *out, int *used, const char *name, const char *value,
     if (value) for (const char *c = value; *c && *used < 511; ++c) out[(*used)++] = (WCHAR)*c;
     for (uint32_t i = 0; wide && i < wide_len && *used < 511; ++i) out[(*used)++] = wide[i];
 }
-static BSTR aria_properties(const State *s, const Node *n) {
+static BSTR aria_properties(const Node *n) {
     WCHAR out[512]; int used = 0;
     if (n->states & BUSY) aria_add(out, &used, "busy", "true", NULL, 0);
-    if (n->states & FOCUSABLE_DISABLED) aria_add(out, &used, "disabled", "true", NULL, 0);
-    if (node_popup(n)) aria_add(out, &used, "haspopup", popup_names[node_popup(n)], NULL, 0);
     if (node_current(n)) aria_add(out, &used, "current", current_names[node_current(n)], NULL, 0);
-    if (node_sort(n)) aria_add(out, &used, "sort", sort_names[node_sort(n)], NULL, 0);
+    /* What a field's suggestions complete, which Chromium gives IAccessible2
+       alone, as an object attribute. */
     if (node_autocomplete(n)) aria_add(out, &used, "autocomplete", autocomplete_names[node_autocomplete(n)], NULL, 0);
-    if (n->value_text_len) aria_add(out, &used, "valuetext", NULL, s->text + n->value_text_start, n->value_text_len);
-    char number[16];
-    const struct { const char *name; uint32_t value; } counts[] = { { "rowcount", n->row_count }, { "colcount", n->column_count }, { "rowindex", n->row_index }, { "colindex", n->column_index } };
-    for (size_t i = 0; i < sizeof counts / sizeof counts[0]; ++i) {
-        if (!counts[i].value) continue;
-        snprintf(number, sizeof number, "%u", counts[i].value);
-        aria_add(out, &used, counts[i].name, number, NULL, 0);
-    }
-    if (n->states & VERTICAL) aria_add(out, &used, "orientation", "vertical", NULL, 0);
-    else if (n->states & HORIZONTAL) aria_add(out, &used, "orientation", "horizontal", NULL, 0);
-    /* UI Automation has no property for these; ARIA's say them. */
+    if (node_popup(n)) aria_add(out, &used, "haspopup", popup_names[node_popup(n)], NULL, 0);
+    if (node_sort(n)) aria_add(out, &used, "sort", sort_names[node_sort(n)], NULL, 0);
+    /* UI Automation has no property for a text box of several lines; the
+       read-only one is said beside ValueIsReadOnly. */
     if (n->role == ROLE_TEXT_BOX && (n->states & MULTI_LINE)) aria_add(out, &used, "multiline", "true", NULL, 0);
     if (n->role == ROLE_TEXT_BOX && (n->flags & READ_ONLY)) aria_add(out, &used, "readonly", "true", NULL, 0);
     return used ? SysAllocStringLen(out, (UINT)used) : NULL;
 }
+/* The ARIA roles of nodes whose control type does not say all, as
+   landmarks' and live regions', in AriaRole. */
+static const WCHAR *aria_role(const Node *n) {
+    switch (n->role) {
+        case ROLE_NAVIGATION: return L"navigation";
+        case ROLE_REGION: return L"region";
+        case ROLE_LOG: return L"log";
+        case ROLE_TIMER: return L"timer";
+        case ROLE_ALERT: return L"alert";
+        case ROLE_SEPARATOR: return L"separator";
+        case ROLE_ROW_HEADER: return L"rowheader";
+        case ROLE_SEARCH: return L"search";
+        case ROLE_ARTICLE: return L"article";
+        case ROLE_GRID: return L"grid";
+        case ROLE_TREE_GRID: return L"treegrid";
+        case ROLE_DELETION: return L"deletion";
+        case ROLE_INSERTION: return L"insertion";
+        case ROLE_TAB_PANEL: return L"tabpanel";
+        case ROLE_MAIN: return L"main";
+        case ROLE_BANNER: return L"banner";
+        case ROLE_CONTENT_INFO: return L"contentinfo";
+        case ROLE_COMPLEMENTARY: return L"complementary";
+        case ROLE_TEXT_BOX: return (n->states & SEARCH) ? L"searchbox" : NULL;
+        default: return NULL;
+    }
+}
+/* What LocalizedControlType calls roles UI Automation's control types do
+   not name, as Chromium does. */
+static const WCHAR *localized_role(const Node *n) {
+    switch (n->role) {
+        case ROLE_REGION: return L"region";
+        case ROLE_LOG: return L"log";
+        case ROLE_TIMER: return L"timer";
+        case ROLE_ALERT: return L"alert";
+        case ROLE_ARTICLE: return L"article";
+        case ROLE_DELETION: return L"deletion";
+        case ROLE_INSERTION: return L"insertion";
+        case ROLE_HEADING: return L"heading";
+        case ROLE_ROW_HEADER: return L"row header";
+        case ROLE_TAB_PANEL: return L"tab panel";
+        case ROLE_MAIN: return L"main";
+        case ROLE_BANNER: return L"banner";
+        case ROLE_CONTENT_INFO: return L"content information";
+        case ROLE_COMPLEMENTARY: return L"complementary";
+        /* A meter shares the progress bar control type but is not progress. */
+        case ROLE_METER: return L"meter";
+        case ROLE_STATUS: return L"status";
+        case ROLE_TOKEN_FIELD: return L"token field";
+        case ROLE_TOKEN: return L"token";
+        case ROLE_POPUP: return L"popup";
+        case ROLE_COLOR_WELL: return L"color well";
+        case ROLE_DIALOG: return L"dialog";
+        case ROLE_ALERT_DIALOG: return L"alert dialog";
+        case ROLE_RADIO_GROUP: return L"radio group";
+        case ROLE_TEXT_BOX: return (n->states & SEARCH) ? L"search box" : NULL;
+        default: return NULL;
+    }
+}
+/* What landmarks without a UIA landmark type of their own are called. */
+static const WCHAR *landmark_name(uint32_t role) {
+    return role == ROLE_REGION ? L"region" : role == ROLE_BANNER ? L"banner" : role == ROLE_CONTENT_INFO ? L"content information" : role == ROLE_COMPLEMENTARY ? L"complementary" : NULL;
+}
+/* The nodes a node points at for ControllerFor, what it controls
+   (aria-controls) and, while it is invalid, what holds its error
+   (aria-errormessage), as Core-AAM maps both; or DescribedBy, those
+   describing it (aria-describedby). Of this tree. */
+static uint32_t related_ids(State *s, const Node *n, PROPERTYID id, uint64_t *ids) {
+    uint32_t count = 0;
+    const uint64_t wanted[2] = { id == UIA_ControllerForPropertyId ? n->controls : n->described_by, id == UIA_ControllerForPropertyId && (n->flags & INVALID) ? n->error_message : 0 };
+    for (uint32_t i = 0; i < 2; ++i) if (wanted[i] && find(s, wanted[i]) && (!count || ids[0] != wanted[i])) ids[count++] = wanted[i];
+    return count;
+}
+static BSTR bstr_of(const WCHAR *text) { return text ? SysAllocString(text) : NULL; }
 static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *iface, PROPERTYID id, VARIANT *out) {
     if (!out) return E_POINTER;
     VariantInit(out);
     Provider *p = simple_self(iface); State *s = p->state;
+    IRawElementProviderSimple *page = page_provider(s, p->id);
+    if (page) {
+        HRESULT page_hr = IRawElementProviderSimple_GetPropertyValue(page, id, out);
+        IRawElementProviderSimple_Release(page);
+        if (page_hr != E_NOTIMPL) return page_hr;
+        VariantInit(out);
+    }
     AcquireSRWLockShared(&s->lock); Node *n = provider_find_locked(p);
     if (!n) { ReleaseSRWLockShared(&s->lock); return UIA_E_ELEMENTNOTAVAILABLE; }
     HRESULT hr = S_OK;
+    uint64_t related_id[2]; uint32_t related = 0;
     switch (id) {
         case UIA_NamePropertyId: case UIA_ValueValuePropertyId: {
             BOOL name = id == UIA_NamePropertyId;
             out->vt = VT_BSTR;
-            out->bstrVal = SysAllocStringLen(s->text + (name ? n->name_start : n->value_start), name ? n->name_len : n->value_len);
+            if (!name && range_value_text(n)) out->bstrVal = SysAllocStringLen(s->text + n->value_text_start, n->value_text_len);
+            else out->bstrVal = SysAllocStringLen(s->text + (name ? n->name_start : n->value_start), name ? n->name_len : n->value_len);
             if (!out->bstrVal) hr = E_OUTOFMEMORY;
             break;
         }
         case UIA_HelpTextPropertyId:
             if (n->description_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->description_start, n->description_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
             break;
-        /* Which way it runs, as the application tells (aria-orientation). */
+        /* Which way it runs, as the application tells (aria-orientation); a
+           slider and a rule run across unless told. */
         case 30023 /* UIA_OrientationPropertyId */:
-            if (n->states & (VERTICAL | HORIZONTAL)) { out->vt = VT_I4; out->lVal = (n->states & VERTICAL) ? 2 /* OrientationType_Vertical */ : 1 /* OrientationType_Horizontal */; }
+            if (n->states & VERTICAL) { out->vt = VT_I4; out->lVal = 2 /* OrientationType_Vertical */; }
+            else if ((n->states & HORIZONTAL) || n->role == ROLE_SLIDER || n->role == ROLE_SEPARATOR) { out->vt = VT_I4; out->lVal = 1 /* OrientationType_Horizontal */; }
             break;
         case 30159 /* UIA_FullDescriptionPropertyId */:
             if (n->description_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->description_start, n->description_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
@@ -635,29 +833,36 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
                 if (!out->bstrVal) hr = E_OUTOFMEMORY;
                 break;
             }
-            if (n->role == ROLE_REGION || n->role == ROLE_LOG || n->role == ROLE_TIMER || n->role == ROLE_ALERT || n->role == ROLE_ARTICLE || n->role == ROLE_HEADING || n->role == ROLE_DELETION || n->role == ROLE_INSERTION || ((n->role == ROLE_TEXT_BOX) && (n->states & SEARCH))) {
-                out->vt = VT_BSTR;
-                out->bstrVal = SysAllocString(n->role == ROLE_REGION ? L"region" : n->role == ROLE_LOG ? L"log" : n->role == ROLE_TIMER ? L"timer" : n->role == ROLE_ALERT ? L"alert" : n->role == ROLE_ARTICLE ? L"article" : n->role == ROLE_DELETION ? L"deletion" : n->role == ROLE_INSERTION ? L"insertion" : n->role == ROLE_TEXT_BOX ? L"search box" : L"heading");
-                if (!out->bstrVal) hr = E_OUTOFMEMORY;
-                break;
-            }
-            /* A meter shares the progress bar control type but is not progress. */
-            if (n->role == ROLE_METER || n->role == ROLE_STATUS || n->role == ROLE_TOKEN_FIELD || n->role == ROLE_TOKEN || n->role == ROLE_POPUP || n->role == ROLE_COLOR_WELL || n->role == ROLE_DIALOG || n->role == ROLE_ALERT_DIALOG) {
-                out->vt = VT_BSTR;
-                out->bstrVal = SysAllocString(n->role == ROLE_METER ? L"meter" : n->role == ROLE_STATUS ? L"status" : n->role == ROLE_TOKEN ? L"token" : n->role == ROLE_POPUP ? L"popup" : n->role == ROLE_COLOR_WELL ? L"color well" : n->role == ROLE_DIALOG ? L"dialog" : n->role == ROLE_ALERT_DIALOG ? L"alert dialog" : L"token field");
-                if (!out->bstrVal) hr = E_OUTOFMEMORY;
-            }
+            if (localized_role(n)) { out->vt = VT_BSTR; out->bstrVal = bstr_of(localized_role(n)); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
             break;
-        /* A column header reports its sort direction as item status. */
+        /* The order of the column a table is sorted by, as Chromium says it,
+           else what a column header reports of itself. */
         case UIA_ItemStatusPropertyId:
-            if (n->role == ROLE_COLUMN_HEADER && n->value_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->value_start, n->value_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
-            else if (node_sort(n) == 1 || node_sort(n) == 2) { out->vt = VT_BSTR; out->bstrVal = SysAllocString(node_sort(n) == 1 ? L"Sorted ascending" : L"Sorted descending"); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            if (node_sort(n)) { out->vt = VT_BSTR; out->bstrVal = SysAllocString(node_sort(n) == SORT_ASCENDING ? L"ascending" : node_sort(n) == SORT_DESCENDING ? L"descending" : L"other"); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            else if (n->role == ROLE_COLUMN_HEADER && n->value_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->value_start, n->value_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
             break;
         case UIA_AriaPropertiesPropertyId: {
-            BSTR value = aria_properties(s, n);
+            BSTR value = aria_properties(n);
             if (value) { out->vt = VT_BSTR; out->bstrVal = value; }
             break;
         }
+        case UIA_AriaRolePropertyId:
+            if (aria_role(n)) { out->vt = VT_BSTR; out->bstrVal = bstr_of(aria_role(n)); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            break;
+        case UIA_ControllerForPropertyId: case UIA_DescribedByPropertyId:
+            related = related_ids(s, n, id, related_id);
+            break;
+        /* The level of a tree item or a row; a heading's is its own. */
+        case 30154 /* UIA_LevelPropertyId */:
+            if (n->level > 0 && n->role != ROLE_HEADING) { out->vt = VT_I4; out->lVal = (LONG)n->level; }
+            break;
+        /* Where an item is among all of its set, built or not. */
+        case 30152 /* UIA_PositionInSetPropertyId */:
+            if (n->position > 0) { out->vt = VT_I4; out->lVal = (LONG)n->position; }
+            break;
+        case 30153 /* UIA_SizeOfSetPropertyId */:
+            if (n->set_size > 0) { out->vt = VT_I4; out->lVal = (LONG)n->set_size; }
+            break;
         case UIA_AcceleratorKeyPropertyId:
             if (n->key_shortcuts_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->key_shortcuts_start, n->key_shortcuts_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
             break;
@@ -667,10 +872,12 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_LandmarkTypePropertyId:
             if (n->role == ROLE_NAVIGATION) { out->vt = VT_I4; out->lVal = UIA_NavigationLandmarkTypeId; }
             if (n->role == ROLE_SEARCH) { out->vt = VT_I4; out->lVal = UIA_SearchLandmarkTypeId; }
-            if (n->role == ROLE_REGION) { out->vt = VT_I4; out->lVal = UIA_CustomLandmarkTypeId; }
+            if (n->role == ROLE_MAIN) { out->vt = VT_I4; out->lVal = UIA_MainLandmarkTypeId; }
+            if (landmark_name(n->role)) { out->vt = VT_I4; out->lVal = UIA_CustomLandmarkTypeId; }
             break;
+        /* What the custom landmark type is called. */
         case UIA_LocalizedLandmarkTypePropertyId:
-            if (n->role == ROLE_REGION) { out->vt = VT_BSTR; out->bstrVal = SysAllocString(L"region"); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            if (landmark_name(n->role)) { out->vt = VT_BSTR; out->bstrVal = bstr_of(landmark_name(n->role)); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
             break;
         /* A status message and a log are read politely, an alert at once;
            the announcements come from Zig (zua_announce). */
@@ -686,16 +893,18 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_IsControlElementPropertyId: case UIA_IsContentElementPropertyId: out->vt = VT_BOOL; out->boolVal = VARIANT_TRUE; break;
         case UIA_IsOffscreenPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & OFFSCREEN) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsInvokePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = invoke_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_IsExpandCollapsePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = expander_role(n->role) || n->role == ROLE_TREE_ITEM || (n->role == ROLE_MENU_ITEM && (n->flags & EXPANDABLE)) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsExpandCollapsePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = expands(n) && (p->patterns & PATTERN_EXPAND_COLLAPSE) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ExpandCollapseExpandCollapseStatePropertyId: out->vt = VT_I4; out->lVal = expand_state(n); break;
-        case UIA_IsValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX || n->role == ROLE_COMBO_BOX || n->role == ROLE_COLOR_WELL ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX || n->role == ROLE_COMBO_BOX || n->role == ROLE_COLOR_WELL || (range_value_text(n) && (p->patterns & PATTERN_VALUE)) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsTextPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX && !(n->flags & PASSWORD) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsPasswordPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & PASSWORD) ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_ValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & READ_ONLY) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_ValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & READ_ONLY) || range_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsTogglePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = toggle_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ToggleToggleStatePropertyId: out->vt = VT_I4; out->lVal = (n->flags & MIXED) ? ToggleState_Indeterminate : (n->flags & CHECKED) ? ToggleState_On : ToggleState_Off; break;
-        case UIA_IsSelectionItemPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = item_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_SelectionItemIsSelectedPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & CHECKED) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsSelectionItemPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = selection_item_node(n) && (p->patterns & PATTERN_SELECTION_ITEM) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_SelectionItemIsSelectedPropertyId: out->vt = VT_BOOL; out->boolVal = item_selected(n) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsGridPatternAvailablePropertyId: case UIA_IsTablePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = (p->patterns & PATTERN_GRID) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsGridItemPatternAvailablePropertyId: case UIA_IsTableItemPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = (p->patterns & PATTERN_GRID_ITEM) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsSelectionPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = chooser_role(n->role) || n->role == ROLE_LIST ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsSelectionPattern2AvailablePropertyId: case UIA_IsItemContainerPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_LIST ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_SelectionCanSelectMultiplePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_LIST || (chooser_role(n->role) && (n->flags & MULTIPLE)) ? VARIANT_TRUE : VARIANT_FALSE; break;
@@ -710,6 +919,11 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         default: break;
     }
     ReleaseSRWLockShared(&s->lock);
+    if (related) {
+        SAFEARRAY *array = NULL;
+        hr = provider_array(s, related_id, related, &array);
+        if (SUCCEEDED(hr)) { out->vt = VT_ARRAY | VT_UNKNOWN; out->parray = array; }
+    }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE simple_host(IRawElementProviderSimple *iface, IRawElementProviderSimple **out) {
@@ -718,7 +932,9 @@ static HRESULT STDMETHODCALLTYPE simple_host(IRawElementProviderSimple *iface, I
     Provider *p = simple_self(iface);
     /* Host identity must survive HWND destruction and remains available to
        UiaDisconnectProvider after semantic getters have become unavailable. */
-    if (p->id == 0) { *out = p->state->host; IRawElementProviderSimple_AddRef(*out); }
+    if (p->id == 0) { *out = p->state->host; IRawElementProviderSimple_AddRef(*out); return S_OK; }
+    IRawElementProviderSimple *page = p->listed ? page_provider(p->state, p->id) : NULL;
+    if (page) { HRESULT hr = IRawElementProviderSimple_get_HostRawElementProvider(page, out); IRawElementProviderSimple_Release(page); return hr; }
     return S_OK;
 }
 static HRESULT make_fragment(State *s, uint64_t id, IRawElementProviderFragment **out) {
@@ -757,6 +973,9 @@ static HRESULT STDMETHODCALLTYPE fragment_runtime(IRawElementProviderFragment *i
     /* Runtime identity is immutable, including during native disconnection. */
     *out = NULL; Provider *p = fragment_self(iface);
     if (p->id == 0) return S_OK;
+    /* A page's is its window's. */
+    IRawElementProviderSimple *page = page_provider(p->state, p->id);
+    if (page) { IRawElementProviderSimple_Release(page); return S_OK; }
     const BOOL collection = (p->patterns & PATTERN_COLLECTION) != 0;
     const CollectionRegistration key = collection ? ((CollectionAnchor *)p)->registration : (CollectionRegistration){0};
     const LONG count = collection ? 7 : 3;
@@ -858,12 +1077,13 @@ static HRESULT STDMETHODCALLTYPE value_set(IValueProvider *iface, LPCWSTR value)
 static HRESULT STDMETHODCALLTYPE value_get(IValueProvider *iface, BSTR *out) {
     if (!out) return E_POINTER; *out = NULL; Provider *p = value_self(iface); State *s = p->state;
     AcquireSRWLockShared(&s->lock); Node *n = provider_find_locked(p);
-    if (n) *out = SysAllocStringLen(s->text + n->value_start, n->value_len);
+    if (n) *out = range_value_text(n) ? SysAllocStringLen(s->text + n->value_text_start, n->value_text_len) : SysAllocStringLen(s->text + n->value_start, n->value_len);
     ReleaseSRWLockShared(&s->lock); return n ? (*out ? S_OK : E_OUTOFMEMORY) : UIA_E_ELEMENTNOTAVAILABLE;
 }
 static HRESULT STDMETHODCALLTYPE value_readonly(IValueProvider *iface, WINBOOL *out) {
     if (!out) return E_POINTER; Provider *p = value_self(iface); Node n;
-    HRESULT hr = read_provider_node(p, &n); if (SUCCEEDED(hr)) *out = (n.flags & READ_ONLY) != 0; return hr;
+    /* A range's text is set through its number alone. */
+    HRESULT hr = read_provider_node(p, &n); if (SUCCEEDED(hr)) *out = (n.flags & READ_ONLY) != 0 || range_role(n.role); return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE toggle_call(IToggleProvider *iface) {
@@ -901,6 +1121,7 @@ static HRESULT STDMETHODCALLTYPE expand_collapse_state(IExpandCollapseProvider *
     HRESULT hr = read_provider_node(p, &n);
     if (SUCCEEDED(hr)) *out = expand_state(&n); return hr;
 }
+#include "accessibility_grid.h"
 /* Reads an item, whether its chooser allows several selected items, and
    whether another item of that chooser is selected. */
 static HRESULT read_selection_item(Provider *p, Node *out, BOOL *multiple, BOOL *others) {
@@ -922,13 +1143,20 @@ static HRESULT STDMETHODCALLTYPE selection_item_select(ISelectionItemProvider *i
     Provider *p = selection_item_self(iface); Node n; BOOL multiple, others;
     HRESULT hr = read_selection_item(p, &n, &multiple, &others); if (FAILED(hr)) return hr;
     if (!(n.flags & ENABLED)) return UIA_E_ELEMENTNOTENABLED;
-    /* Activation selects only this item, also clearing other selected ones. */
-    return (n.flags & CHECKED) && !(multiple && others) ? S_OK : request(p->state, p->id, 1, NULL, 0, 0, 0);
+    /* A cell is chosen as a press chooses it. */
+    if (selectable_cell(&n)) return item_selected(&n) ? S_OK : request(p->state, p->id, 1, NULL, 0, 0, 0);
+    /* Activation selects only this item, also clearing other selected ones.
+       What is selected is left as it is, but for an option of a list box,
+       as a select's popup, whose selected option is the one highlighted:
+       Select chooses it, as a press does, as Enter would. */
+    const BOOL highlighted = n.role == ROLE_LIST_ITEM || n.role == ROLE_OPTION;
+    return (n.flags & CHECKED) && !(multiple && others) && !highlighted ? S_OK : request(p->state, p->id, 1, NULL, 0, 0, 0);
 }
 static HRESULT STDMETHODCALLTYPE selection_item_add_selection(ISelectionItemProvider *iface) {
     Provider *p = selection_item_self(iface); Node n; BOOL multiple, others;
     HRESULT hr = read_selection_item(p, &n, &multiple, &others); if (FAILED(hr)) return hr;
     if (!(n.flags & ENABLED)) return UIA_E_ELEMENTNOTENABLED;
+    if (selectable_cell(&n)) return item_selected(&n) ? S_OK : request(p->state, p->id, 1, NULL, 0, 0, 0);
     if (n.flags & CHECKED) return S_OK;
     /* ItemRequest add = 1 in widgets.zig. */
     if (multiple) return request(p->state, p->id, 5, NULL, 0, 0, 1);
@@ -938,19 +1166,20 @@ static HRESULT STDMETHODCALLTYPE selection_item_remove_selection(ISelectionItemP
     Provider *p = selection_item_self(iface); Node n; BOOL multiple, others;
     HRESULT hr = read_selection_item(p, &n, &multiple, &others); if (FAILED(hr)) return hr;
     if (!(n.flags & ENABLED)) return UIA_E_ELEMENTNOTENABLED;
+    if (selectable_cell(&n)) return item_selected(&n) ? UIA_E_INVALIDOPERATION : S_OK;
     if (!(n.flags & CHECKED)) return S_OK;
     /* ItemRequest deselect = 0 in widgets.zig. */
     return multiple ? request(p->state, p->id, 5, NULL, 0, 0, 0) : UIA_E_INVALIDOPERATION;
 }
 static HRESULT STDMETHODCALLTYPE selection_item_selected(ISelectionItemProvider *iface, WINBOOL *out) {
     if (!out) return E_POINTER; Provider *p = selection_item_self(iface); Node n;
-    HRESULT hr = read_provider_node(p, &n); if (SUCCEEDED(hr)) *out = (n.flags & CHECKED) != 0; return hr;
+    HRESULT hr = read_provider_node(p, &n); if (SUCCEEDED(hr)) *out = item_selected(&n); return hr;
 }
 static HRESULT STDMETHODCALLTYPE selection_item_container(ISelectionItemProvider *iface, IRawElementProviderSimple **out) {
     if (!out) return E_POINTER; *out = NULL;
     Provider *p = selection_item_self(iface); State *s = p->state;
     AcquireSRWLockShared(&s->lock); Node *n = provider_find_locked(p);
-    Node *owner = n ? selection_owner(s, n) : NULL;
+    const Node *owner = n ? (selectable_cell(n) ? grid_of_locked(s, n) : selection_owner(s, n)) : NULL;
     uint64_t id = owner ? owner->id : 0;
     BOOL found = owner != NULL;
     HRESULT hr = n ? S_OK : UIA_E_ELEMENTNOTAVAILABLE;
@@ -965,16 +1194,14 @@ static HRESULT STDMETHODCALLTYPE selection_get(ISelectionProvider *iface, SAFEAR
     AcquireSRWLockShared(&s->lock);
     if (!find(s, p->id)) { ReleaseSRWLockShared(&s->lock); return UIA_E_ELEMENTNOTAVAILABLE; }
     Node *self = find(s, p->id);
-    for (uint32_t i = 0; i < s->count; ++i) if (item_role(s->nodes[i].role) && (s->nodes[i].flags & CHECKED) && selection_owner(s, &s->nodes[i]) == self) ids[count++] = s->nodes[i].id;
-    ReleaseSRWLockShared(&s->lock);
-    SAFEARRAY *array = SafeArrayCreateVector(VT_UNKNOWN, 0, count); if (!array) return E_OUTOFMEMORY;
-    for (LONG i = 0; i < (LONG)count; ++i) {
-        Provider *item = NULL; HRESULT hr = provider_new(s, ids[i], &item);
-        if (FAILED(hr)) { SafeArrayDestroy(array); return hr; }
-        hr = SafeArrayPutElement(array, &i, &item->simple); provider_release(item);
-        if (FAILED(hr)) { SafeArrayDestroy(array); return hr; }
+    for (uint32_t i = 0; i < s->count; ++i) {
+        const Node *item = &s->nodes[i];
+        /* The rows it chooses, and the cells of a grid chosen. */
+        if (item_role(item->role) && (item->flags & CHECKED) && selection_owner(s, item) == self) ids[count++] = item->id;
+        else if (selectable_cell(item) && (item->states & SELECTED) && grid_of_locked(s, item) == self) ids[count++] = item->id;
     }
-    *out = array; return S_OK;
+    ReleaseSRWLockShared(&s->lock);
+    return provider_array(s, ids, count, out);
 }
 static HRESULT STDMETHODCALLTYPE selection_multiple(ISelectionProvider *iface, WINBOOL *out) {
     if (!out) return E_POINTER; Provider *p = selection_self(iface); Node n;
@@ -1016,13 +1243,25 @@ static const ISelectionProviderVtbl selection_vtable = { selection_query, select
 static const IRangeValueProviderVtbl range_value_vtable = { range_value_query, range_value_add, range_value_release, range_value_set, range_value_get, range_value_readonly, range_value_max, range_value_min, range_value_large, range_value_small };
 static const IExpandCollapseProviderVtbl expand_collapse_vtable = { expand_collapse_query, expand_collapse_add, expand_collapse_release, expand_collapse_expand, expand_collapse_collapse, expand_collapse_state };
 static const ITextProviderVtbl text_vtable;
-static void provider_initialize_locked(State *s, uint64_t id, uint32_t role, Provider *p) {
-    p->simple.lpVtbl = &simple_vtable; p->fragment.lpVtbl = &fragment_vtable; p->root.lpVtbl = &root_vtable;
+/* The patterns of a node as it is when its provider is made: those of its
+   role, and those its states and place give it. */
+static uint32_t patterns_for_node(State *s, const Node *n) {
+    uint32_t patterns = patterns_for_role(n->role);
+    if (tabular_role(n->role)) patterns |= PATTERN_GRID;
+    if (cell_role(n->role) && grid_of_locked(s, n)) patterns |= PATTERN_GRID_ITEM;
+    if (selectable_cell(n)) patterns |= PATTERN_SELECTION_ITEM;
+    if (range_value_text(n)) patterns |= PATTERN_VALUE;
+    if (node_popup(n) != POPUP_NONE) patterns |= PATTERN_EXPAND_COLLAPSE;
+    return patterns;
+}
+static void provider_initialize_locked(State *s, uint64_t id, uint32_t patterns, Provider *p) {
+    p->simple.lpVtbl = &simple_vtable; p->fragment.lpVtbl = &fragment_vtable; p->root.lpVtbl = &root_vtable; p->hwnd_override.lpVtbl = &hwnd_override_vtable;
     p->invoke.lpVtbl = &invoke_vtable; p->value.lpVtbl = &value_vtable; p->text.lpVtbl = &text_vtable;
     p->toggle.lpVtbl = &toggle_vtable; p->selection_item.lpVtbl = &selection_item_vtable;
     p->selection.lpVtbl = &selection_vtable; p->range_value.lpVtbl = &range_value_vtable; p->expand_collapse.lpVtbl = &expand_collapse_vtable;
+    p->grid.lpVtbl = &grid_vtable; p->grid_item.lpVtbl = &grid_item_vtable; p->table.lpVtbl = &table_vtable; p->table_item.lpVtbl = &table_item_vtable;
     p->refs = 1; p->state = s; p->id = id;
-    p->patterns = patterns_for_role(role);
+    p->patterns = patterns;
     p->listed = TRUE; p->next = s->providers; if (p->next) p->next->previous = p; s->providers = p;
     retain(s); InterlockedIncrement(&live_providers);
 }
@@ -1035,7 +1274,7 @@ static HRESULT provider_from_storage(State *s, uint64_t id, Provider *p, Provide
     if (!node) { ReleaseSRWLockExclusive(&s->lock); free(p); return UIA_E_ELEMENTNOTAVAILABLE; }
     if (!p) { ReleaseSRWLockExclusive(&s->lock); return E_OUTOFMEMORY; }
     if (node->role == ROLE_LIST) { ReleaseSRWLockExclusive(&s->lock); free(p); return UIA_E_ELEMENTNOTAVAILABLE; }
-    provider_initialize_locked(s, id, node->role, p);
+    provider_initialize_locked(s, id, patterns_for_node(s, node), p);
     ReleaseSRWLockExclusive(&s->lock); *out = p; return S_OK;
 }
 static HRESULT provider_new(State *s, uint64_t id, Provider **out) {
@@ -1122,11 +1361,82 @@ HRESULT zua_collections_commit(State *s, Collections *candidate) {
     ReleaseSRWLockExclusive(&s->lock);
     return hr;
 }
+/* How a node changed since the last tree, for UI Automation's clients:
+   what they read of it, and where the focus went. */
+#define CHANGE_CAP 32
+typedef struct PropertyChange { uint64_t id; PROPERTYID property; VARIANT before, after; } PropertyChange;
+static void change_bool(PropertyChange *changes, uint32_t *count, uint64_t id, PROPERTYID property, BOOL before, BOOL after) {
+    if (!before == !after || *count == CHANGE_CAP) return;
+    PropertyChange *c = &changes[(*count)++];
+    c->id = id; c->property = property; VariantInit(&c->before); VariantInit(&c->after);
+    c->before.vt = c->after.vt = VT_BOOL; c->before.boolVal = before ? VARIANT_TRUE : VARIANT_FALSE; c->after.boolVal = after ? VARIANT_TRUE : VARIANT_FALSE;
+}
+static void change_int(PropertyChange *changes, uint32_t *count, uint64_t id, PROPERTYID property, LONG before, LONG after) {
+    if (before == after || *count == CHANGE_CAP) return;
+    PropertyChange *c = &changes[(*count)++];
+    c->id = id; c->property = property; VariantInit(&c->before); VariantInit(&c->after);
+    c->before.vt = c->after.vt = VT_I4; c->before.lVal = before; c->after.lVal = after;
+}
+static void change_double(PropertyChange *changes, uint32_t *count, uint64_t id, PROPERTYID property, double before, double after) {
+    if (before == after || *count == CHANGE_CAP) return;
+    PropertyChange *c = &changes[(*count)++];
+    c->id = id; c->property = property; VariantInit(&c->before); VariantInit(&c->after);
+    c->before.vt = c->after.vt = VT_R8; c->before.dblVal = before; c->after.dblVal = after;
+}
+/* Takes the strings, which may be null for none. */
+static void change_string(PropertyChange *changes, uint32_t *count, uint64_t id, PROPERTYID property, BSTR before, BSTR after) {
+    const UINT a = SysStringLen(before), b = SysStringLen(after);
+    if ((a == b && (!a || !memcmp(before, after, a * sizeof(WCHAR)))) || *count == CHANGE_CAP) { SysFreeString(before); SysFreeString(after); return; }
+    PropertyChange *c = &changes[(*count)++];
+    c->id = id; c->property = property; VariantInit(&c->before); VariantInit(&c->after);
+    c->before.vt = c->after.vt = VT_BSTR;
+    c->before.bstrVal = before ? before : SysAllocString(L""); c->after.bstrVal = after ? after : SysAllocString(L"");
+}
+static BSTR text_of(const WCHAR *text, uint32_t start, uint32_t length) { return length ? SysAllocStringLen(text + start, length) : NULL; }
+static LONG toggle_of(const Node *n) { return (n->flags & MIXED) ? ToggleState_Indeterminate : (n->flags & CHECKED) ? ToggleState_On : ToggleState_Off; }
+/* Call with the lock held, before the new tree replaces the old. */
+static uint32_t changes_locked(State *s, const Node *nodes, uint32_t count, const WCHAR *text, PropertyChange *changes, uint64_t *focus) {
+    uint32_t told = 0; uint64_t was = 0; *focus = 0;
+    for (uint32_t i = 0; i < s->count; ++i) if (s->nodes[i].flags & FOCUSED) { was = s->nodes[i].id; break; }
+    for (uint32_t i = 0; i < count; ++i) if (nodes[i].flags & FOCUSED) { if (nodes[i].id != was) *focus = nodes[i].id; break; }
+    for (uint32_t i = 1; i < count && told < CHANGE_CAP; ++i) {
+        const Node *now = &nodes[i], *before = NULL;
+        for (uint32_t j = 1; j < s->count; ++j) if (s->nodes[j].id == now->id) { before = &s->nodes[j]; break; }
+        if (!before || before->role != now->role) continue;
+        const uint64_t id = now->id;
+        change_string(changes, &told, id, UIA_NamePropertyId, text_of(s->text, before->name_start, before->name_len), text_of(text, now->name_start, now->name_len));
+        change_bool(changes, &told, id, UIA_IsEnabledPropertyId, before->flags & ENABLED, now->flags & ENABLED);
+        /* A field marked invalid as the user leaves it, and what describes
+           it, as its message showing. */
+        change_bool(changes, &told, id, UIA_IsDataValidForFormPropertyId, !(before->flags & INVALID), !(now->flags & INVALID));
+        change_string(changes, &told, id, 30159 /* UIA_FullDescriptionPropertyId */, text_of(s->text, before->description_start, before->description_len), text_of(text, now->description_start, now->description_len));
+        change_string(changes, &told, id, UIA_AriaPropertiesPropertyId, aria_properties(before), aria_properties(now));
+        if (toggle_role(now->role)) change_int(changes, &told, id, UIA_ToggleToggleStatePropertyId, toggle_of(before), toggle_of(now));
+        if (selection_item_node(now)) change_bool(changes, &told, id, UIA_SelectionItemIsSelectedPropertyId, item_selected(before), item_selected(now));
+        if (expands(now)) change_int(changes, &told, id, UIA_ExpandCollapseExpandCollapseStatePropertyId, expand_state(before), expand_state(now));
+        if (range_role(now->role)) change_double(changes, &told, id, UIA_RangeValueValuePropertyId, before->range_value, now->range_value);
+        if ((now->role == ROLE_TEXT_BOX && !(now->flags & PASSWORD)) || now->role == ROLE_COMBO_BOX)
+            change_string(changes, &told, id, UIA_ValueValuePropertyId, text_of(s->text, before->value_start, before->value_len), text_of(text, now->value_start, now->value_len));
+    }
+    return told;
+}
+static void raise_changes(State *s, PropertyChange *changes, uint32_t count, uint64_t focus) {
+    for (uint32_t i = 0; i < count; ++i) {
+        Provider *p = NULL;
+        if (SUCCEEDED(provider_new(s, changes[i].id, &p))) { UiaRaiseAutomationPropertyChangedEvent(&p->simple, changes[i].property, changes[i].before, changes[i].after); provider_release(p); }
+        VariantClear(&changes[i].before); VariantClear(&changes[i].after);
+    }
+    if (focus) {
+        Provider *p = NULL;
+        if (SUCCEEDED(provider_new(s, focus, &p))) { UiaRaiseAutomationEvent(&p->simple, UIA_AutomationFocusChangedEventId); provider_release(p); }
+    }
+}
 static HRESULT publish(State *s,const Node *nodes,uint32_t count,const WCHAR *text,uint32_t length,const Geometry *geometry,const RecipientAuthority *recipients){
     if (!count || count > NODE_CAP || length > TEXT_CAP || nodes[0].id != 0) return E_INVALIDARG;
     for (uint32_t i = 0; i < count; ++i) if (nodes[i].name_start > length || nodes[i].name_len > length - nodes[i].name_start || nodes[i].value_start > length || nodes[i].value_len > length - nodes[i].value_start || nodes[i].selection_start > nodes[i].value_len || nodes[i].selection_end > nodes[i].value_len || nodes[i].description_start > length || nodes[i].description_len > length - nodes[i].description_start) return E_INVALIDARG;
     if (recipients) for (uint32_t i = 0; i < count; ++i) if (!recipient_valid(&recipients[i], nodes[i].id, nodes[i].role)) return E_INVALIDARG;
     if(geometry&&!geometry_valid(geometry,count))return E_INVALIDARG;
+    const BOOL listening = UiaClientsAreListening();
     AcquireSRWLockExclusive(&s->lock);
     if (s->closed) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_ELEMENTNOTAVAILABLE; }
     if(geometry&&!s->geometry){ReleaseSRWLockExclusive(&s->lock);return E_UNEXPECTED;}
@@ -1146,6 +1456,8 @@ static HRESULT publish(State *s,const Node *nodes,uint32_t count,const WCHAR *te
         for (uint32_t j = 0; j < s->count; ++j) if (s->nodes[j].id == nodes[i].id && s->nodes[j].role == ROLE_STATUS) { seen = TRUE; break; }
         if (!seen) announce[announced++] = nodes[i].id;
     }
+    PropertyChange changes[CHANGE_CAP]; uint32_t changed = 0; uint64_t focus = 0;
+    if (listening) changed = changes_locked(s, nodes, count, text, changes, &focus);
     memcpy(s->nodes, nodes, count * sizeof(Node)); memcpy(s->text, text, length * sizeof(WCHAR)); s->count = count; s->text_len = length;
     if(geometry)memcpy(s->geometry,geometry,sizeof(*geometry));s->geometry_active=geometry!=NULL;
     if (s->collections) {
@@ -1160,6 +1472,7 @@ static HRESULT publish(State *s,const Node *nodes,uint32_t count,const WCHAR *te
         Provider *p = NULL;
         if (SUCCEEDED(provider_new(s, announce[i], &p))) { UiaRaiseAutomationEvent(&p->simple, UIA_LiveRegionChangedEventId); provider_release(p); }
     }
+    raise_changes(s, changes, changed, focus);
     return S_OK;
 }
 /* What live regions read out, as Zig tells them: a notification on the

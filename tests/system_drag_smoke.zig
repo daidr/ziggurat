@@ -57,6 +57,7 @@ const X11 = struct {
     }
     fn raise(_: *X11, _: z.Window) void {}
     fn report(_: *X11, _: z.ScreenPoint) void {}
+    fn reportCursor(_: *X11, _: z.Window) void {}
 };
 extern fn gtk_widget_get_scale_factor(*anyopaque) c_int;
 
@@ -87,8 +88,23 @@ const Win32 = struct {
         input.unnamed_0.ki.dwFlags = if (down) 0 else win.KEYEVENTF_KEYUP;
         self.send(input);
     }
-    fn pointer(_: *Win32, point: z.ScreenPoint) void {
-        _ = win.SetCursorPos(point.x, point.y);
+    fn pointer(self: *Win32, point: z.ScreenPoint) void {
+        if (win.SetCursorPos(point.x, point.y) != 0) {
+            var at: win.POINT = undefined;
+            if (win.GetCursorPos(&at) != 0 and at.x == point.x and at.y == point.y) return;
+        }
+        // The cursor did not get there, as when the system holds it for a
+        // moment: move it as a mouse would, across the virtual desktop.
+        const left = win.GetSystemMetrics(win.SM_XVIRTUALSCREEN);
+        const top = win.GetSystemMetrics(win.SM_YVIRTUALSCREEN);
+        const width = @max(2, win.GetSystemMetrics(win.SM_CXVIRTUALSCREEN));
+        const height = @max(2, win.GetSystemMetrics(win.SM_CYVIRTUALSCREEN));
+        var input = std.mem.zeroes(win.INPUT);
+        input.type = win.INPUT_MOUSE;
+        input.unnamed_0.mi.dx = @intCast(@divTrunc((@as(i64, point.x) - left) * 65535, width - 1));
+        input.unnamed_0.mi.dy = @intCast(@divTrunc((@as(i64, point.y) - top) * 65535, height - 1));
+        input.unnamed_0.mi.dwFlags = win.MOUSEEVENTF_MOVE | win.MOUSEEVENTF_ABSOLUTE | win.MOUSEEVENTF_VIRTUALDESK;
+        self.send(input);
     }
     fn press(self: *Win32, down: bool) void {
         var input = std.mem.zeroes(win.INPUT);
@@ -103,6 +119,23 @@ const Win32 = struct {
         _ = win.SetWindowPos(hwnd, win.HWND_TOPMOST, 0, 0, 0, 0, flags);
         _ = win.SetWindowPos(hwnd, win.HWND_NOTOPMOST, 0, 0, 0, 0, flags);
         _ = win.SetForegroundWindow(hwnd);
+    }
+    /// The window under the cursor: its title, whether it is `expected`'s
+    /// and has an OLE drop target, and which window holds the capture.
+    fn reportCursor(_: *Win32, expected: z.Window) void {
+        var cursor: win.POINT = .{ .x = 0, .y = 0 };
+        _ = win.GetCursorPos(&cursor);
+        const under = win.WindowFromPoint(cursor);
+        const want: win.HWND = @ptrCast(expected.nativeHandle() orelse return);
+        var title: [64]u16 = @splat(0);
+        const title_len: usize = if (under != null) @intCast(@max(0, win.GetWindowTextW(under, &title, title.len))) else 0;
+        var title_utf8: [192]u8 = undefined;
+        const name = title_utf8[0 .. std.unicode.utf16LeToUtf8(&title_utf8, title[0..title_len]) catch 0];
+        const ole = std.unicode.utf8ToUtf16LeStringLiteral("OleDropTargetInterface");
+        const capture = win.GetCapture();
+        var capture_pid: win.DWORD = 0;
+        if (capture != null) _ = win.GetWindowThreadProcessId(capture, &capture_pid);
+        std.debug.print("drag smoke cursor: under=\"{s}\" expected={} registered={} expected_registered={} expected_visible={} capture={} capture_pid={d}\n", .{ name, under == want, under != null and win.GetPropW(under, ole) != null, win.GetPropW(want, ole) != null, win.IsWindowVisible(want) != 0, capture != null, capture_pid });
     }
     /// What real input meets at `point`: whether the session takes input at
     /// all, where the cursor is and which window is under the point.
@@ -318,6 +351,7 @@ const Smoke = struct {
         if (self.waited > 800) {
             std.debug.print("drag smoke: stuck in round {s} at {s}; source {s}, held {}, hovers {d}, left {d}\n", .{ @tagName(self.round), @tagName(self.stage), @tagName(self.source.state), self.held, self.hovers, self.left });
             if (self.center(self.source_window)) |start| self.input.report(start) else |_| {}
+            self.input.reportCursor(if (self.round == .legacy) self.legacy_window else self.target_window);
             self.finish(error.Timeout);
         }
     }

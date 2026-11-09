@@ -202,13 +202,13 @@ const State = struct {
                 try legacy.setClientBounds(.{ .position = .{ .x = legacy_bounds.position.?.x + 11, .y = legacy_bounds.position.?.y + 13 }, .width = legacy_bounds.width, .height = legacy_bounds.height });
                 try std.testing.expect(self.views[3].last_hresult >= 0);
                 _ = try legacy.destroy();
-                try expectChild(self.window, .{ .x = 20, .y = 15, .width = 160, .height = 90 }, true);
+                try expectPlaced(self.window, self.views[0..2], .{ .x = 20, .y = 15, .width = 160, .height = 90 }, true);
                 try self.window.resize(520, 300);
                 try self.paintBackdrop();
-                try expectChild(self.window, .{ .x = 20, .y = 15, .width = 160, .height = 90 }, true);
+                try expectPlaced(self.window, self.views[0..2], .{ .x = 20, .y = 15, .width = 160, .height = 90 }, true);
                 try self.regions[0].update(.{ .bounds = .{ .x = 40, .y = 35, .width = 190, .height = 110 } });
                 try self.regions[1].update(.{ .bounds = .{ .x = 250, .y = 30, .width = 180, .height = 120 }, .visible = false });
-                try expectChild(self.window, .{ .x = 250, .y = 30, .width = 180, .height = 120 }, false);
+                try expectPlaced(self.window, self.views[0..2], .{ .x = 250, .y = 30, .width = 180, .height = 120 }, false);
                 self.phase = .updated;
                 try self.measure(190, 110, 2, "one", 2);
             },
@@ -216,7 +216,7 @@ const State = struct {
                 if (self.evaluated != 2) return;
                 try std.testing.expect(self.views[3].window == null and self.views[3].native == null and self.legacy_window.?.isClosed());
                 try self.regions[1].update(.{ .bounds = .{ .x = 250, .y = 30, .width = 180, .height = 120 } });
-                try expectChild(self.window, .{ .x = 250, .y = 30, .width = 180, .height = 120 }, true);
+                try expectPlaced(self.window, self.views[0..2], .{ .x = 250, .y = 30, .width = 180, .height = 120 }, true);
                 self.loaded[0] = false;
                 self.phase = .reload_wait;
                 try self.views[0].reload(self.options(0, "<title>replacement</title>"));
@@ -225,7 +225,7 @@ const State = struct {
                 if (!self.loaded[0]) return;
                 try std.testing.expect(self.old_page.?.generation != self.views[0].pageId().?.generation);
                 try std.testing.expectEqual(self.other_page.?, self.views[1].pageId().?);
-                try expectChild(self.window, .{ .x = 40, .y = 35, .width = 190, .height = 110 }, true);
+                try expectPlaced(self.window, self.views[0..2], .{ .x = 40, .y = 35, .width = 190, .height = 110 }, true);
                 self.old_page = self.views[0].pageId();
                 self.phase = .reloaded;
                 try self.measure(190, 110, 1, "replacement", 3);
@@ -249,7 +249,7 @@ const State = struct {
                 const before = self.draws;
                 _ = w.SendMessageW(self.window.nativeHandle(), w.WM_PAINT, 0, 0);
                 try std.testing.expectEqual(before, self.draws);
-                try expectChild(self.window, .{ .x = 250, .y = 30, .width = 180, .height = 120 }, true);
+                try expectPlaced(self.window, self.views[0..2], .{ .x = 250, .y = 30, .width = 180, .height = 120 }, true);
                 self.backdrop = try self.background.attachBackdrop(self.owner);
                 try self.paintBackdrop();
                 const stale = self.regions[0];
@@ -294,6 +294,20 @@ fn expectChild(window: z.Window, bounds: z.Rect, visible: bool) !void {
             const style = w.GetWindowLongPtrW(child, w.GWL_STYLE);
             if (((style & w.WS_VISIBLE) != 0) == visible) return;
         }
+    }
+    return error.NativeViewportNotFound;
+}
+
+/// A page in a region composes in the window's web layer: its controller
+/// has the region's bounds, in the window's client pixels, while it shows.
+fn expectPlaced(window: z.Window, views: []web.View, bounds: z.Rect, visible: bool) !void {
+    const size = try window.contentSize();
+    const expected = [_]i32{ @intFromFloat(@round(bounds.x * size.scale)), @intFromFloat(@round(bounds.y * size.scale)), @intFromFloat(@round((bounds.x + bounds.width) * size.scale)), @intFromFloat(@round((bounds.y + bounds.height) * size.scale)) };
+    for (views) |*page| {
+        const placed = page.testControllerBounds() orelse continue;
+        if (placed.visible != visible) continue;
+        // A hidden page keeps where it last showed.
+        if (!visible or std.mem.eql(i32, &placed.edges, &expected)) return;
     }
     return error.NativeViewportNotFound;
 }

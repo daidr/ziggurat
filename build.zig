@@ -2072,6 +2072,8 @@ pub fn build(b: *std.Build) void {
         view.linkSystemLibrary("shlwapi", .{});
         view.linkSystemLibrary("urlmon", .{});
         view.linkSystemLibrary("oleaut32", .{});
+        // Web views in native UI subclass their window (webview2_embed.h).
+        view.linkSystemLibrary("comctl32", .{});
         const producer = b.addModule("ziggurat_webview_producer", .{
             .root_source_file = b.path("src/resource_stream/web.zig"),
             .target = target,
@@ -2104,7 +2106,7 @@ pub fn build(b: *std.Build) void {
             native.addIncludePath(b.path("src/webview/include"));
         }
         addWindowsProfileNative(b, credentials_view, "credential-probe", sdk, target, optimize);
-        for ([_][]const u8{ "ole32", "shlwapi", "urlmon", "oleaut32", "crypt32" }) |library| credentials_view.linkSystemLibrary(library, .{});
+        for ([_][]const u8{ "ole32", "shlwapi", "urlmon", "oleaut32", "crypt32", "comctl32" }) |library| credentials_view.linkSystemLibrary(library, .{});
         const credentials_smoke = b.addExecutable(.{ .name = "smoke-request-credentials", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/windows_request_credentials_smoke.zig"),
             .target = target,
@@ -2150,7 +2152,7 @@ pub fn build(b: *std.Build) void {
             native.addIncludePath(b.path("src/webview/include"));
         }
         addWindowsProfileNative(b, initializers_view, "initializer-probe", sdk, target, optimize);
-        for ([_][]const u8{ "ole32", "shlwapi", "urlmon", "oleaut32", "crypt32" }) |library| initializers_view.linkSystemLibrary(library, .{});
+        for ([_][]const u8{ "ole32", "shlwapi", "urlmon", "oleaut32", "crypt32", "comctl32" }) |library| initializers_view.linkSystemLibrary(library, .{});
         const initializers_smoke = b.addExecutable(.{ .name = "smoke-document-initializers", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/windows_document_initializers_smoke.zig"),
             .target = target,
@@ -2226,7 +2228,7 @@ pub fn build(b: *std.Build) void {
         page_authorization.root_module.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
         page_authorization.root_module.addIncludePath(b.path("src/webview/include"));
         addWindowsProfileNative(b, page_authorization.root_module, "page-authorization", sdk, target, optimize);
-        for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32" }) |library| page_authorization.root_module.linkSystemLibrary(library, .{});
+        for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32", "comctl32" }) |library| page_authorization.root_module.linkSystemLibrary(library, .{});
         check.dependOn(&page_authorization.step);
         const page_authorization_run = b.addRunArtifact(page_authorization);
         b.step("smoke-page-authorization", "Check page authorization through native callback ABI without a Runtime").dependOn(&page_authorization_run.step);
@@ -2249,7 +2251,7 @@ pub fn build(b: *std.Build) void {
         initializer_native.root_module.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
         initializer_native.root_module.addIncludePath(b.path("src/webview/include"));
         addWindowsProfileNative(b, initializer_native.root_module, "initializer-native", sdk, target, optimize);
-        for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32" }) |library| initializer_native.root_module.linkSystemLibrary(library, .{});
+        for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32", "comctl32" }) |library| initializer_native.root_module.linkSystemLibrary(library, .{});
         check.dependOn(&initializer_native.step);
         initializer_native_run = b.addRunArtifact(initializer_native);
         b.step("test-document-initializers-native", "Run native document initializer mutation and lifetime contracts without a Runtime").dependOn(&initializer_native_run.?.step);
@@ -3910,6 +3912,13 @@ fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         b.top_level_steps.get("check").?.step.dependOn(&overlay_smoke.step);
         b.step("smoke-webview-overlay-linux", "Verify native UI over an embedded page, Tab into, through and out of it, and its tree inside the native UI's").dependOn(&b.addRunArtifact(overlay_smoke).step);
     }
+    if (target.result.os.tag == .windows) addSmoke(b, "smoke-webview-overlay-windows", "tests/windows_webview_overlay_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_webview", .module = view },
+        .{ .name = "ziggurat_webview_view", .module = embedded },
+    });
     if (target.result.os.tag == .macos) {
         const overlay = addSmokeModule(b, "smoke-webview-overlay-macos", "tests/macos_webview_overlay_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },

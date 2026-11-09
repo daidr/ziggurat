@@ -424,6 +424,10 @@ jobs:
         with:
           python-version: '3.12'
           architecture: x64
+      - name: Embedded page composed under native UI, its input, focus and tree
+        run: |
+          zig build smoke-webview-overlay-windows -Dwebview=true -Daccessibility=true -Doptimize=ReleaseSafe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Real WebView2 Runtime lifecycle and policy checks
         run: |
           bun test tests/ipc_client.test.ts tests/ipc_events.test.ts tests/resource_stream_client.test.ts
