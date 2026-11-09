@@ -122,7 +122,9 @@ pub const Node = struct {
     /// Native content inside the node whose own tree assistive technology
     /// reads there, such as a web view's page: its GtkWidget on Linux,
     /// whose accessible becomes the node's first child, or its NSView on
-    /// macOS, which becomes the element's first child. Ignored on Windows.
+    /// macOS, which becomes the element's first child, or WebView2's UI
+    /// Automation provider of the page on Windows, which the node answers
+    /// with.
     native: ?*anyopaque = null,
 };
 /// Nodes holding native content (`Node.native`) in one publication.
@@ -1075,7 +1077,7 @@ pub const Bridge = struct {
             const len = std.unicode.utf8ToUtf16Le(&units, item.text) catch continue;
             _ = zua_announce(self.native.?, &units, @intCast(len), @intFromBool(item.assertive));
         }
-        if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
+        {
             // The trees of native content, such as web pages, inside the
             // nodes standing for them.
             var ids: [max_native_pages]u64 = undefined;

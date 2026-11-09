@@ -2056,6 +2056,8 @@ pub fn build(b: *std.Build) void {
         view.linkSystemLibrary("shlwapi", .{});
         view.linkSystemLibrary("urlmon", .{});
         view.linkSystemLibrary("oleaut32", .{});
+        // Web views in native UI subclass their window (webview2_embed.h).
+        view.linkSystemLibrary("comctl32", .{});
         const producer = b.addModule("ziggurat_webview_producer", .{
             .root_source_file = b.path("src/resource_stream/web.zig"),
             .target = target,
@@ -3894,6 +3896,13 @@ fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         b.top_level_steps.get("check").?.step.dependOn(&overlay_smoke.step);
         b.step("smoke-webview-overlay-linux", "Verify native UI over an embedded page, Tab into, through and out of it, and its tree inside the native UI's").dependOn(&b.addRunArtifact(overlay_smoke).step);
     }
+    if (target.result.os.tag == .windows) addSmoke(b, "smoke-webview-overlay-windows", "tests/windows_webview_overlay_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_webview", .module = view },
+        .{ .name = "ziggurat_webview_view", .module = embedded },
+    });
     if (target.result.os.tag == .macos) {
         const overlay = addSmokeModule(b, "smoke-webview-overlay-macos", "tests/macos_webview_overlay_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },

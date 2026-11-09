@@ -1607,6 +1607,17 @@ pub const Window = struct {
         };
         scope.record.emitState();
     }
+    /// Hold (`on`) or let go of the window's frames showing their alpha
+    /// over native content composed under them, as a web view in native UI
+    /// on Windows is: the frames are transparent where the content leaves
+    /// holes for it. Windows only; elsewhere nothing changes.
+    pub fn composeUnder(self: Window, on: bool) void {
+        const scope = self.beginCallback() orelse return;
+        defer scope.end();
+        const record = scope.record;
+        if (on) record.composed_under +|= 1 else record.composed_under -|= 1;
+        if (@hasDecl(backend, "composeUnder")) backend.composeUnder(record);
+    }
     /// Show `cursor` while the pointer is over the client area, from now
     /// until it changes. Resize edges of a custom frame keep their own
     /// shapes; the window forgets the shape when it closes.
@@ -2410,6 +2421,9 @@ pub const WindowRecord = struct {
     hit_testing: bool = false,
     /// The pointer shape over the client area; see `Window.setCursor`.
     cursor: Cursor = .default,
+    /// Holds of `Window.composeUnder`: native content composed under the
+    /// window's frames, which then show their alpha.
+    composed_under: u16 = 0,
     last_state: ?WindowState = null,
     owner_record: ?*WindowRecord = null,
     first_child: ?*WindowRecord = null,

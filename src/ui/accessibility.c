@@ -90,6 +90,7 @@ typedef struct Geometry {
 _Static_assert(sizeof(GeometrySpace)==48,"semantic space ABI");
 _Static_assert(sizeof(GeometryRef)==40,"semantic clip ABI");
 _Static_assert(sizeof(Geometry)==16472,"semantic geometry ABI");
+enum { PAGE_CAP = 16 };
 typedef struct State State;
 typedef struct Provider Provider;
 typedef struct Range Range;
@@ -132,11 +133,17 @@ struct State {
     Geometry *geometry;
     BOOL geometry_active;
     Collections *collections;
+    /* The nodes standing for web pages and WebView2's providers of their
+       trees (zua_pages), each held. */
+    uint64_t page_ids[PAGE_CAP];
+    IUnknown *pages[PAGE_CAP];
+    uint32_t page_count;
 };
 struct Provider {
     IRawElementProviderSimple simple;
     IRawElementProviderFragment fragment;
     IRawElementProviderFragmentRoot root;
+    IRawElementProviderHwndOverride hwnd_override;
     IInvokeProvider invoke;
     IValueProvider value;
     ITextProvider text;
@@ -189,7 +196,7 @@ void zua_resource_counts(uint32_t *states, uint32_t *providers, uint32_t *ranges
     *actions = (uint32_t)InterlockedCompareExchange(&live_actions, 0, 0);
 }
 static void retain(State *s) { InterlockedIncrement(&s->refs); }
-static void release(State *s) { if (!InterlockedDecrement(&s->refs)) { if (s->host) IRawElementProviderSimple_Release(s->host); zua_geometry_free(s->geometry); zua_collections_free(s->collections); free(s); InterlockedDecrement(&live_states); } }
+static void release(State *s) { if (!InterlockedDecrement(&s->refs)) { if (s->host) IRawElementProviderSimple_Release(s->host); for (uint32_t i = 0; i < s->page_count; ++i) IUnknown_Release(s->pages[i]); zua_geometry_free(s->geometry); zua_collections_free(s->collections); free(s); InterlockedDecrement(&live_states); } }
 static Node *find(State *s, uint64_t id) {
     if (s->closed) return NULL;
     for (uint32_t i = 0; i < s->count; ++i) if (s->nodes[i].id == id) return &s->nodes[i];
@@ -310,6 +317,7 @@ static HRESULT provider_query(Provider *p, REFIID iid, void **out) {
     if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IRawElementProviderSimple)) *out = &p->simple;
     else if (IsEqualIID(iid, &IID_IRawElementProviderFragment)) *out = &p->fragment;
     else if (p->id == 0 && IsEqualIID(iid, &IID_IRawElementProviderFragmentRoot)) *out = &p->root;
+    else if (p->id == 0 && IsEqualIID(iid, &IID_IRawElementProviderHwndOverride)) *out = &p->hwnd_override;
     else if ((p->patterns & PATTERN_COLLECTION) && (IsEqualIID(iid, &IID_IItemContainerProvider) || IsEqualIID(iid, &IID_ISelectionProvider) || IsEqualIID(iid, &IID_ISelectionProvider2))) return collection_container_new(p, iid, out);
     else {
         /* COM's interface set is immutable even after the semantic node leaves
@@ -339,6 +347,69 @@ static HRESULT provider_query(Provider *p, REFIID iid, void **out) {
 PROVIDER_UNKNOWN(simple, IRawElementProviderSimple, simple)
 PROVIDER_UNKNOWN(fragment, IRawElementProviderFragment, fragment)
 PROVIDER_UNKNOWN(root, IRawElementProviderFragmentRoot, root)
+PROVIDER_UNKNOWN(hwnd_override, IRawElementProviderHwndOverride, hwnd_override)
+
+/* WebView2's provider of the page the node of `id` stands for, held, or
+   NULL: the node answers with it, in the place of the window WebView2 shows
+   the page with (hwnd_override_get). */
+static IRawElementProviderSimple *page_provider(State *s, uint64_t id) {
+    if (id == 0) return NULL;
+    IUnknown *page = NULL;
+    AcquireSRWLockShared(&s->lock);
+    if (!s->closed) for (uint32_t i = 0; i < s->page_count; ++i) if (s->page_ids[i] == id) { page = s->pages[i]; IUnknown_AddRef(page); break; }
+    ReleaseSRWLockShared(&s->lock);
+    if (!page) return NULL;
+    IRawElementProviderSimple *simple = NULL;
+    if (FAILED(IUnknown_QueryInterface(page, &IID_IRawElementProviderSimple, (void **)&simple))) simple = NULL;
+    IUnknown_Release(page);
+    return simple;
+}
+/* The node of the page WebView2 shows with the window `hwnd`, a child of
+   this one's, if one does. */
+static HRESULT STDMETHODCALLTYPE hwnd_override_get(IRawElementProviderHwndOverride *iface, HWND hwnd, IRawElementProviderSimple **out) {
+    if (!out) return E_POINTER;
+    *out = NULL;
+    State *s = hwnd_override_self(iface)->state;
+    uint64_t ids[PAGE_CAP]; uint32_t count = 0;
+    AcquireSRWLockShared(&s->lock);
+    if (!s->closed) for (uint32_t i = 0; i < s->page_count; ++i) ids[count++] = s->page_ids[i];
+    ReleaseSRWLockShared(&s->lock);
+    for (uint32_t i = 0; i < count; ++i) {
+        IRawElementProviderSimple *page = page_provider(s, ids[i]);
+        if (!page) continue;
+        IRawElementProviderSimple *host = NULL;
+        BOOL match = FALSE;
+        if (SUCCEEDED(IRawElementProviderSimple_get_HostRawElementProvider(page, &host)) && host) {
+            VARIANT v; VariantInit(&v);
+            if (SUCCEEDED(IRawElementProviderSimple_GetPropertyValue(host, UIA_NativeWindowHandlePropertyId, &v)) && v.vt == VT_I4 && (HWND)(intptr_t)v.lVal == hwnd) match = TRUE;
+            VariantClear(&v);
+            IRawElementProviderSimple_Release(host);
+        }
+        IRawElementProviderSimple_Release(page);
+        if (!match) continue;
+        Provider *p = NULL;
+        HRESULT hr = provider_new(s, ids[i], &p);
+        if (SUCCEEDED(hr)) *out = &p->simple;
+        return hr == UIA_E_ELEMENTNOTAVAILABLE ? S_OK : hr;
+    }
+    return S_OK;
+}
+static const IRawElementProviderHwndOverrideVtbl hwnd_override_vtable = { hwnd_override_query, hwnd_override_add, hwnd_override_release, hwnd_override_get };
+/* Hold WebView2's providers of the pages inside the nodes of `ids`, and let
+   go of those held before. */
+HRESULT zua_pages(State *s, const uint64_t *ids, void *const *natives, uint32_t count) {
+    if (!s || count > PAGE_CAP || (count && (!ids || !natives))) return E_INVALIDARG;
+    IUnknown *old[PAGE_CAP]; uint32_t old_count;
+    for (uint32_t i = 0; i < count; ++i) IUnknown_AddRef((IUnknown *)natives[i]);
+    AcquireSRWLockExclusive(&s->lock);
+    old_count = s->page_count;
+    memcpy(old, s->pages, sizeof(old[0]) * old_count);
+    for (uint32_t i = 0; i < count; ++i) { s->page_ids[i] = ids[i]; s->pages[i] = (IUnknown *)natives[i]; }
+    s->page_count = count;
+    ReleaseSRWLockExclusive(&s->lock);
+    for (uint32_t i = 0; i < old_count; ++i) IUnknown_Release(old[i]);
+    return S_OK;
+}
 PROVIDER_UNKNOWN(invoke, IInvokeProvider, invoke)
 PROVIDER_UNKNOWN(value, IValueProvider, value)
 PROVIDER_UNKNOWN(text, ITextProvider, text)
@@ -491,8 +562,10 @@ void zua_finish_action(Action *a) {
 }
 
 static HRESULT STDMETHODCALLTYPE simple_options(IRawElementProviderSimple *iface, enum ProviderOptions *out) {
-    (void)iface;
     if (!out) return E_POINTER;
+    Provider *self = simple_self(iface);
+    IRawElementProviderSimple *page = self->listed ? page_provider(self->state, self->id) : NULL;
+    if (page) { HRESULT hr = IRawElementProviderSimple_get_ProviderOptions(page, out); IRawElementProviderSimple_Release(page); return hr; }
     /* UI Automation still queries this immutable COM metadata to disconnect a
        closed provider. It never needs a live semantic node or Zig context. */
     *out = ProviderOptions_ServerSideProvider | ProviderOptions_UseComThreading;
@@ -502,6 +575,12 @@ static HRESULT STDMETHODCALLTYPE simple_pattern(IRawElementProviderSimple *iface
     if (!out) return E_POINTER;
     *out = NULL;
     Provider *p = simple_self(iface);
+    IRawElementProviderSimple *page = page_provider(p->state, p->id);
+    if (page) {
+        HRESULT hr = IRawElementProviderSimple_GetPatternProvider(page, id, out);
+        IRawElementProviderSimple_Release(page);
+        if (hr != E_NOTIMPL) return hr;
+    }
     Node n; HRESULT hr = read_provider_node(p, &n); if (FAILED(hr)) return hr;
     if (n.role == ROLE_LIST && (p->patterns & PATTERN_COLLECTION)) {
         if (id == UIA_ItemContainerPatternId) return collection_container_new(p, &IID_IItemContainerProvider, (void **)out);
@@ -708,6 +787,13 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
     if (!out) return E_POINTER;
     VariantInit(out);
     Provider *p = simple_self(iface); State *s = p->state;
+    IRawElementProviderSimple *page = page_provider(s, p->id);
+    if (page) {
+        HRESULT page_hr = IRawElementProviderSimple_GetPropertyValue(page, id, out);
+        IRawElementProviderSimple_Release(page);
+        if (page_hr != E_NOTIMPL) return page_hr;
+        VariantInit(out);
+    }
     AcquireSRWLockShared(&s->lock); Node *n = provider_find_locked(p);
     if (!n) { ReleaseSRWLockShared(&s->lock); return UIA_E_ELEMENTNOTAVAILABLE; }
     HRESULT hr = S_OK;
@@ -846,7 +932,9 @@ static HRESULT STDMETHODCALLTYPE simple_host(IRawElementProviderSimple *iface, I
     Provider *p = simple_self(iface);
     /* Host identity must survive HWND destruction and remains available to
        UiaDisconnectProvider after semantic getters have become unavailable. */
-    if (p->id == 0) { *out = p->state->host; IRawElementProviderSimple_AddRef(*out); }
+    if (p->id == 0) { *out = p->state->host; IRawElementProviderSimple_AddRef(*out); return S_OK; }
+    IRawElementProviderSimple *page = p->listed ? page_provider(p->state, p->id) : NULL;
+    if (page) { HRESULT hr = IRawElementProviderSimple_get_HostRawElementProvider(page, out); IRawElementProviderSimple_Release(page); return hr; }
     return S_OK;
 }
 static HRESULT make_fragment(State *s, uint64_t id, IRawElementProviderFragment **out) {
@@ -885,6 +973,9 @@ static HRESULT STDMETHODCALLTYPE fragment_runtime(IRawElementProviderFragment *i
     /* Runtime identity is immutable, including during native disconnection. */
     *out = NULL; Provider *p = fragment_self(iface);
     if (p->id == 0) return S_OK;
+    /* A page's is its window's. */
+    IRawElementProviderSimple *page = page_provider(p->state, p->id);
+    if (page) { IRawElementProviderSimple_Release(page); return S_OK; }
     const BOOL collection = (p->patterns & PATTERN_COLLECTION) != 0;
     const CollectionRegistration key = collection ? ((CollectionAnchor *)p)->registration : (CollectionRegistration){0};
     const LONG count = collection ? 7 : 3;
@@ -1164,7 +1255,7 @@ static uint32_t patterns_for_node(State *s, const Node *n) {
     return patterns;
 }
 static void provider_initialize_locked(State *s, uint64_t id, uint32_t patterns, Provider *p) {
-    p->simple.lpVtbl = &simple_vtable; p->fragment.lpVtbl = &fragment_vtable; p->root.lpVtbl = &root_vtable;
+    p->simple.lpVtbl = &simple_vtable; p->fragment.lpVtbl = &fragment_vtable; p->root.lpVtbl = &root_vtable; p->hwnd_override.lpVtbl = &hwnd_override_vtable;
     p->invoke.lpVtbl = &invoke_vtable; p->value.lpVtbl = &value_vtable; p->text.lpVtbl = &text_vtable;
     p->toggle.lpVtbl = &toggle_vtable; p->selection_item.lpVtbl = &selection_item_vtable;
     p->selection.lpVtbl = &selection_vtable; p->range_value.lpVtbl = &range_value_vtable; p->expand_collapse.lpVtbl = &expand_collapse_vtable;

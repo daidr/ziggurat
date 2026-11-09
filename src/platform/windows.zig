@@ -1383,6 +1383,13 @@ fn point(hwnd: c.HWND, lp: c.LPARAM) core.Point {
     return .{ .x = @as(f32, @floatFromInt(@as(i16, @bitCast(@as(u16, @truncate(bits)))))) / scale, .y = @as(f32, @floatFromInt(@as(i16, @bitCast(@as(u16, @truncate(bits >> 16)))))) / scale };
 }
 
+/// The frames start or stop showing their alpha over the content composed
+/// under them: the next frame draws whole.
+pub fn composeUnder(window: *core.WindowRecord) void {
+    const hwnd = window.native.hwnd orelse return;
+    _ = c.InvalidateRect(hwnd, null, 0);
+}
+
 fn windowProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
     if (message == c.WM_NCCREATE) {
         const cs: *const c.CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lp)));
@@ -1624,7 +1631,9 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             var ps: c.PAINTSTRUCT = undefined;
             const dc = c.BeginPaint(hwnd, &ps);
             defer _ = c.EndPaint(hwnd, &ps);
-            if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd), .transparent = window.native.no_redirect, .background = if (window.native.no_redirect) null else window.native.background } });
+            // Over native content composed under them (`Window.composeUnder`)
+            // the frames show their alpha through DirectComposition too.
+            if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd), .transparent = window.native.no_redirect or window.composed_under != 0, .background = if (window.native.no_redirect) null else window.native.background } });
             return 0;
         },
         c.WM_ERASEBKGND => {

@@ -4714,6 +4714,17 @@ pub const Frame = struct {
         }
         try self.context.command_buffer.backdropShader(entry);
     }
+    /// Clears `box`, in the window's DIPs and inside corners of `radius`,
+    /// to transparent: native content composed under the window's frames
+    /// shows there, as a web view's page in native UI does on Windows
+    /// (`z.Window.composeUnder`), under what the frame paints after it.
+    pub fn composedHole(self: *Frame, box: Rect, radius: f32) void {
+        if (box.width <= 0 or box.height <= 0) return;
+        const corner = @min(@max(radius, 0), @min(box.width, box.height) / 2);
+        self.context.command_buffer.backdropEffect(.{ .bounds = box, .radius = corner, .kind = .hole, .fallback = .{ .r = 0, .g = 0, .b = 0, .a = 0 } }) catch |err| {
+            self.failure = self.failure orelse err;
+        };
+    }
     /// Leaves a hole for the system's glass of `glass` over `box` and notes
     /// where it shows, when the window draws it there: not under Reduce
     /// Transparency, for an interactive glass, inside a transform, group or

@@ -8,6 +8,8 @@
 #include <wchar.h>
 #include <stdint.h>
 #include <shlwapi.h>
+#include <windowsx.h>
+#include <math.h>
 #include <stdio.h>
 #define MAX_PAGE_URI_UNITS 16384
 /* Prefix of the page-facts script's messages; see page_facts.zig. */
@@ -50,7 +52,7 @@ typedef int (*ContextMenuOffer)(void *,const ContextTargetInput *,const ContextI
 /* What a page's content rules do to a load: bit 0 blocks it, bit 1 sends it
    without cookies, bit 2 makes it secure. top is NULL for the page itself. */
 typedef uint32_t (*ContentVerdict)(void *,const WCHAR *uri,const WCHAR *top,int resource_context);
-typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; _Bool audio_muted; ContentVerdict content_verdict; const WCHAR *content_style; AuthOffer auth; CertificateOffer certificate_offer; uint32_t context_menu; ContextMenuOffer context_offer; uint32_t gestures; } ViewSettings;
+typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; _Bool audio_muted; ContentVerdict content_verdict; const WCHAR *content_style; AuthOffer auth; CertificateOffer certificate_offer; uint32_t context_menu; ContextMenuOffer context_offer; uint32_t gestures; _Bool composition; } ViewSettings;
 typedef void (*Resource)(void *, const WCHAR *, const WCHAR *, const NativeHeader *, uint32_t, void *);
 typedef struct PageEvent {
     int kind;
@@ -157,6 +159,10 @@ struct State {
     SeedNotify seed_notify;
     void *seed_context;
     void *context;
+    /* A page in a window of native UI composes in the window's web layer
+       (webview2_embed.h). */
+    BOOL composition;
+    struct Embed *embed;
 };
 static void file_controls_close(State *);
 static void state_cleanup(State *);
@@ -315,6 +321,7 @@ VTABLE(FactsHandler, ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHa
 #include "browser_tools.h"
 #include "permissions_native.h"
 #include "downloads_native.h"
+#include "webview2_embed.h"
 
 
 static void next_permission(State *s);
@@ -583,11 +590,14 @@ static void owned_environment(void *context,HRESULT hr,ICoreWebView2Environment 
         ICoreWebView2Environment_Release(environment);release(s);return;
     }
     s->environment=environment;
-    ControllerHandler *handler=ControllerHandler_new(s);
-    if (!handler) hr=E_OUTOFMEMORY;
+    if (s->composition) hr=embed_create(s,environment);
     else {
-        hr=ICoreWebView2Environment_CreateCoreWebView2Controller(environment,s->hwnd,&handler->iface);
-        ControllerHandler_release(&handler->iface);
+        ControllerHandler *handler=ControllerHandler_new(s);
+        if (!handler) hr=E_OUTOFMEMORY;
+        else {
+            hr=ICoreWebView2Environment_CreateCoreWebView2Controller(environment,s->hwnd,&handler->iface);
+            ControllerHandler_release(&handler->iface);
+        }
     }
     if (FAILED(hr)&&!s->closed) owned_initialization_failed(s,hr);
     release(s);
@@ -684,7 +694,10 @@ static HRESULT STDMETHODCALLTYPE server_certificate_invoke(ICoreWebView2ServerCe
 }
 
 static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebView2ControllerCompletedHandler *p,HRESULT hr,ICoreWebView2Controller *controller) {
-    State *s=((ControllerHandler *)p)->state;retain(s);
+    return controller_ready(((ControllerHandler *)p)->state,hr,controller);
+}
+static HRESULT controller_ready(State *s,HRESULT hr,ICoreWebView2Controller *controller) {
+    retain(s);
     ICoreWebView2 *view=NULL;
     ICoreWebView2_4 *view4=NULL;ICoreWebView2_22 *view22=NULL;
     ICoreWebView2_10 *view10=NULL;ICoreWebView2_5 *view5=NULL;ICoreWebView2_14 *view14=NULL;ICoreWebView2_11 *view11=NULL;ICoreWebView2_8 *view8=NULL;
@@ -704,6 +717,7 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
     if (s->closed) { ICoreWebView2_Release(view);goto done; }
     s->webview=view;
     hr=owned_controller_prepare(s);if (FAILED(hr)||s->closed) goto failed;
+    hr=embed_ready(s);if (FAILED(hr)||s->closed) goto failed;
     /* SDK output is never written straight into State across a foreign call.
        Each temporary interface remains pinned through reentrant close. */
 #define QUERY_INTERFACE(Type,Id,Local,Field) do {     hr=ICoreWebView2_QueryInterface(view,&Id,(void **)&Local);     if (FAILED(hr)||!Local) { if (SUCCEEDED(hr)) hr=E_POINTER;goto failed; }     if (s->closed) goto done;     Type##_AddRef(Local);     if (s->closed) { Type##_Release(Local);goto done; }     s->Field=Local; } while (0)
@@ -1397,6 +1411,7 @@ State *zwv_create(HWND hwnd, const WCHAR *html, const WCHAR *profile, const WCHA
     if (!s->tool_limit || s->tool_limit>8 || !s->max_cookies || s->max_cookies>128 || !s->max_cookie_bytes || s->max_cookie_bytes>262144 || !s->max_capture_bytes || s->max_capture_bytes>16777216) { release(s); *out=E_INVALIDARG; return NULL; }
     if (s->zoom!=s->zoom || s->zoom<0.25 || s->zoom>5.0) { release(s); *out=E_INVALIDARG; return NULL; }
     if (settings && settings->user_agent) { s->user_agent=_wcsdup(settings->user_agent); if (!s->user_agent) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
+    if (settings) s->composition=settings->composition;
     if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; s->context_menu=settings->context_menu; s->context_offer=settings->context_offer; s->gestures=settings->gestures; s->muted=settings->audio_muted; s->content_verdict=settings->content_verdict; }
     if (settings && settings->content_style) { s->content_style=_wcsdup(settings->content_style); if (!s->content_style) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
     if (settings && settings->facts) { s->facts_script=_wcsdup(settings->facts); if (!s->facts_script) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
@@ -1687,6 +1702,7 @@ static void state_cleanup(State *s) {
     free(s->style_id); s->style_id=NULL;
     if (s->permissions) { ICoreWebView2PermissionSettingCollectionView_Release(s->permissions); s->permissions = NULL; }
     if (s->profile) { ICoreWebView2Profile4_Release(s->profile); s->profile = NULL; }
+    embed_close(s);
     if (s->controller) {
         ICoreWebView2Controller_Close(s->controller);
         ICoreWebView2Controller_Release(s->controller); s->controller = NULL;
