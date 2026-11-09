@@ -244,13 +244,23 @@ fn duration(timeout_ns: u64) Io.Timeout {
 }
 
 /// Blocks the calling thread for at least `ns` nanoseconds.
+/// Sleeps at least `ns` by the monotonic clock Timer reads: a Windows
+/// relative wait can end a little early by the performance counter, so a
+/// short wake sleeps out the rest.
 pub fn sleep(ns: u64) void {
     const value = io();
     const protection = value.swapCancelProtection(.blocked);
     defer _ = value.swapCancelProtection(protection);
-    value.sleep(.fromNanoseconds(ns), .awake) catch |err| switch (err) {
-        error.Canceled => unreachable,
-    };
+    const start = Io.Clock.boot.now(value).nanoseconds;
+    var left = ns;
+    while (true) {
+        value.sleep(.fromNanoseconds(left), .awake) catch |err| switch (err) {
+            error.Canceled => unreachable,
+        };
+        const elapsed = Io.Clock.boot.now(value).nanoseconds - start;
+        if (elapsed < 0 or elapsed >= ns) return;
+        left = ns - @as(u64, @intCast(elapsed));
+    }
 }
 
 /// Wall-clock time since the Unix epoch.
