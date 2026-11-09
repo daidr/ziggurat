@@ -192,8 +192,6 @@ pub fn main(process_init: std.process.Init.Minimal) void {
     defer arena.deinit();
     const code = run(arena.allocator(), process_init.args) catch |err| {
         std.debug.print("ziggurat: {s}\n", .{@errorName(err)});
-        // TEMP: locate a Windows-only failure.
-        if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
         std.process.exit(1);
     };
     std.process.exit(code);
@@ -909,7 +907,8 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             const directory = try std.process.executableDirPathAlloc(zio.io(), allocator);
             break :blk try std.fs.path.join(allocator, &.{ directory, if (windows) "ziggurat-setup.exe" else "ziggurat-setup" });
         };
-        const stub = try std.Io.Dir.cwd().readFileAlloc(zio.io(), stub_path, allocator, .limited(64 * 1024 * 1024));
+        // Debug stubs from Zig's own backend pass 64 MB; executables read up to 512 MB.
+        const stub = try std.Io.Dir.cwd().readFileAlloc(zio.io(), stub_path, allocator, .limited(512 * 1024 * 1024));
         if ((stub.len >= 2 and std.mem.eql(u8, stub[0..2], "MZ")) != windows) return error.StubTargetMismatch;
         const zip = try std.Io.Dir.cwd().readFileAlloc(zio.io(), zip_path, allocator, .limited(1024 * 1024 * 1024));
         const config_json = try std.json.Stringify.valueAlloc(allocator, config, .{ .emit_null_optional_fields = false });
