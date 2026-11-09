@@ -1,6 +1,7 @@
 //! Video files and streams played with the system's own media framework,
 //! for `ziggurat_view_video.Player.show` to show: AVFoundation on macOS,
-//! GStreamer on Linux and the video element in browsers. The system
+//! Media Foundation on Windows, GStreamer on Linux and the video element in
+//! browsers. The system
 //! decodes the video, in hardware where it can, and plays its sound in sync
 //! with the picture; its frames reach the window's renderer where the
 //! decoder left them, without a conversion on the CPU where the renderer
@@ -32,6 +33,7 @@ pub const Source = @import("source.zig").Source;
 const backend = switch (builtin.os.tag) {
     .linux => @import("gstreamer.zig"),
     .macos => @import("avfoundation.zig"),
+    .windows => @import("media_foundation.zig"),
     else => if (zio.is_web) @import("web.zig") else struct {
         pub const Engine = struct {
             pub fn open(_: Source) !*Engine {
@@ -50,8 +52,9 @@ const backend = switch (builtin.os.tag) {
 pub const test_clip = @embedFile("testdata/rgb.mp4");
 
 /// `error.Unsupported` reports a system without a media framework that
-/// plays video: a Linux without GStreamer 1.x and its base plugins, or a
-/// system of none. An app may show a GIF in its place.
+/// plays video: a Linux without GStreamer 1.x and its base plugins, a
+/// Windows Server without its Media Foundation feature or an N edition
+/// without the Media Feature Pack, or a system of none. An app may show a GIF in its place.
 pub const Error = error{Unsupported};
 
 /// Open a video file, playing once a view shows it. In browsers the path

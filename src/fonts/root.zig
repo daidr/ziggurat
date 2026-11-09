@@ -49,8 +49,8 @@ const Entry = struct {
     own_len: u8 = 0,
     registered: bool = false,
     monospaced: bool = false,
-    /// The system holds the registered faces under `name` itself (Linux),
-    /// apart from the font's own family.
+    /// The system holds the registered faces under `name` itself (Linux,
+    /// and DirectWrite on Windows), apart from the font's own family.
     named: bool = false,
 
     fn nameSlice(self: *const Entry) []const u8 {
@@ -109,6 +109,13 @@ pub fn systemName(id: Id) [:0]const u8 {
     return entries[id].ownSlice();
 }
 
+/// The family a registered font names itself, whatever name it is held
+/// under (`systemName`): GDI on Windows knows it only by that one.
+pub fn ownName(id: Id) [:0]const u8 {
+    if (id == 0 or id > count) return "";
+    return entries[id].fontFamily();
+}
+
 /// The family name to give the system for a family named `name`.
 pub fn resolve(family_name: []const u8) []const u8 {
     for (entries[1 .. count + 1]) |*entry| if (entry.registered and std.ascii.eqlIgnoreCase(entry.nameSlice(), family_name)) return entry.ownSlice();
@@ -146,14 +153,18 @@ pub fn register(allocator: Allocator, data: []const u8, family_name: []const u8)
         hash_count += 1;
         changes += 1;
     }
-    // Linux holds a family the app gives apart from the font's own, so
-    // that it takes only the faces registered under it: two faces of one
-    // family that declare the same weight stay apart. A family that is the
-    // font's own stays as it is.
-    const apart = builtin.os.tag == .linux and family_name.len > 0 and for (0..faces.count) |at| {
+    // Linux and Windows (DirectWrite) hold a family the app gives apart
+    // from the font's own, so that it takes only the faces registered
+    // under it: two faces of one family that declare the same weight stay
+    // apart. A family that is the font's own stays as it is. Windows also
+    // learns of a family that is the font's own, as a font's own family
+    // then gives up the fonts of others the app gave no such name.
+    const holds_apart = builtin.os.tag == .linux or builtin.os.tag == .windows;
+    const apart = holds_apart and family_name.len > 0 and for (0..faces.count) |at| {
         if (std.ascii.eqlIgnoreCase(own_buffer[at][0..own_lens[at]], family_name)) break false;
     } else true;
-    if (comptime builtin.os.tag == .linux) if (apart) {
+    const record = if (builtin.os.tag == .windows) family_name.len > 0 else apart;
+    if (comptime holds_apart) if (record) {
         const id = try family(family_name);
         const added = for (named_faces[0..named_count]) |face| {
             if (face.id == id and std.mem.eql(u8, &face.hash, &hash)) break true;

@@ -17,6 +17,7 @@ const gaussian_precision = @import("gaussian_gpu_precision.zig");
 const shader_effects = commands.shader_effects;
 const effect_host = @import("gpu_effect_host.zig");
 const shader_cache = @import("shader_cache.zig");
+const damage = @import("damage.zig");
 
 test "gradient spread GPU preflight rejects the whole used buffer and skips inert resources" {
     var buffer: commands.Buffer = .{};
@@ -811,8 +812,12 @@ pub const Renderer = struct {
     /// uses must have been prepared with `prepareEffect`. Backdrop effects and loading indicators, shader effects without a
     /// shader workspace or inside a transform, and element effects without
     /// a Gaussian capture to borrow, as on the software planes, leave the
-    /// whole frame to software.
+    /// whole frame to software, as do masked clips and opacities without
+    /// layers to draw them through.
     pub fn prepareEffects(self: *Renderer, buffer: *const commands.Buffer) bool {
+        // Masked clips and opacities draw through groups (`MaskRuns`); a
+        // frame without the layers for them draws in software.
+        if (!self.masksFit(buffer.commands())) return false;
         var uses = false;
         for (buffer.commands()) |op| switch (op) {
             .backdrop, .indicator => return false,
@@ -1108,6 +1113,123 @@ pub const Renderer = struct {
             if (!gaussian_precision.supports(capture)) return error.UnsupportedGaussianPrecision;
         };
     }
+    /// A masked clip or an opacity open while a list replays: each drawing
+    /// inside is drawn by itself through it, as the software planes mix
+    /// each (`mask_mix`). Drawings that do not overlap gather into one run
+    /// drawn in a group masked by each clip of its layer and at each
+    /// opacity; a group, transform or effect is one drawing of the layer it
+    /// composites onto.
+    const MaskRuns = struct {
+        const Scope = struct { clip: ?commands.MaskClip, opacity: u8 = 255, level: usize };
+        scopes: [32]Scope = undefined,
+        len: usize = 0,
+        /// Groups open for the run now; 0 while none is.
+        groups: usize = 0,
+        boxes: [32]damage.Box = undefined,
+        box_len: usize = 0,
+        whole: bool = false,
+        /// The run groups opened beneath each open layer, by its level.
+        spans: [layers.max_depth + 2]usize = @splat(0),
+
+        fn masked(self: *const MaskRuns, level: usize) bool {
+            for (self.scopes[0..self.len]) |scope| if (scope.level == level) return true;
+            return false;
+        }
+        fn openGroups(self: *MaskRuns, r: *Renderer, level: usize, coverage_resources: []const drawing.CoverageView) !usize {
+            var count: usize = 0;
+            for (self.scopes[0..self.len]) |scope| if (scope.level == level) {
+                if (scope.clip) |clip| {
+                    const b = clip.bounds;
+                    const options = try commands.groupOptions(.{ .bounds = clip.bounds, .mask_origin = clip.origin, .mask_resource = clip.mask }, coverage_resources);
+                    try r.beginGroup(.{ .x = b.x, .y = b.y, .width = b.width, .height = b.height }, options);
+                } else try r.beginGroup(.{ .x = -1e6, .y = -1e6, .width = 2e6, .height = 2e6 }, .{ .opacity = scope.opacity });
+                count += 1;
+            };
+            return count;
+        }
+        fn closeGroups(r: *Renderer, count: usize) !void {
+            for (0..count) |_| try r.endGroup();
+        }
+        fn flush(self: *MaskRuns, r: *Renderer) !void {
+            const count = self.groups;
+            self.groups = 0;
+            self.box_len = 0;
+            self.whole = false;
+            try closeGroups(r, count);
+        }
+        fn draw(self: *MaskRuns, r: *Renderer, level: usize, box: ?damage.Box, coverage_resources: []const drawing.CoverageView) !void {
+            if (!self.masked(level)) return;
+            if (self.groups != 0) {
+                var overlap = self.whole or box == null or self.box_len == self.boxes.len;
+                if (!overlap) for (self.boxes[0..self.box_len]) |kept| if (kept.intersects(box.?)) {
+                    overlap = true;
+                    break;
+                };
+                if (overlap) try self.flush(r);
+            }
+            if (self.groups == 0) self.groups = try self.openGroups(r, level, coverage_resources);
+            if (box) |b| {
+                self.boxes[self.box_len] = b;
+                self.box_len += 1;
+            } else self.whole = true;
+        }
+        fn beginSpan(self: *MaskRuns, r: *Renderer, level: usize, coverage_resources: []const drawing.CoverageView) !void {
+            try self.flush(r);
+            if (level + 1 >= self.spans.len) return error.LayerDepthExceeded;
+            self.spans[level + 1] = if (self.masked(level)) try self.openGroups(r, level, coverage_resources) else 0;
+        }
+        /// After the layer at `level` + 1 ended.
+        fn endSpan(self: *MaskRuns, r: *Renderer, level: usize) !void {
+            if (level + 1 >= self.spans.len) return;
+            const count = self.spans[level + 1];
+            self.spans[level + 1] = 0;
+            try closeGroups(r, count);
+        }
+    };
+    /// Whether the layers have room for the groups a list's masked clips
+    /// and opacities draw through (`MaskRuns`) beside its own; a list with
+    /// none needs nothing.
+    fn masksFit(self: *const Renderer, ops: []const command.Command) bool {
+        var uses = false;
+        for (ops) |op| switch (op) {
+            .push_mask_clip, .push_opacity => uses = true,
+            else => {},
+        };
+        if (!uses) return true;
+        const plan = self.layer_plan orelse return false;
+        const max: usize = plan.options.max_depth;
+        // Layers open (groups, transforms, effects) and the scopes open on
+        // each, innermost last.
+        var depth: usize = 0;
+        var clip_depth: usize = 0;
+        var masked: u64 = 0;
+        var scopes: usize = 0;
+        for (ops) |op| switch (op) {
+            .push_clip => clip_depth += 1,
+            .push_mask_clip, .push_opacity => {
+                if (clip_depth >= 64) return false;
+                masked |= @as(u64, 1) << @intCast(clip_depth);
+                clip_depth += 1;
+                scopes += 1;
+                if (depth + scopes > max) return false;
+            },
+            .pop_clip => {
+                if (clip_depth == 0) return false;
+                clip_depth -= 1;
+                if (masked & (@as(u64, 1) << @intCast(clip_depth)) != 0) {
+                    masked &= ~(@as(u64, 1) << @intCast(clip_depth));
+                    scopes -= 1;
+                }
+            },
+            .begin_group, .begin_transform, .effect => {
+                depth += 1;
+                if (depth + scopes > max) return false;
+            },
+            .end_group, .end_transform, .end_effect => depth -|= 1,
+            else => {},
+        };
+        return true;
+    }
     fn replayNative(self: *Renderer, ops: []const command.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, textures: []const drawing.TextureView, transforms: []const layers.NativeTransform, filters: []const gaussian.View) !void {
         const native = self.native.?;
         preflightGradientPrecisionPrepared(ops, resources, zgpu_scale(native), self.gradientInterpolationReadyUnchecked() and zgpu_interpolation_target_supported(native) != 0) catch |err| {
@@ -1126,7 +1248,50 @@ pub const Renderer = struct {
         var effect_stack: [layers.max_depth]OpenEffect = undefined;
         var effect_depth: usize = 0;
         var words: [shader_effects.shader.gpu.max_input_words]u32 = undefined;
-        for (ops) |op| switch (op) {
+        if (!self.masksFit(ops)) return error.SoftwareOnlyCommands;
+        // The clips open that are masked or opacities, a bit for each depth,
+        // and the layers open: groups, transforms and effects.
+        var masked: u32 = 0;
+        var level: usize = 0;
+        var runs: MaskRuns = .{};
+        const box_sources: damage.Sources = .{ .prepared = prepared, .coverage = coverage_resources, .indicators = &.{} };
+        const box_scale = zgpu_scale(native);
+        for (ops) |op| {
+            if (runs.len != 0) switch (op) {
+                .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .indicator, .texture => try runs.draw(self, level, damage.commandBox(op, box_sources, box_scale), coverage_resources),
+                .backdrop, .backdrop_shader => {
+                    try runs.flush(self);
+                    try runs.draw(self, level, null, coverage_resources);
+                },
+                .push_clip, .push_mask_clip, .push_opacity, .pop_clip, .end_group, .end_transform, .end_effect => try runs.flush(self),
+                .begin_group, .begin_transform, .effect => try runs.beginSpan(self, level, coverage_resources),
+            };
+            switch (op) {
+                .begin_group, .begin_transform, .effect => level += 1,
+                else => {},
+            }
+            try self.replayOp(op, text, resources, prepared, image_resources, coverage_resources, textures, transforms, filters, &depth, &masked, &runs, level, &effect_stack, &effect_depth, &words, &utf16);
+            switch (op) {
+                .end_group, .end_transform, .end_effect => {
+                    level -|= 1;
+                    try runs.endSpan(self, level);
+                },
+                else => {},
+            }
+        }
+        try runs.flush(self);
+        if (depth != 0) return error.UnbalancedClips;
+    }
+    fn replayOp(self: *Renderer, op: command.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, textures: []const drawing.TextureView, transforms: []const layers.NativeTransform, filters: []const gaussian.View, depth_ptr: *usize, masked_ptr: *u32, runs: *MaskRuns, level: usize, effect_stack: *[layers.max_depth]OpenEffect, effect_depth_ptr: *usize, words_ptr: *[shader_effects.shader.gpu.max_input_words]u32, utf16: *[64 * 1024]u16) !void {
+        const native = self.native.?;
+        var depth = depth_ptr.*;
+        defer depth_ptr.* = depth;
+        var masked = masked_ptr.*;
+        defer masked_ptr.* = masked;
+        var effect_depth = effect_depth_ptr.*;
+        defer effect_depth_ptr.* = effect_depth;
+        const words = words_ptr;
+        switch (op) {
             .fill => |fill| {
                 if (!layout.validRect(fill.bounds)) return error.InvalidGeometry;
                 const r = fill.bounds;
@@ -1139,12 +1304,12 @@ pub const Renderer = struct {
             .gradient => |value| {
                 if (value.brush >= resources.len) return error.MissingResources;
                 const p = try geometry.plan(.{ .bounds = value.bounds, .radius = value.radius, .stroke_width = value.stroke_width, .color = geometry.Color.rgb(0) });
-                if (resources[value.brush].isTransparent()) continue;
+                if (resources[value.brush].isTransparent()) return;
                 if (resources[value.brush].interpolation == .srgb) {
                     const brush = resources[value.brush].native();
                     try self.result(zgpu_gradient(native, p.bounds.x, p.bounds.y, p.bounds.width, p.bounds.height, p.radius, p.stroke_width, &brush));
                 } else {
-                    if (p.bounds.width == 0 or p.bounds.height == 0) continue;
+                    if (p.bounds.width == 0 or p.bounds.height == 0) return;
                     try self.replayInterpolation(&resources[value.brush], p);
                 }
             },
@@ -1154,7 +1319,7 @@ pub const Renderer = struct {
                 if (start > text.len or value.len > text.len - start) return error.InvalidTextRange;
                 const bytes = text[start..][0..value.len];
                 if (bytes.len > utf16.len) return error.TextTooLong;
-                const count = try std.unicode.utf8ToUtf16Le(&utf16, bytes);
+                const count = try std.unicode.utf8ToUtf16Le(utf16, bytes);
                 const r = value.bounds;
                 const font = value.font;
                 var family: [fonts.max_name_bytes + 1]u16 = undefined;
@@ -1163,7 +1328,7 @@ pub const Renderer = struct {
                     family[length] = 0;
                     break :named family[0..length :0];
                 };
-                zgpu_text(native, r.x, r.y, r.width, r.height, value.rgb(), &utf16, @intCast(count), if (font.isDefault()) 0 else @bitCast(font), font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), named, value.letterSpacing(text));
+                zgpu_text(native, r.x, r.y, r.width, r.height, value.rgb(), utf16, @intCast(count), if (font.isDefault()) 0 else @bitCast(font), font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), named, value.letterSpacing(text));
             },
             .prepared_text => |value| {
                 if (value.resource >= prepared.len) return error.MissingResources;
@@ -1200,37 +1365,52 @@ pub const Renderer = struct {
             .end_effect => {
                 if (effect_depth == 0) return error.UnbalancedEffects;
                 effect_depth -= 1;
-                try self.endEffect(effect_stack[effect_depth], &words);
+                try self.endEffect(effect_stack[effect_depth], words);
             },
-            .backdrop_shader => |slot| try self.backdropShader(slot, &words),
+            .backdrop_shader => |slot| try self.backdropShader(slot, words),
             .push_clip => |r| {
                 if (!layout.validRect(r)) return error.InvalidGeometry;
                 if (depth == 32) return error.ClipStackFull;
                 depth += 1;
                 zgpu_push_clip(native, r.x, r.y, r.width, r.height);
             },
-            // Cut to the rectangle only: the mask is not drawn here yet.
+            // The rectangle cuts; each drawing until its pop shows through
+            // the mask by itself (`MaskRuns`).
             .push_mask_clip => |value| {
                 const r = value.bounds;
                 if (!layout.validRect(r)) return error.InvalidGeometry;
                 if (depth == 32) return error.ClipStackFull;
-                depth += 1;
+                if (value.mask >= coverage_resources.len) return error.MissingResources;
+                if (runs.len == runs.scopes.len) return error.ClipStackFull;
                 zgpu_push_clip(native, r.x, r.y, r.width, r.height);
-            },
-            // A clip level that cuts nothing: the opacity is not drawn here
-            // yet.
-            .push_opacity => {
-                if (depth == 32) return error.ClipStackFull;
+                masked |= @as(u32, 1) << @intCast(depth);
                 depth += 1;
+                runs.scopes[runs.len] = .{ .clip = value, .level = level };
+                runs.len += 1;
+            },
+            // A clip level that cuts nothing: each drawing until its pop
+            // fades by itself.
+            .push_opacity => |alpha| {
+                if (depth == 32) return error.ClipStackFull;
+                if (runs.len == runs.scopes.len) return error.ClipStackFull;
                 zgpu_push_clip(native, -1e6, -1e6, 2e6, 2e6);
+                masked |= @as(u32, 1) << @intCast(depth);
+                depth += 1;
+                runs.scopes[runs.len] = .{ .clip = null, .opacity = alpha, .level = level };
+                runs.len += 1;
             },
             .pop_clip => {
                 if (depth == 0) return error.ClipStackEmpty;
                 depth -= 1;
                 zgpu_pop_clip(native);
+                const bit = @as(u32, 1) << @intCast(depth);
+                if (masked & bit != 0) {
+                    masked &= ~bit;
+                    if (runs.len == 0) return error.ClipStackEmpty;
+                    runs.len -= 1;
+                }
             },
-        };
-        if (depth != 0) return error.UnbalancedClips;
+        }
     }
 
     pub fn end(self: *Renderer) !void {
