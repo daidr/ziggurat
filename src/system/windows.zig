@@ -4,6 +4,7 @@ const types = @import("types.zig");
 const picker_api = @import("picker.zig");
 const menus = @import("menus.zig");
 const native_menu = @import("windows_menu.zig");
+const roles = @import("menu_roles.zig");
 const message_api = @import("message.zig");
 const c = @import("ziggurat_c_win32");
 
@@ -14,7 +15,16 @@ pub const tray_message: u32 = c.WM_APP + 0x421;
 const Entry = native_menu.Entry;
 const Tray = struct { id: u16, icon: c.HICON, tooltip: [128]u16 };
 const HotkeyEntry = struct { id: u64, native_id: u16, key: u32, modifiers: u32 };
-const Notification = struct { id: u64, tray: Tray };
+const Notification = struct { id: u64, tray: Tray, balloon: c.HICON = null };
+/// The owner HWND's timer that takes a notification's icon away once its
+/// toast is long gone.
+const notification_timer: usize = 0x5a4e;
+/// How long a notification's icon stays after its balloon went out. Windows
+/// 10 and later show the balloon as a toast, which tells the icon it left the
+/// screen (NIN_BALLOONTIMEOUT) within the toast duration the user sets, at
+/// most five minutes; a toast parked in the notification center never does.
+const notification_linger_ms: c.UINT = 6 * 60 * 1000;
+extern fn zsn_image_icon(bytes: [*]const u8, length: usize, size: c_int) c.HICON;
 
 /// Keep at a stable address through detach/on_closed. All operations and action
 /// callbacks run on the window's owner thread. Native resources are reclaimed
@@ -34,13 +44,15 @@ pub const Owner = struct {
     taskbar_created: u32 = 0,
     last_error: u32 = 0,
     picker: picker_api.Picker = .{},
-    popup: native_menu.Host = .{ .context = undefined, .done = popupDone },
+    popup: native_menu.Host = .{ .context = undefined, .done = popupDone, .entering = enteringMenu },
     message_dialog: message_api.Message = .{},
     /// A window that shows a material has no menu bar: the menu stays here
     /// and Alt or F10 open it in a popup.
     barless: bool = false,
     /// The letter of Alt and a letter that opened the bar popup, and the popup.
     menu_key: struct { popup: c.HMENU = null, key: usize = 0 } = .{},
+    /// The bar's menus in a popup, for a window without a menu bar.
+    bar_popup: native_menu.Host = .{ .context = undefined, .done = barPopupDone, .entering = enteringMenu },
 
     pub fn init(context: *anyopaque, on_action: *const fn (*anyopaque, z.Window, types.Action) void) Owner {
         return .{ .context = context, .on_action = on_action };
@@ -72,6 +84,8 @@ pub const Owner = struct {
         self.picker.detach();
         self.message_dialog.detach();
         self.popup.detach();
+        self.bar_popup.detach();
+        self.menu_key = .{};
         if (self.window == null) return;
         try self.clearHotkeys();
         try self.clearNotification();
@@ -182,16 +196,38 @@ pub const Owner = struct {
             .warning => c.NIIF_WARNING,
             .err => c.NIIF_ERROR,
         }) | @as(c.DWORD, if (options.silent) c.NIIF_NOSOUND else 0);
+        // The image shows as the balloon's large icon, which the toast
+        // Windows 11 makes of it draws at 40 DIPs: twice SM_CXICON, shrunk.
+        var balloon: c.HICON = null;
+        defer if (balloon != null) {
+            _ = c.DestroyIcon(balloon);
+        };
+        if (options.image) |image| if (image.len != 0) {
+            const icon_size = c.GetSystemMetricsForDpi(c.SM_CXICON, self.windowDpi());
+            balloon = zsn_image_icon(image.ptr, image.len, 2 * (if (icon_size > 0) icon_size else 32));
+            if (balloon != null) {
+                value.hBalloonIcon = balloon;
+                value.dwInfoFlags = @as(c.DWORD, c.NIIF_USER | c.NIIF_LARGE_ICON) | @as(c.DWORD, if (options.silent) c.NIIF_NOSOUND else 0);
+            }
+        };
         if (c.Shell_NotifyIconW(c.NIM_MODIFY, &value) == 0) return self.failed(error.NotificationSubmissionFailed);
         if (window.isClosed()) return error.Closed;
         const previous = self.notification;
-        self.notification = .{ .id = id, .tray = tray };
+        self.notification = .{ .id = id, .tray = tray, .balloon = balloon };
         owned = false;
         added = false;
+        balloon = null;
         if (previous) |old| {
             _ = self.deleteTrayAt(hwnd, old.tray);
-            _ = c.DestroyIcon(old.tray.icon);
+            releaseNotification(old);
         }
+        // A toast parked in the notification center never says it is done:
+        // the icon, which only the balloon wanted, goes on a timer.
+        _ = c.SetTimer(hwnd, notification_timer, notification_linger_ms, null);
+    }
+    fn releaseNotification(notification: Notification) void {
+        _ = c.DestroyIcon(notification.tray.icon);
+        if (notification.balloon != null) _ = c.DestroyIcon(notification.balloon);
     }
     pub fn clearNotification(self: *Owner) !void {
         const window = try self.require();
@@ -199,8 +235,9 @@ pub const Owner = struct {
         defer scope.end();
         const notification = self.notification orelse return;
         self.notification = null;
+        _ = c.KillTimer(self.hwnd, notification_timer);
         const removed = self.deleteTrayAt(self.hwnd, notification.tray);
-        _ = c.DestroyIcon(notification.tray.icon);
+        releaseNotification(notification);
         if (!removed) return error.NotificationRemovalFailed;
     }
 
@@ -407,14 +444,17 @@ pub const Owner = struct {
         self.picker.detach();
         self.message_dialog.detach();
         self.popup.detach();
+        self.bar_popup.detach();
+        self.menu_key = .{};
         while (self.hotkey_count != 0) {
             self.hotkey_count -= 1;
             _ = c.UnregisterHotKey(self.hwnd, self.hotkeys[self.hotkey_count].native_id);
         }
         if (self.notification) |notification| {
             self.notification = null;
+            _ = c.KillTimer(self.hwnd, notification_timer);
             _ = self.deleteTrayAt(self.hwnd, notification.tray);
-            _ = c.DestroyIcon(notification.tray.icon);
+            releaseNotification(notification);
         }
         if (self.tray) |tray| {
             self.tray = null;
@@ -433,44 +473,45 @@ pub const Owner = struct {
     }
     /// Shows the bar's menus in a popup at the top of the client area. The
     /// submenus are the bar's own, taken back before the popup is destroyed.
-    fn popupMenuBar(self: *Owner, window: z.Window, key: usize) void {
+    fn popupMenuBar(self: *Owner, key: usize) void {
         const bar = self.menu orelse return;
-        const count = c.GetMenuItemCount(bar);
-        if (count <= 0) return;
+        if (self.bar_popup.pending() or self.popup.pending()) return;
+        // A copy, so the bar may change or go while the popup is open.
         const popup = c.CreatePopupMenu() orelse return;
-        defer {
-            var index = count;
-            while (index > 0) {
-                index -= 1;
-                _ = c.RemoveMenu(popup, @intCast(index), c.MF_BYPOSITION);
-            }
+        if (!native_menu.copyItems(bar, popup)) {
             _ = c.DestroyMenu(popup);
-        }
-        for (0..@intCast(count)) |index| {
-            var label: [256]u16 = undefined;
-            if (c.GetMenuStringW(bar, @intCast(index), &label, label.len, c.MF_BYPOSITION) < 0) label[0] = 0;
-            const state: c.UINT = c.GetMenuState(bar, @intCast(index), c.MF_BYPOSITION);
-            var flags: c.UINT = @as(c.UINT, c.MF_STRING) | (state & @as(c.UINT, c.MF_GRAYED));
-            var item: usize = 0;
-            if (c.GetSubMenu(bar, @intCast(index))) |submenu| {
-                flags |= @as(c.UINT, c.MF_POPUP);
-                item = @intFromPtr(submenu);
-            } else item = c.GetMenuItemID(bar, @intCast(index));
-            if (state & @as(c.UINT, c.MF_SEPARATOR) != 0) flags = c.MF_SEPARATOR;
-            _ = c.AppendMenuW(popup, flags, item, &label);
+            return;
         }
         var point: c.POINT = .{ .x = 0, .y = 0 };
         _ = c.ClientToScreen(self.hwnd, &point);
+        // The menu loop starts from a posted message outside this window's
+        // callback, so App tasks keep running while the menu is open.
+        self.bar_popup.context = self;
+        self.bar_popup.startMenu(1, popup, self.hwnd, .{ .x = point.x, .y = point.y, .alignment = c.TPM_LEFTALIGN | c.TPM_TOPALIGN }) catch {
+            _ = c.DestroyMenu(popup);
+            return;
+        };
         if (key != 0) {
-            // The menu loop takes the letter as typed in the popup.
+            // The menu loop takes the letter as typed in the popup; it is
+            // posted after the message that starts the loop.
             self.menu_key = .{ .popup = popup, .key = key };
             _ = c.PostMessageW(self.hwnd, c.WM_CHAR, key, 0);
         }
-        const command = c.TrackPopupMenuEx(popup, c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, point.x, point.y, self.hwnd, null);
+    }
+    fn enteringMenu(ptr: *anyopaque) void {
+        const self: *Owner = @ptrCast(@alignCast(ptr));
+        if (self.window) |window| window.app.enterNativeLoop();
+    }
+    fn barPopupDone(ptr: *anyopaque, _: u64, selected: ?u64) void {
+        const self: *Owner = @ptrCast(@alignCast(ptr));
         self.menu_key = .{};
-        if (command <= 0 or window.isClosed() or self.window == null) return;
+        const command = selected orelse return;
+        const window = self.window orelse return;
+        const scope = window.beginCallback() orelse return;
+        defer scope.end();
+        if (window.isClosed()) return;
         for (self.entries[0..self.entry_count]) |entry| if (entry.command == command) {
-            if (entry.enabled) self.on_action(self.context, window, .{ .menu = entry.id });
+            if (entry.enabled and editRoleEnabled(window, entry)) self.on_action(self.context, window, .{ .menu = entry.id });
             return;
         };
     }
@@ -479,7 +520,7 @@ pub const Owner = struct {
         if ((native_message == c.WM_KEYDOWN or native_message == c.WM_SYSKEYDOWN) and self.entry_count != 0) {
             const pressed = native_menu.pressed(wp, lp) orelse return null;
             for (self.entries[0..self.entry_count]) |entry| if (entry.accelerator) |accelerator| if (menus.sameAccelerator(accelerator, pressed)) {
-                if (!entry.enabled) return null;
+                if (!entry.enabled or !editRoleEnabled(window, entry)) return null;
                 self.on_action(self.context, window, .{ .menu = entry.id });
                 return 0;
             };
@@ -489,14 +530,30 @@ pub const Owner = struct {
             // Alt or F10 alone (lp 0) take the keyboard to the menus, and Alt
             // and a letter (lp the letter) open the menu of the letter; Alt
             // and Space keep opening the window menu.
-            self.popupMenuBar(window, @bitCast(lp));
+            self.popupMenuBar(@bitCast(lp));
             return 0;
+        }
+        if (native_message == c.WM_INITMENUPOPUP and self.entry_count != 0) {
+            // The Edit roles are enabled as the focus can act on them as
+            // their menu opens; those the app disabled stay so. The bar
+            // popup's menus are copies: its commands are looked up in them.
+            const opened: c.HMENU = @ptrFromInt(wp);
+            for (self.entries[0..self.entry_count]) |entry| if (entry.menu == opened or self.bar_popup.pending()) if (roles.Role.fromId(entry.id)) |role| if (role.editCommand() != null) {
+                const enabled = entry.enabled and entry.ancestor_enabled and editRoleEnabled(window, entry);
+                _ = c.EnableMenuItem(opened, entry.command, @as(c.UINT, @intCast(c.MF_BYCOMMAND | (if (enabled) c.MF_ENABLED else c.MF_GRAYED))));
+            };
+            return null;
         }
         if (native_message == c.WM_MENUCHAR) {
             // Alt and a letter that names no menu of the bar open none, as in
             // the bar: the popup closes.
             if (self.menu_key.popup != null and @intFromPtr(self.menu_key.popup) == @as(usize, @bitCast(lp)) and wp & 0xffff == self.menu_key.key) return c.MNC_CLOSE << 16;
             return null;
+        }
+        if (native_message == c.WM_TIMER and wp == notification_timer) {
+            _ = c.KillTimer(self.hwnd, notification_timer);
+            self.clearNotification() catch |err| window.report(.{ .severity = .warning, .domain = .win32, .operation = .window_update, .err = err, .code = if (self.last_error != 0) self.last_error else null });
+            return 0;
         }
         if (native_message == c.WM_HOTKEY) {
             for (self.hotkeys[0..self.hotkey_count]) |entry| if (wp == entry.native_id) {
@@ -508,7 +565,7 @@ pub const Owner = struct {
         } else if (native_message == c.WM_COMMAND and lp == 0 and wp >> 16 == 0) {
             const command: u16 = @truncate(wp);
             for (self.entries[0..self.entry_count]) |entry| if (entry.command == command) {
-                if (entry.enabled) self.on_action(self.context, window, .{ .menu = entry.id });
+                if (entry.enabled and editRoleEnabled(window, entry)) self.on_action(self.context, window, .{ .menu = entry.id });
                 return 0;
             };
         } else if (native_message == tray_message) {
@@ -541,7 +598,8 @@ pub const Owner = struct {
             // stale user messages. Persistent tray configuration is restored.
             if (self.notification) |notification| {
                 self.notification = null;
-                _ = c.DestroyIcon(notification.tray.icon);
+                _ = c.KillTimer(self.hwnd, notification_timer);
+                releaseNotification(notification);
             }
             if (self.tray) |tray| self.addTray(tray) catch |err| window.report(.{ .severity = .warning, .domain = .win32, .operation = .window_update, .err = err, .code = self.last_error });
             return 0;
@@ -550,6 +608,12 @@ pub const Owner = struct {
     }
 };
 
+/// Whether the focus would act on an entry's Edit role; yes for other items.
+fn editRoleEnabled(window: z.Window, entry: Entry) bool {
+    const role = roles.Role.fromId(entry.id) orelse return true;
+    const edit = role.editCommand() orelse return true;
+    return window.commandEnabled(edit);
+}
 fn modifierBits(modifiers: types.Modifiers) u32 {
     return @as(u32, if (modifiers.control) c.MOD_CONTROL else 0) | @as(u32, if (modifiers.alt) c.MOD_ALT else 0) | @as(u32, if (modifiers.shift) c.MOD_SHIFT else 0) | @as(u32, if (modifiers.super) c.MOD_WIN else 0);
 }

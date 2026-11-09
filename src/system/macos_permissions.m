@@ -41,9 +41,22 @@ enum { S_UNKNOWN = 0, S_NOT_DETERMINED = 1, S_DENIED = 2, S_GRANTED = 3 };
 
 typedef struct { double x, y, w, h; } ZspRect;
 typedef struct { ZspRect bounds; int32_t layer; double alpha; } ZspWindow;
-extern ZspRect zsp_panel_frame(ZspRect settings, double main_height, const ZspRect *screens, size_t count, double height);
-extern double zsp_panel_width(ZspRect settings, double main_height, const ZspRect *screens, size_t count);
-extern int zsp_main_settings_window(const ZspWindow *windows, size_t count, ZspRect *out);
+/* The panel geometry is exported by permissions.zig. A program can link this
+ * object without ever analyzing that file (an import it never uses), so the
+ * weak stand-ins below keep the link whole; the Zig definitions replace them
+ * whenever the guide can be started at all. */
+__attribute__((weak)) ZspRect zsp_panel_frame(ZspRect settings, double main_height, const ZspRect *screens, size_t count, double height) {
+    (void)main_height; (void)screens; (void)count;
+    return (ZspRect){settings.x, settings.y, settings.w, height};
+}
+__attribute__((weak)) double zsp_panel_width(ZspRect settings, double main_height, const ZspRect *screens, size_t count) {
+    (void)main_height; (void)screens; (void)count;
+    return settings.w;
+}
+__attribute__((weak)) int zsp_main_settings_window(const ZspWindow *windows, size_t count, ZspRect *out) {
+    (void)windows; (void)count; (void)out;
+    return 0;
+}
 
 int zsp_macos_major(void) {
     return (int)[[NSProcessInfo processInfo] operatingSystemVersion].majorVersion;

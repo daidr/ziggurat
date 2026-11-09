@@ -1067,3 +1067,41 @@ test "emitted events reach the content through the native input gate" {
     try app.dispatch();
     try std.testing.expectError(error.Closed, window.emitEvent(.{ .focus = true }));
 }
+
+test "the session's end asks every window once, ignores vetoes and finishes the quit" {
+    const Node = struct {
+        requests: usize = 0,
+        closed: usize = 0,
+        reason: ?z.CloseReason = null,
+        fn request(ptr: *anyopaque, _: z.Window, reason: z.CloseReason) z.CloseDecision {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.requests += 1;
+            self.reason = reason;
+            return .cancel;
+        }
+        fn notify(ptr: *anyopaque, _: z.Window) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.closed += 1;
+        }
+        fn options(self: *@This()) z.WindowOptions {
+            return .{ .on_close = .{ .context = self, .request = request }, .on_closed = .{ .context = self, .notify = notify } };
+        }
+    };
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    var first: Node = .{};
+    var second: Node = .{};
+    _ = try app.createWindow(first.options());
+    _ = try app.createWindow(second.options());
+    app.endSession();
+    try equal(z.App.Phase.stopped, app.phase);
+    try equal(1, first.requests);
+    try equal(1, second.requests);
+    try equal(z.CloseReason.session_end, first.reason.?);
+    try equal(1, first.closed);
+    try equal(1, second.closed);
+    try equal(0, app.resourceStats().allocated_records);
+    // Nothing runs twice.
+    app.endSession();
+    try equal(1, first.requests);
+}

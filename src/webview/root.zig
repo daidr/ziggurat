@@ -44,8 +44,10 @@ pub fn setDmabufRenderer(renderer: DmabufRenderer) void {
 }
 pub const CookieStore = @import("cookie_store.zig").Type(z, Profile);
 pub const cookieStoreNativeCounts = @import("cookie_store.zig").nativeCounts;
+/// Adapter-only Profile metadata still held natively.
+pub const profileNativeCounts = native_profiles.nativeCounts;
 test "independent cookie store rejects unsupported platforms before any owner access" {
-    if (!is_webkit) {
+    if (!@import("cookie_store.zig").native_store) {
         const app: *z.App = @ptrFromInt(4096);
         const profile: *Profile = @ptrFromInt(4096);
         try std.testing.expectError(error.UnsupportedCapability, CookieStore.create(std.testing.failing_allocator, app, profile, .{}));
