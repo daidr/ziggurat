@@ -5,6 +5,7 @@ const z = @import("ziggurat");
 /// Cancels promptly on completion. The worker never touches a window.
 pub const Watchdog = struct {
     app: *z.App,
+    seconds: u64 = 15,
     mutex: zio.Mutex = .{},
     condition: zio.Condition = .{},
     done: bool = false,
@@ -26,7 +27,7 @@ pub const Watchdog = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         var timer = zio.Timer.start() catch unreachable;
-        const deadline = 15 * std.time.ns_per_s;
+        const deadline = self.seconds * std.time.ns_per_s;
         while (!self.done) {
             const elapsed = timer.read();
             if (elapsed >= deadline) break;

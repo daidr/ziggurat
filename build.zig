@@ -2047,7 +2047,7 @@ pub fn build(b: *std.Build) void {
         });
         automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
-        for ([_][]const u8{ "webview2.c", "page_host.c" }) |file| {
+        for ([_][]const u8{ "webview2.c", "page_host.c", "windows_cookies.c" }) |file| {
             const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{"-std=c11"}, target, optimize);
             native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
             native.addIncludePath(b.path("src/webview/include"));
@@ -2265,6 +2265,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-picture-in-picture", "tests/picture_in_picture_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-cookies-windows", "tests/windows_cookie_store_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-page-remote", "tests/remote_page_smoke.zig", target, optimize, &.{
