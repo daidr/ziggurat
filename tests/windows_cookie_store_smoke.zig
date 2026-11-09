@@ -77,26 +77,70 @@ const Server = struct {
     }
 };
 
+/// Prepares the profile's storage on a worker, which keeps the retirement
+/// driver: Windows waits there, after the storage is sealed, for the
+/// browser processes that used it to exit.
 const Preparation = struct {
     allocator: std.mem.Allocator,
     main: std.Thread.Id,
     path: []const u8,
     value: ?web.profile_storage.Prepared = null,
     failure: ?anyerror = null,
+    thread: ?std.Thread = null,
+    ready: std.atomic.Value(bool) = .init(false),
+    retire: std.atomic.Value(bool) = .init(false),
     fn worker(self: *Preparation) void {
-        self.value = web.profile_storage.Prepared.prepare(self.allocator, self.main, self.path, .{}) catch |err| {
+        var driver = self.prepare() catch |err| {
             self.failure = err;
+            self.ready.store(true, .release);
             return;
         };
-        self.value.?.handoff() catch |err| {
-            self.failure = err;
-        };
+        self.ready.store(true, .release);
+        while (!self.retire.load(.acquire)) zio.sleep(10 * std.time.ns_per_ms);
+        // Seal happened on main: wait for the engine's processes to exit.
+        for (0..60) |_| {
+            driver.run(1000, null) catch |err| switch (err) {
+                error.ProcessExitPending => continue,
+                else => {
+                    self.failure = err;
+                    return;
+                },
+            };
+            driver.deinit() catch |err| switch (err) {
+                error.ProcessExitPending => continue,
+                else => {
+                    self.failure = err;
+                    return;
+                },
+            };
+            return;
+        }
+        self.failure = error.ProcessExitPending;
+    }
+    fn prepare(self: *Preparation) !web.profile_storage.RetirementDriver {
+        self.value = try web.profile_storage.Prepared.prepare(self.allocator, self.main, self.path, .{});
+        var driver = try self.value.?.takeRetirementDriver();
+        errdefer driver.deinit() catch {};
+        try self.value.?.handoff();
+        return driver;
     }
     fn open(self: *Preparation) !void {
-        const thread = try std.Thread.spawn(.{}, worker, .{self});
-        thread.join();
-        if (self.failure) |err| return err;
+        self.thread = try std.Thread.spawn(.{}, worker, .{self});
+        while (!self.ready.load(.acquire)) zio.sleep(std.time.ns_per_ms);
+        if (self.failure) |err| {
+            self.thread.?.join();
+            self.thread = null;
+            return err;
+        }
         try self.value.?.adopt();
+    }
+    /// Seals the storage, then lets the worker wait out its processes.
+    fn close(self: *Preparation) !void {
+        try self.value.?.close();
+        self.retire.store(true, .release);
+        self.thread.?.join();
+        self.thread = null;
+        if (self.failure) |err| return err;
     }
 };
 
@@ -317,7 +361,6 @@ pub fn main() !void {
     const origin = try std.fmt.bufPrint(&origin_buffer, "http://127.0.0.1:{d}", .{server.listener.socket.address.getPort()});
     var preparation: Preparation = .{ .allocator = allocator, .main = std.Thread.getCurrentId(), .path = path };
     try preparation.open();
-    defer preparation.value.?.close() catch unreachable;
     {
         const app = try z.App.init(allocator);
         defer app.deinit();
@@ -360,6 +403,7 @@ pub fn main() !void {
     try app.run();
     watchdog.stop();
     if (watchdog.expired) return error.CookieRecordsLeft;
+    try preparation.close();
     server.stop();
     if (server.failure) |err| return err;
     std.debug.print("Windows CookieStore: set/query by URL/list/delete/delete key/replace/clear/cancel, page and app share the profile's cookies, the idle hidden web view goes unless it keeps session cookies; native records=0\n", .{});
