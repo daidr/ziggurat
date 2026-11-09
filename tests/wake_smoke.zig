@@ -1,9 +1,14 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const wake = @import("ziggurat_wake");
 const animation = @import("ziggurat_animation");
 const Watchdog = @import("watchdog.zig").Watchdog;
+
+// The macOS arm64 unwinder panics on thread-start frames; a failure must
+// print its error instead of hanging in the trace.
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
 
 const Motion = struct {
     app: *z.App,
