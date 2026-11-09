@@ -15,6 +15,9 @@ const layers = @import("layers.zig");
 const windows_layers = @import("windows_layers.zig");
 const composite = @import("composite.zig");
 const c = @import("ziggurat_c_win32");
+const zio = @import("ziggurat_io");
+const damage = @import("damage.zig");
+const mask_mix = @import("mask_mix.zig");
 extern fn zwc_create(?*anyopaque) ?*anyopaque;
 extern fn zwc_present(*anyopaque, [*]const u32, u32, u32) c_long;
 extern fn zwc_destroy(?*anyopaque) void;
@@ -50,6 +53,13 @@ pub const Renderer = struct {
     composed_window: ?*anyopaque = null,
     /// Text of a transparent frame is drawn here as a mask, then blended.
     glyph_surface: ?windows_layers.Surface = null,
+    /// Masked clips and opacities open while a list replays: each drawing
+    /// inside is mixed by them as it draws (`mask_mix`).
+    masks: mask_mix.Stack = .{},
+    /// Groups, transforms and effects open while a list replays, and a bit
+    /// for each one that opened on a masked layer.
+    layer_level: u32 = 0,
+    masked_spans: u64 = 0,
     const VariantFont = struct { key: u32 = 0, scale: f32 = 0, font: c.HFONT = null };
     pub const LayerCandidate = *windows_layers.Workspace;
     pub fn layerMetadataBytes() usize {
@@ -170,6 +180,9 @@ pub const Renderer = struct {
         self.height = surface.height;
     }
     pub fn abort(self: *Renderer) void {
+        self.masks.reset();
+        self.layer_level = 0;
+        self.masked_spans = 0;
         if (self.layer_workspace) |workspace| {
             workspace.abort();
             self.bindSurface(workspace.front());
@@ -547,7 +560,7 @@ pub const Renderer = struct {
         const height: c_int = @intFromFloat(@round(-key.size() * self.scale));
         var named: [fonts.max_name_bytes + 1]u16 = undefined;
         const family: [*:0]const u16 = if (key.family != 0) named: {
-            const length = std.unicode.utf8ToUtf16Le(&named, fonts.systemName(key.family)) catch 0;
+            const length = std.unicode.utf8ToUtf16Le(&named, fonts.ownName(key.family)) catch 0;
             named[length] = 0;
             break :named named[0..length :0];
         } else if (key.monospace) std.unicode.utf8ToUtf16LeStringLiteral("Consolas") else std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
@@ -771,7 +784,83 @@ pub const Renderer = struct {
         try self.execute(list, .{ .text_bytes = text_bytes, .brushes = resources, .prepared = prepared, .images = image_resources, .coverage = coverage_resources, .transforms = transforms, .filters = filters });
         if (self.effect_count != 0) return error.UnbalancedEffects;
     }
+    fn maskSurface(self: *Renderer) !cpu_gradient.Surface {
+        return self.targetSurface();
+    }
+    /// Before a drawing that changes at most `box`: keep what is beneath
+    /// it when a masked clip or an opacity on this layer masks it.
+    fn maskDraw(self: *Renderer, box: ?damage.Box) !void {
+        if (!self.masks.masks(self.layer_level)) return;
+        _ = try self.masks.draw(zio.heap, try self.maskSurface(), self.layer_level, box);
+    }
+    /// Mix the drawings kept so far by their masks.
+    fn maskFlush(self: *Renderer) !void {
+        if (self.masks.piece_len == 0) return;
+        _ = try self.masks.flush(try self.maskSurface());
+    }
+    /// Before a group, transform or effect begins: it is one drawing of
+    /// the layer it composites onto.
+    fn maskBeginSpan(self: *Renderer) !void {
+        if (self.layer_level >= 63) return error.LayerDepthExceeded;
+        var masked = false;
+        if (self.masks.len != 0) masked = (try self.masks.beginSpan(zio.heap, try self.maskSurface(), self.layer_level)).masked;
+        self.layer_level += 1;
+        const bit = @as(u64, 1) << @intCast(self.layer_level);
+        if (masked) self.masked_spans |= bit else self.masked_spans &= ~bit;
+    }
+    /// After the innermost layer composited: mix it by the masks of the
+    /// layer beneath.
+    fn maskEndSpan(self: *Renderer) !void {
+        if (self.layer_level == 0) return;
+        const bit = @as(u64, 1) << @intCast(self.layer_level);
+        self.layer_level -= 1;
+        if (self.masked_spans & bit == 0) return;
+        self.masked_spans &= ~bit;
+        _ = try self.masks.endSpan(try self.maskSurface());
+    }
     fn execute(self: *Renderer, list: []const commands.Command, all: Resources) anyerror!void {
+        const prepared = all.prepared;
+        const coverage_resources = all.coverage;
+        var depth: usize = 0;
+        // The clips open here that are masked or opacities, a bit for each
+        // depth.
+        var masked: u32 = 0;
+        defer while (self.layer_workspace == null and depth != 0) : (depth -= 1) {
+            _ = c.RestoreDC(self.dc, -1);
+        };
+        const masks_before = self.masks.len;
+        errdefer {
+            self.masks.len = masks_before;
+            self.masks.piece_len = 0;
+            if (masks_before == 0) self.masks.reset();
+        }
+        const box_sources: damage.Sources = .{ .prepared = prepared, .coverage = coverage_resources, .indicators = if (self.backdrop_source) |source| source.indicator_storage[0..source.indicator_len] else &.{} };
+        var index: usize = 0;
+        while (index < list.len) : (index += 1) {
+            // Each drawing inside a masked clip or an opacity is mixed by
+            // itself.
+            if (self.masks.len != 0) {
+                switch (list[index]) {
+                    .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .indicator => try self.maskDraw(damage.commandBox(list[index], box_sources, self.scale)),
+                    .backdrop, .backdrop_shader => {
+                        try self.maskFlush();
+                        try self.maskDraw(null);
+                    },
+                    .push_clip, .push_mask_clip, .push_opacity, .pop_clip => try self.maskFlush(),
+                    .begin_group, .begin_transform, .effect => try self.maskBeginSpan(),
+                    .end_group, .end_transform, .end_effect => try self.maskFlush(),
+                    .texture => {},
+                }
+            } else switch (list[index]) {
+                .begin_group, .begin_transform, .effect => try self.maskBeginSpan(),
+                else => {},
+            }
+            try self.executeOne(list, &index, all, &depth, &masked);
+        }
+        try self.maskFlush();
+        if (depth != 0) return error.UnbalancedClips;
+    }
+    fn executeOne(self: *Renderer, list: []const commands.Command, cursor: *usize, all: Resources, depth_ptr: *usize, masked_ptr: *u32) anyerror!void {
         const text_bytes = all.text_bytes;
         const resources = all.brushes;
         const prepared = all.prepared;
@@ -779,12 +868,13 @@ pub const Renderer = struct {
         const coverage_resources = all.coverage;
         const transforms = all.transforms;
         const filters = all.filters;
-        var depth: usize = 0;
-        defer while (self.layer_workspace == null and depth != 0) : (depth -= 1) {
-            _ = c.RestoreDC(self.dc, -1);
-        };
-        var index: usize = 0;
-        while (index < list.len) : (index += 1) switch (list[index]) {
+        var depth = depth_ptr.*;
+        defer depth_ptr.* = depth;
+        var masked = masked_ptr.*;
+        defer masked_ptr.* = masked;
+        var index = cursor.*;
+        defer cursor.* = index;
+        switch (list[index]) {
             .fill => |fill_command| try self.fill(fill_command.bounds, fill_command.color),
             .shape => |shape_command| try self.shape(shape_command, null),
             .gradient => |value| {
@@ -814,7 +904,10 @@ pub const Renderer = struct {
                 const options = try commands.groupOptions(value, coverage_resources);
                 if (value.filter_slot == commands.no_filter) try self.beginGroup(group_bounds, options) else try self.beginGaussian(group_bounds, options, filters[value.filter_slot]);
             },
-            .end_group => try self.endGroup(),
+            .end_group => {
+                try self.endGroup();
+                try self.maskEndSpan();
+            },
             .effect => |slot| {
                 const source = self.backdrop_source orelse return error.MissingResources;
                 if (slot >= source.shader_storage.len) return error.MissingResources;
@@ -825,6 +918,8 @@ pub const Renderer = struct {
                     self.effect_count += 1;
                 } else {
                     try self.isolateEffect(list[index + 1 .. effect_end], entry, all);
+                    try self.maskFlush();
+                    try self.maskEndSpan();
                     index = effect_end;
                 }
             },
@@ -834,6 +929,7 @@ pub const Renderer = struct {
                 const workspace = self.layer_workspace orelse return error.LayersRequired;
                 try workspace.endGroupFiltered(.{ .context = &self.effect_scopes[self.effect_count], .run = runEffect });
                 self.bindSurface(workspace.current());
+                try self.maskEndSpan();
             },
             .backdrop_shader => |slot| {
                 const source = self.backdrop_source orelse return error.MissingResources;
@@ -843,7 +939,10 @@ pub const Renderer = struct {
                 _ = commands.shader_effects.applyBackdrop(surface, self.transparent(), &source.shader_storage.entries[slot], scratch, source.shader_storage.workspace);
             },
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
-            .end_transform => try self.endTransform(),
+            .end_transform => {
+                try self.endTransform();
+                try self.maskEndSpan();
+            },
             .backdrop => |slot| {
                 const source = self.backdrop_source orelse return error.MissingResources;
                 if (slot >= source.backdrop_storage.len) return error.MissingResources;
@@ -863,56 +962,55 @@ pub const Renderer = struct {
             },
             .push_clip => |clip| {
                 if (depth == 32) return error.ClipStackFull;
-                if (self.layer_workspace) |workspace| {
-                    try workspace.pushClip(.{ .x = clip.x, .y = clip.y, .width = clip.width, .height = clip.height });
-                    depth += 1;
-                    continue;
-                }
-                if (c.SaveDC(self.dc) == 0) return error.SaveClipFailed;
+                try self.pushRectClip(clip);
                 depth += 1;
-                const rect = try self.bounds(clip);
-                if (c.IntersectClipRect(self.dc, rect.left, rect.top, rect.right, rect.bottom) == c.ERROR) return error.SetClipFailed;
             },
             .push_mask_clip => |value| {
-                // Cut to the rectangle only: the mask is not drawn here yet.
-                const clip = value.bounds;
                 if (depth == 32) return error.ClipStackFull;
-                if (self.layer_workspace) |workspace| {
-                    try workspace.pushClip(.{ .x = clip.x, .y = clip.y, .width = clip.width, .height = clip.height });
-                    depth += 1;
-                    continue;
-                }
-                if (c.SaveDC(self.dc) == 0) return error.SaveClipFailed;
+                if (!layout.validRect(value.bounds)) return error.InvalidGeometry;
+                if (value.mask >= coverage_resources.len) return error.MissingResources;
+                const view = coverage_resources[value.mask];
+                try view.validate();
+                const surface = try self.maskSurface();
+                if (view.coverage.scale != surface.scale) return error.CoverageDpiMismatch;
+                try self.masks.open(surface, value.bounds, value.origin, view.coverage, self.layer_level);
+                errdefer self.masks.close() catch {};
+                try self.pushRectClip(value.bounds);
+                masked |= @as(u32, 1) << @intCast(depth);
                 depth += 1;
-                const rect = try self.bounds(clip);
-                if (c.IntersectClipRect(self.dc, rect.left, rect.top, rect.right, rect.bottom) == c.ERROR) return error.SetClipFailed;
             },
-            .push_opacity => {
-                // A clip level that cuts nothing: the opacity is not drawn
-                // here yet.
+            // Each drawing until its pop fades by itself.
+            .push_opacity => |alpha| {
                 if (depth == 32) return error.ClipStackFull;
-                if (self.layer_workspace) |workspace| {
-                    try workspace.pushClip(.{ .x = -1e6, .y = -1e6, .width = 2e6, .height = 2e6 });
-                    depth += 1;
-                    continue;
-                }
-                if (c.SaveDC(self.dc) == 0) return error.SaveClipFailed;
+                try self.masks.openOpacity(try self.maskSurface(), alpha, self.layer_level);
+                errdefer self.masks.close() catch {};
+                try self.pushRectClip(.{ .x = -1e6, .y = -1e6, .width = 2e6, .height = 2e6 });
+                masked |= @as(u32, 1) << @intCast(depth);
                 depth += 1;
             },
             .pop_clip => {
                 if (depth == 0) return error.ClipStackEmpty;
                 if (self.layer_workspace) |workspace| {
                     try workspace.popClip();
-                    depth -= 1;
-                    continue;
-                }
-                if (c.RestoreDC(self.dc, -1) == 0) return error.RestoreClipFailed;
+                } else if (c.RestoreDC(self.dc, -1) == 0) return error.RestoreClipFailed;
                 depth -= 1;
+                const bit = @as(u32, 1) << @intCast(depth);
+                if (masked & bit != 0) {
+                    masked &= ~bit;
+                    try self.masks.close();
+                }
             },
-        };
-        if (depth != 0) return error.UnbalancedClips;
+        }
+    }
+    fn pushRectClip(self: *Renderer, clip: layout.Rect) !void {
+        if (self.layer_workspace) |workspace| return workspace.pushClip(.{ .x = clip.x, .y = clip.y, .width = clip.width, .height = clip.height });
+        if (c.SaveDC(self.dc) == 0) return error.SaveClipFailed;
+        errdefer _ = c.RestoreDC(self.dc, -1);
+        const rect = try self.bounds(clip);
+        if (c.IntersectClipRect(self.dc, rect.left, rect.top, rect.right, rect.bottom) == c.ERROR) return error.SetClipFailed;
     }
     pub fn deinit(self: *Renderer) void {
+        self.masks.deinit(zio.heap);
         self.releaseVariantFonts();
         zwc_destroy(self.composed);
         if (self.glyph_surface) |*surface| surface.deinit();
