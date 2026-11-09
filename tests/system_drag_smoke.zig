@@ -386,9 +386,10 @@ const Smoke = struct {
         switch (self.stage) {
             .settle => if (self.waited > 12) self.to(.press),
             .press => {
-                // The runner's own console may cover the round's
-                // destination, which then never hears the drag.
-                self.input.raise(if (self.round == .legacy) self.legacy_window else self.target_window);
+                self.input.raise(self.target_window);
+                // A console left on the runner's desktop can cover the
+                // text target, and OLE then hands the drag to it.
+                self.input.raise(self.legacy_window);
                 self.input.raise(self.source_window);
                 const start = try self.center(self.source_window);
                 self.input.pointer(start);
