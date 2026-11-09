@@ -1843,6 +1843,7 @@ pub fn build(b: *std.Build) void {
         });
         addPointerCostSmoke(b, target, optimize, core);
         addSmoke(b, "smoke-window-state", "tests/window_state_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-window-reveal", "tests/window_reveal_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-relationships", "tests/window_relationship_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-chrome", "tests/window_chrome_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});

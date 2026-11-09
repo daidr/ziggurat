@@ -4,6 +4,7 @@ const types = @import("types.zig");
 const picker_api = @import("picker.zig");
 const menus = @import("menus.zig");
 const native_menu = @import("windows_menu.zig");
+const roles = @import("menu_roles.zig");
 const message_api = @import("message.zig");
 const c = @import("ziggurat_c_win32");
 
@@ -512,7 +513,7 @@ pub const Owner = struct {
         if ((native_message == c.WM_KEYDOWN or native_message == c.WM_SYSKEYDOWN) and self.entry_count != 0) {
             const pressed = native_menu.pressed(wp, lp) orelse return null;
             for (self.entries[0..self.entry_count]) |entry| if (entry.accelerator) |accelerator| if (menus.sameAccelerator(accelerator, pressed)) {
-                if (!entry.enabled) return null;
+                if (!entry.enabled or !editRoleEnabled(window, entry)) return null;
                 self.on_action(self.context, window, .{ .menu = entry.id });
                 return 0;
             };
@@ -524,6 +525,16 @@ pub const Owner = struct {
             // and Space keep opening the window menu.
             self.popupMenuBar(window, @bitCast(lp));
             return 0;
+        }
+        if (native_message == c.WM_INITMENUPOPUP and self.entry_count != 0) {
+            // The Edit roles are enabled as the focus can act on them as
+            // their menu opens; those the app disabled stay so.
+            const opened: c.HMENU = @ptrFromInt(wp);
+            for (self.entries[0..self.entry_count]) |entry| if (entry.menu == opened) if (roles.Role.fromId(entry.id)) |role| if (role.editCommand() != null) {
+                const enabled = entry.enabled and entry.ancestor_enabled and editRoleEnabled(window, entry);
+                _ = c.EnableMenuItem(opened, entry.command, @as(c.UINT, @intCast(c.MF_BYCOMMAND | (if (enabled) c.MF_ENABLED else c.MF_GRAYED))));
+            };
+            return null;
         }
         if (native_message == c.WM_MENUCHAR) {
             // Alt and a letter that names no menu of the bar open none, as in
@@ -546,7 +557,7 @@ pub const Owner = struct {
         } else if (native_message == c.WM_COMMAND and lp == 0 and wp >> 16 == 0) {
             const command: u16 = @truncate(wp);
             for (self.entries[0..self.entry_count]) |entry| if (entry.command == command) {
-                if (entry.enabled) self.on_action(self.context, window, .{ .menu = entry.id });
+                if (entry.enabled and editRoleEnabled(window, entry)) self.on_action(self.context, window, .{ .menu = entry.id });
                 return 0;
             };
         } else if (native_message == tray_message) {
@@ -589,6 +600,12 @@ pub const Owner = struct {
     }
 };
 
+/// Whether the focus would act on an entry's Edit role; yes for other items.
+fn editRoleEnabled(window: z.Window, entry: Entry) bool {
+    const role = roles.Role.fromId(entry.id) orelse return true;
+    const edit = role.editCommand() orelse return true;
+    return window.commandEnabled(edit);
+}
 fn modifierBits(modifiers: types.Modifiers) u32 {
     return @as(u32, if (modifiers.control) c.MOD_CONTROL else 0) | @as(u32, if (modifiers.alt) c.MOD_ALT else 0) | @as(u32, if (modifiers.shift) c.MOD_SHIFT else 0) | @as(u32, if (modifiers.super) c.MOD_WIN else 0);
 }
