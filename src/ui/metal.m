@@ -280,7 +280,7 @@ typedef struct ZmBatch {uint32_t first,count;int bind,replace;__unsafe_unretaine
    group's filter (its kernel among the words, through temp), or nothing. */
 enum {RUN_EFFECT,RUN_GROUP,RUN_GAUSSIAN,RUN_TRANSFORM};
 typedef struct ZmRun {uint32_t kind,slot,word_offset,word_count,has_pass,region[4],out[4];float origin[2];ZmEffectParams params;__unsafe_unretained id<MTLTexture> source,output,temp,extra[3];uint32_t levels,level_offset;} ZmRun;
-typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes,layers,filter_passes,partial_frames,cached_pipelines,backdrops,indicators,offscreen_targets,device_losses,sweeps;} ZmStats;
+typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes,layers,filter_passes,partial_frames,cached_pipelines,backdrops,indicators,offscreen_targets,device_losses,sweeps,timeouts;} ZmStats;
 typedef struct ZmGlyph {float x,y,width,height,left,top;uint32_t color;} ZmGlyph;
 #define ZM_CLIPS 33
 #define ZM_ATLAS 2048
@@ -375,6 +375,11 @@ static void domain_lose(ZigMetalDomain *domain);
        offscreen surface's last committed frame; loss_fault makes the next
        offscreen frame fail as a removed device does. */
     __weak ZigMetalDomain *domain;int lost,loss_fault;
+    /* A frame the GPU did not finish in time (MTLCommandBufferErrorTimeout)
+       leaves the driver wedged rather than the device gone: the completion
+       handler notes it here, and the next frame reports it so the window
+       draws in memory and leaves the GPU alone for a while. */
+    NSMutableArray *timeouts;int timeout_fault;
     id<MTLTexture> front;
     ZmStats stats;
 }
@@ -493,7 +498,7 @@ static ZigMetalRenderer *new_renderer(id<MTLDevice> device,int *error){
     ZigMetalRenderer *s=[[ZigMetalRenderer alloc] init];atomic_fetch_add(&live_objects,1);
     s->device=device;s->queue=[device newCommandQueue];
     if(!s->queue||!create_pipeline(s)){*error=2;return nil;}
-    s->free_buffers=[NSMutableArray array];s->frame_textures=[NSMutableArray array];
+    s->free_buffers=[NSMutableArray array];s->timeouts=[NSMutableArray array];s->frame_textures=[NSMutableArray array];
     s->frame_captures=[NSMutableArray array];s->free_captures=[NSMutableArray array];s->idle_pooled=[NSMutableSet set];
     s->glyphs=[NSMutableDictionary dictionary];s->fonts=[NSMutableArray array];s->font_sources=[NSMutableArray array];s->font_scales=[NSMutableArray array];
     s->slots=[NSMutableArray array];s->prepared_keys=[NSMutableArray array];s->prepared_textures=[NSMutableArray array];
@@ -563,6 +568,9 @@ static int attach_layer(ZigMetalRenderer *s,NSWindow *window){
    the layer stays as it is. */
 int zmtl_begin(void *p,void *native_window,uint32_t width,uint32_t height,float scale,int transparent){
     ZigMetalRenderer *s=R(p);if(s->drawing)return 1;if(s->lost)return 2;
+    int timed_out=s->timeout_fault;s->timeout_fault=0;
+    @synchronized(s->timeouts){if([s->timeouts count]){timed_out=1;[s->timeouts removeAllObjects];}}
+    if(timed_out){s->back_valid=0;s->generation++;s->stats.timeouts++;return 5;}
     @autoreleasepool{
         NSGraphicsContext *current=[NSGraphicsContext currentContext];
         if(current&&![current isDrawingToScreen])return 4;
@@ -1574,10 +1582,10 @@ done:
     ZM_CLOSE();
 #undef ZM_OPEN
 #undef ZM_CLOSE
-    NSMutableArray *free_buffers=s->free_buffers,*free_captures=s->free_captures;
+    NSMutableArray *free_buffers=s->free_buffers,*free_captures=s->free_captures,*timeouts=s->timeouts;
     NSArray *captures=[s->frame_captures copy];[s->frame_captures removeAllObjects];
     [commands addCompletedHandler:^(id<MTLCommandBuffer> done){
-        (void)done;
+        if(done.status==MTLCommandBufferStatusError&&done.error.code==MTLCommandBufferErrorTimeout)@synchronized(timeouts){[timeouts addObject:@YES];}
         @synchronized(free_buffers){[free_buffers addObject:buffer];}
         if([captures count])@synchronized(free_captures){[free_captures addObjectsFromArray:captures];}
     }];
@@ -1825,6 +1833,7 @@ int zmtl_texture(void *p,const GpuTextureToken *token,const ZiImagePlan *plan){
     return 1;
 }
 void zmtl_inject_loss(void *p){R(p)->loss_fault=1;}
+void zmtl_inject_timeout(void *p){R(p)->timeout_fault=1;}
 
 /* Offscreen surfaces (src/ui/gpu_offscreen_native.zig): a frame drawn
    into the work target becomes the front, which snapshots copy. */

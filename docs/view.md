@@ -538,13 +538,14 @@ GPU 渲染器上传这些平面（每像素 1.5 字节，BGRA 要 4 字节），
 | --- | --- | --- |
 | macOS | AVFoundation（`AVPlayer` 与 `AVPlayerItemVideoOutput`），用 VideoToolbox 解码 | IOSurface 支持的 NV12 `CVPixelBuffer`，Metal 用 `CVMetalTextureCache` 包成纹理，不复制 |
 | Linux | GStreamer 1.x（`playbin` 与 `appsink`），装有 VA-API 时用它解码；首次打开视频时 dlopen | NV12 平面，每像素 1.5 字节，OpenGL 原样上传为 R8 与 RG8 纹理，由着色器转换 |
+| Windows | Media Foundation（帧服务器模式的 `IMFMediaEngine`），在引擎自己的 Direct3D 11 设备上解码（GPU 有 DXVA 时用它），没有 GPU 时用 WARP | 引擎转换成 BGRA 的纹理，三张轮换，以 NT 句柄共享并由 keyed mutex（key 0）同步；Direct3D 11 在自己的设备上按纹理身份打开一次后直接采样。设备不能共享纹理时，每张画面读回内存 |
 | 浏览器 | video 元素 | 元素本身，WebGL 从它 GPU 到 GPU 上传 |
 
-- `open` 打开文件（浏览器里是相对页面的 URL），`openUrl` 打开 `file:`、`http:`、`https:` URL 或 HLS 播放列表，`openData` 打开内存中的字节（例如嵌入的文件）而不写入文件：macOS 经 `AVAssetResourceLoader` 从内存应答，Linux 经 memfd，浏览器经 Blob URL。字节在播放器关闭之前保持不变。
+- `open` 打开文件（浏览器里是相对页面的 URL），`openUrl` 打开 `file:`、`http:`、`https:` URL 或 HLS 播放列表，`openData` 打开内存中的字节（例如嵌入的文件）而不写入文件：macOS 经 `AVAssetResourceLoader` 从内存应答，Linux 经 memfd，Windows 经内存中的 `IMFByteStream`，浏览器经 Blob URL。字节在播放器关闭之前保持不变。
 - `error.Unsupported` 表示系统没有能播放视频的框架，例如没有 GStreamer 及其 base 插件的 Linux，应用可以改为显示 GIF。能播放什么格式由系统决定。Linux 需要 `gstreamer1.0-plugins-base`，以及 `gstreamer1.0-libav`（或其他 H.264 解码器）才能播放 H.264；缺少解码器表现为 `err()`。
-- 软件渲染器在绘制前把画面转换为 BGRA（macOS 锁定 `CVPixelBuffer` 读取平面，浏览器经 canvas 读回）；OpenGL、Metal 与 WebGL 直接采样画面，按 BT.601/709/2020 矩阵与有限/全范围转换。没有应用导入 `ziggurat_video` 时不会链接其中任何部分。Windows（Media Foundation）暂未提供。
+- 软件渲染器在绘制前把画面转换为 BGRA（macOS 锁定 `CVPixelBuffer` 读取平面，Windows 在引擎设备上把共享纹理复制到 staging 读回，浏览器经 canvas 读回）；OpenGL、Metal、Direct3D 11 与 WebGL 直接采样画面，NV12 按 BT.601/709/2020 矩阵与有限/全范围转换。没有应用导入 `ziggurat_video` 时不会链接其中任何部分。
 - 浏览器不允许页面在用户交互之前播放声音时，视频改为静音播放。
-- 测试用的片段 `test_clip`（1.2 s 红、绿、蓝）与示例的预告片由 `scripts/make-video-clips.sh` 用 ffmpeg 生成，H.264 不含 B 帧，因此没有编辑列表推迟画面时间。`zig build test-video` 用系统引擎在内存与文件两种来源上检查播放顺序、结尾与暂停时的跳转；`zig build smoke-video` 在真实窗口中检查软件渲染以及 `-Dgpu=true` 时 OpenGL 或 Metal 绘制的颜色。
+- 测试用的片段 `test_clip`（1.2 s 红、绿、蓝）与示例的预告片由 `scripts/make-video-clips.sh` 用 ffmpeg 生成，H.264 不含 B 帧，因此没有编辑列表推迟画面时间。`zig build test-video` 用系统引擎在内存与文件两种来源上检查播放顺序、结尾与暂停时的跳转；`zig build smoke-video` 在真实窗口中检查软件渲染以及 `-Dgpu=true` 时 OpenGL、Metal 或 Direct3D 11（WARP，直接采样共享纹理）绘制的颜色。
 
 示例 `zig build run-video` 在窗口上方循环播放一段 GIF（由 `scripts/make-waves-gif.py` 生成），“Watch the trailer”在它的位置播放带声音的预告片，带播放/暂停、进度条、静音与关闭。
 

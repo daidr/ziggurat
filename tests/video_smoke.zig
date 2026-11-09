@@ -25,8 +25,7 @@ extern "user32" fn SendMessageW(?*anyopaque, u32, usize, isize) callconv(.winapi
 const title = "Video smoke";
 const width = 160;
 const height = 120;
-// Direct3D 11 draws the BGRA pictures as images: the software capture serves.
-const gpu = builtin.os.tag != .windows and @FieldType(ui.Context, "gpu_renderer") != void;
+const gpu = @FieldType(ui.Context, "gpu_renderer") != void;
 const ms = std.time.ns_per_ms;
 
 const Screen = struct {
@@ -50,13 +49,16 @@ const Smoke = struct {
     /// the window as RGB.
     fn frame(self: *Smoke) ![3]u8 {
         var color: [3]u8 = undefined;
-        if (gpu) {
+        var drawn_on_gpu = false;
+        const gpu_before = if (gpu) self.host.context.gpu_frames else 0;
+        if (gpu and builtin.os.tag != .windows) {
             const renderer = &self.host.context.gpu_renderer;
             renderer.captureForTest(true);
             const before = self.host.context.gpu_frames;
             ui.GpuRenderer.displayForTest(title);
             if (self.host.context.gpu_frames > before) {
                 self.frames_on_gpu += 1;
+                drawn_on_gpu = true;
                 const size = self.host.context.last_paint_size.?;
                 const pixel = renderer.pixelForTest(size.width / 2, size.height / 2);
                 color = .{ @truncate(pixel >> 16), @truncate(pixel >> 8), @truncate(pixel) };
@@ -74,7 +76,16 @@ const Smoke = struct {
             if (builtin.os.tag == .linux) zlg_test_paint(native, width, height) else zlm_test_paint(native);
         }
         if (self.host.last_error) |err| return err;
-        if (!gpu or self.frames_on_gpu == 0) {
+        // Direct3D 11 samples the texture the engine shares where it is,
+        // into the frame it keeps.
+        if (gpu and builtin.os.tag == .windows and self.host.context.gpu_frames > gpu_before) {
+            self.frames_on_gpu += 1;
+            drawn_on_gpu = true;
+            const size = self.host.context.last_paint_size.?;
+            const pixel = try self.host.context.gpu_renderer.planePixelForTest(size.width / 2, size.height / 2);
+            color = .{ @truncate(pixel >> 16), @truncate(pixel >> 8), @truncate(pixel) };
+        }
+        if (!drawn_on_gpu and (!gpu or builtin.os.tag == .windows or self.frames_on_gpu == 0)) {
             const size = self.host.context.last_paint_size.?;
             const pixel = if (builtin.os.tag == .windows) windows: {
                 const renderer = &self.host.context.renderer;
@@ -129,6 +140,8 @@ fn run(allocator: std.mem.Allocator) !?usize {
     var screen: Screen = .{};
     var storage: view.Storage(8, 64) = .{};
     var host = view.Host.init(&screen, Screen.build, storage.buffers(), .{});
+    // Windows' software rasterizer, which every machine has.
+    if (gpu and builtin.os.tag == .windows) host.context.render_mode = .warp;
     const window = try app.createWindow(.{ .title = title, .width = width, .height = height });
     try host.attach(window);
     var player = system_video.openData(allocator, &host, system_video.test_clip) catch |err| switch (err) {
@@ -189,9 +202,11 @@ fn run(allocator: std.mem.Allocator) !?usize {
     player.play();
     try smoke.until("red from the start", showing(red));
     std.debug.print("video smoke: {d} frames drawn with the GPU renderer\n", .{smoke.frames_on_gpu});
+    if (gpu and builtin.os.tag == .windows) std.debug.print("video smoke: Direct3D 11 opened {d} shared textures\n", .{host.context.gpu_renderer.videoOpens()});
     // OpenGL on a software rasterizer draws only with ZIGGURAT_GL=on.
-    const required = builtin.os.tag == .macos or if (std.c.getenv("ZIGGURAT_GL")) |value| std.mem.eql(u8, std.mem.span(value), "on") else false;
+    const required = builtin.os.tag == .macos or builtin.os.tag == .windows or if (std.c.getenv("ZIGGURAT_GL")) |value| std.mem.eql(u8, std.mem.span(value), "on") else false;
     if (gpu and required) try std.testing.expect(smoke.frames_on_gpu > 0);
+    if (gpu and builtin.os.tag == .windows) try std.testing.expect(host.context.gpu_renderer.videoOpens() > 0);
     return smoke.frames_on_gpu;
 }
 

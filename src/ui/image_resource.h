@@ -16,7 +16,7 @@ typedef struct ZiImagePlan {ZiImageRect destination,source;uint32_t level,sampli
 typedef struct ZiVideoPicture {
     uint32_t width,height,format,matrix;
     const uint8_t *planes[2];uint32_t strides[2];
-    void *native;uint32_t element,reserved;
+    void *native;uint32_t element,native_id;
     void *read;void *read_context;
 } ZiVideoPicture;
 #endif
