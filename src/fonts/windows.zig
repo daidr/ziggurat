@@ -6,6 +6,7 @@ const files = @import("files.zig");
 const HANDLE = ?*anyopaque;
 extern "gdi32" fn AddFontMemResourceEx(data: *const anyopaque, size: u32, reserved: ?*anyopaque, fonts: *u32) callconv(.winapi) HANDLE;
 extern fn zfont_add_file(path: [*:0]const u16) c_int;
+extern fn zfont_add_family(path: [*:0]const u16, family: [*:0]const u16) c_int;
 extern fn zfont_list(context: *anyopaque, each: *const fn (*anyopaque, [*]const u16, u32, c_int) callconv(.c) void) c_int;
 
 pub fn add(allocator: std.mem.Allocator, data: []const u8, hash: *const [16]u8) !void {
@@ -20,6 +21,21 @@ pub fn add(allocator: std.mem.Allocator, data: []const u8, hash: *const [16]u8) 
     var installed: u32 = 0;
     if (AddFontMemResourceEx(data.ptr, @intCast(data.len), null, &installed) == null) return error.UnreadableFont;
     if (zfont_add_file(wide) != 0) return error.TooManyFamilies;
+}
+
+/// DirectWrite: adds the font's faces again under `family`, apart from its
+/// own family's; a family that is the font's own is noted, as the font's
+/// own family then holds no others the app gave it to.
+pub fn addFamily(allocator: std.mem.Allocator, data: []const u8, hash: *const [16]u8, family: [:0]const u8) !void {
+    const local = zio.getEnvVarOwned(allocator, "LOCALAPPDATA") catch try zio.getEnvVarOwned(allocator, "TEMP");
+    defer allocator.free(local);
+    const path = try files.write(allocator, local, data, hash);
+    defer allocator.free(path);
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
+    defer allocator.free(wide);
+    const name = try std.unicode.utf8ToUtf16LeAllocZ(allocator, family);
+    defer allocator.free(name);
+    if (zfont_add_family(wide, name) != 0) return error.TooManyFamilies;
 }
 
 pub const List = struct {

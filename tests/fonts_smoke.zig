@@ -71,14 +71,14 @@ pub fn main() !void {
 
     const id = try fonts.register(allocator, data, alias);
     try std.testing.expectEqualStrings(alias, fonts.name(id));
-    // Linux holds the faces under the name given, apart from the font's
-    // own family; Windows gives the system the font's own.
-    const own = if (builtin.os.tag == .linux) try ownFamily(allocator, path) else fonts.systemName(id);
+    // The system holds the faces under the name given, apart from the
+    // font's own family (fontconfig on Linux, DirectWrite on Windows); GDI
+    // knows them by the font's own.
+    const own = if (builtin.os.tag == .linux) try ownFamily(allocator, path) else fonts.ownName(id);
     defer if (builtin.os.tag == .linux) allocator.free(own);
     try std.testing.expect(own.len > 0 and !std.mem.eql(u8, own, alias));
-    const system_name = if (builtin.os.tag == .linux) alias else own;
-    try std.testing.expectEqualStrings(system_name, fonts.systemName(id));
-    try std.testing.expectEqualStrings(system_name, fonts.resolve(alias));
+    try std.testing.expectEqualStrings(alias, fonts.systemName(id));
+    try std.testing.expectEqualStrings(alias, fonts.resolve(alias));
     // The same data again adds nothing but its name.
     const generation = fonts.generation();
     try std.testing.expectEqual(id, try fonts.register(allocator, data, alias));
@@ -94,8 +94,8 @@ pub fn main() !void {
     }
 
     // Text laid out in the registered name measures as in the font's own,
-    // in the face registered: on Linux the name holds that face alone, so
-    // it takes it whatever weight and style are asked for.
+    // in the face registered: the name holds that face alone, so it takes
+    // it whatever weight and style are asked for.
     const face = try ownFace(allocator, path);
     const engine = try text.Engine.create(allocator, std.Thread.getCurrentId(), .{});
     defer engine.close() catch unreachable;
@@ -105,7 +105,7 @@ pub fn main() !void {
     const by_own = try engine.layout(sample, .{ .family = own, .size = 20, .weight = face.weight, .italic = face.italic });
     defer by_own.close() catch unreachable;
     try std.testing.expectEqual((try by_own.metrics()).bounds.width, (try by_alias.metrics()).bounds.width);
-    if (builtin.os.tag == .linux) {
+    {
         // The name given takes only this file's faces: another name for the
         // same data holds them too, and the font's own family keeps them.
         const second = try fonts.register(allocator, data, "Ziggurat Smoke Other");
