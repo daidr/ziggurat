@@ -43,6 +43,8 @@ jobs:
       linux: ${{ steps.select.outputs.linux }}
       macos: ${{ steps.select.outputs.macos }}
       release_tests: ${{ steps.select.outputs.release_tests }}
+      # Pull requests run a core set of smokes; everything else runs them all.
+      full: ${{ steps.select.outputs.full }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -73,11 +75,14 @@ jobs:
             done
             # The checkout is the merge result, so the import graph matches it.
             choose --github-files --explain < "$pages"
+            echo full=false | tee -a "$GITHUB_OUTPUT"
           elif [ "$EVENT" = pull_request ] || { [ "$EVENT" = push ] && [ "$REF" = refs/heads/dev ]; }; then
             # ReleaseSafe on main and manual runs comes from their full matrix.
             choose --all --release-tests < /dev/null
+            echo full=true | tee -a "$GITHUB_OUTPUT"
           else
             choose --all < /dev/null
+            echo full=true | tee -a "$GITHUB_OUTPUT"
           fi
 
   windows:
@@ -118,7 +123,18 @@ jobs:
           $zig = ./scripts/fetch-zig-windows.ps1
           Split-Path -Parent $zig | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           ./scripts/ci-zig-cache.ps1 | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Pull request core checks
+        if: needs.changes.outputs.full != 'true'
+        # Unit tests and the core window, input, text, drawing, view and
+        # system smokes. Every other smoke, the packaging, GPU and optional
+        # dependency checks run on pushes to dev and with the full-ci label.
+        run: |
+          zig fmt --check build.zig build_support src examples tests tools
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test smoke smoke-lifecycle smoke-composition smoke-key-input smoke-pointer-clicks smoke-text-layout smoke-drawing smoke-images smoke-widgets smoke-view smoke-document-editor smoke-system smoke-clipboard -Daccessibility=true -Doptimize=${{ matrix.optimize }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Format, compile, unit and native integration checks
+        if: needs.changes.outputs.full == 'true'
         run: |
           Write-Output "zig build jobs: $env:NUMBER_OF_PROCESSORS"
           $hangs = Start-Process pwsh -NoNewWindow -PassThru -ArgumentList '-NoProfile', '-File', 'scripts/ci-hang-report.ps1'
@@ -138,6 +154,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Stop-Process -Id $hangs.Id -ErrorAction SilentlyContinue
       - name: Packaging and real Authenticode test certificate checks
+        if: needs.changes.outputs.full == 'true'
         run: |
           $license = Join-Path $env:GITHUB_WORKSPACE 'LICENSE'
           ./tests/packaging.ps1 -ExecutablePath ./zig-out/bin/smoke-packaging.exe -LicensePath $license
@@ -147,19 +164,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tests/setup_smoke.ps1
       - name: Direct3D 11 shader effects on WARP
+        if: needs.changes.outputs.full == 'true'
         run: |
           zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-shader-effects-gpu smoke-gpu-masks smoke-gpu-shared-device smoke-video -Dgpu=true -Doptimize=${{ matrix.optimize }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Optional pinned WebP decoder
+        if: needs.changes.outputs.full == 'true'
         run: |
           ./scripts/fetch-webp.ps1
           zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }}
       - name: Optional pinned SQLite amalgamation
+        if: needs.changes.outputs.full == 'true'
         run: |
           python scripts/fetch-sqlite.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           zig build "-j$env:NUMBER_OF_PROCESSORS" test-sqlite -Doptimize=${{ matrix.optimize }}
       - name: Application font registration
+        if: needs.changes.outputs.full == 'true'
         run: |
           zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-fonts -Doptimize=${{ matrix.optimize }}
       # Hardware GPU coverage is a separate local driver check. Hosted runner
@@ -207,7 +228,19 @@ jobs:
           printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
           printf 'ZIG_BIN=%s\n' "$zig_bin" >> "$GITHUB_ENV"
           sh scripts/ci-zig-cache.sh >> "$GITHUB_ENV"
+      - name: Pull request core checks
+        if: needs.changes.outputs.full != 'true'
+        # See the Windows job: the rest runs on dev and with full-ci.
+        env:
+          G_DEBUG: fatal-criticals
+          GDK_BACKEND: x11
+        run: |
+          zig fmt --check build.zig build_support src examples tests tools
+          bash scripts/test-native-header-cache.sh
+          zig build test -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-composition smoke-key-input smoke-pointer-clicks smoke-text-layout smoke-drawing smoke-images smoke-widgets smoke-view smoke-document-editor smoke-clipboard -Doptimize=${{ matrix.optimize }}
       - name: Format, compile, unit and native integration checks
+        if: needs.changes.outputs.full == 'true'
         env:
           G_DEBUG: fatal-criticals
           GDK_BACKEND: x11
@@ -247,21 +280,26 @@ jobs:
           # Private session bus doubles as the system bus for the logind stand-in.
           XDG_RUNTIME_DIR=$(mktemp -d) xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- sh -c 'DBUS_SYSTEM_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS zig build smoke-os-integration -Doptimize=${{ matrix.optimize }} -- --require-dbus'
       - name: Setup program, launcher and Debian package checks
+        if: needs.changes.outputs.full == 'true'
         run: |
           zig build build-setup-smoke -Doptimize=${{ matrix.optimize }}
           sh tests/setup_smoke.sh
       - name: Optional pinned WebP decoder
+        if: needs.changes.outputs.full == 'true'
         run: |
           sh scripts/fetch-webp.sh
           zig build smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }}
       - name: Optional pinned SQLite amalgamation
+        if: needs.changes.outputs.full == 'true'
         run: |
           python3 scripts/fetch-sqlite.py
           zig build test-sqlite -Doptimize=${{ matrix.optimize }}
       - name: Application font registration
+        if: needs.changes.outputs.full == 'true'
         run: |
           XDG_CACHE_HOME=$(mktemp -d) zig build smoke-fonts -Doptimize=${{ matrix.optimize }}
       - name: Browsers (WebAssembly) build and headless Chromium smoke
+        if: needs.changes.outputs.full == 'true'
         run: |
           # A real chromium on PATH, else Chrome for Testing's headless shell
           # (Ubuntu's chromium is a snap stub), with the libraries it needs.
