@@ -46,11 +46,11 @@ Window.TextClient目前仍由宿主显式bind/unbind，独立于UI.Context。移
 
 `ui.Context.attachBackdrop(owner)` 保留全窗背景并使用既有 Frame/资源事务；当前显式选择 `.gdi`，Windows 对应 GDI、Linux 对应 Cairo。Windows GPU child 与浏览器 child 的遮挡还未验收，因此拒绝自动/hardware/warp 模式。普通 `Context.attach(window)` 继续使用原来的单 Content 路径。`smoke-composition-ui` 检查实际像素、输入、resize、失败帧、UIA 失效和分配器重入关闭；Windows Debug/ReleaseSafe、Linux Debug/ReleaseSafe 及 Linux 2x 已通过。
 
-Windows `web.View.attachRegion(region, options)` 将一份稳定 View 接到 native 区域，不占用第二个 Window.Content。DIP 边缘只按当前 scale 舍入一次；bounds/visibility 原生更新失败回滚两项，回滚失败关闭 controller 并报告失败。异步 controller 创建、reload/recover 都使用最新已提交的区域几何。`window_position` 显式通知 SDK 父窗口位置变化。
+Windows `web.View.attachRegion(region, options)` 将一份稳定 View 接到 native 区域，不占用第二个 Window.Content。区域里的页面是 WebView2 composition controller：它的 visual 放在窗口的网页层（非 topmost 的 DirectComposition target），窗口帧经 `Window.composeUnder` 改为带 alpha 合成在它上面，内容在页面处留洞（`Frame.composedHole`），之后画的原生 UI 显示在页面之上。窗口子类化后把鼠标转给指针下的页面（覆盖区、圆角外除外），页面光标经 WM_SETCURSOR 生效；Tab 进出页面走 MoveFocus/MoveFocusRequested，页面的 UIA provider 挂在代表它的语义节点下，根节点用 IRawElementProviderHwndOverride 替换 WebView2 的窗口。DIP 边缘只按当前 scale 舍入一次；bounds/visibility 原生更新失败回滚两项，回滚失败关闭 controller 并报告失败。异步 controller 创建、reload/recover 都使用最新已提交的区域几何。`window_position` 显式通知 SDK 父窗口位置变化。
 
 旧 View 路径隐藏保留页面和 PageId；remove 关闭 controller、终结请求并使 PageId 失效，最后一个 scope 退出后才完成 detach。同一 View 可以重新 attach，文档代数继续增加。需要跨宿主保留 DOM 时使用独立 [PageSession](pages.md#离窗页面会话)：移除旧 Region 只停放页面，旧 provider detach 完成后显式 attachRegion。它拥有自己的 bridge/parking HWND，原生 controller 不改固定父窗口；App停止先关闭页面资源再完成旧provider detach。所有公开提交、结果转换和 responder 仍按其所有者重查入口；分配器回调中 remove、导航或关闭不能把旧结果提交到新页面，失败不接管调用者拥有的参数。
 
-`zig build smoke-composition-webview -Dwebview=true` 在同一个真实 HWND 上组合 GDI 背景与两个 WebView，验证 child 原生几何/可见性、独立 DOM marker、单页 reload、移动/resize、pending 创建时移除及立刻复用、ready/resource 回调移除与请求终结。最终 COM/controller/deferral 和背景资源归零。该检查已在 Windows ReleaseSafe 通过，不包含人眼视觉质量、任意 overlay 或跨 surface Tab/IME 验收。
+`zig build smoke-composition-webview -Dwebview=true` 在同一个真实 HWND 上组合 GDI 背景与两个 WebView，验证 controller 几何/可见性、独立 DOM marker、单页 reload、移动/resize、pending 创建时移除及立刻复用、ready/resource 回调移除与请求终结。最终 COM/controller/deferral 和背景资源归零。该检查已在 Windows ReleaseSafe 通过，不包含人眼视觉质量、任意 overlay 或跨 surface Tab/IME 验收。
 
 运行 `zig build run-rectangular-pages -Dwebview=true` 可查看[双页面示例](../examples/rectangular_pages.zig)：隐藏左侧保留计数，关闭后重新打开创建新文档，右侧页面独立运行。每个页面使用独立用户配置目录。
 

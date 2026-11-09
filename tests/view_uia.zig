@@ -523,6 +523,60 @@ const Client = struct {
             try self.synchronize();
         }
 
+        // The table is a grid of rows and columns: its header row's column
+        // headers are its cells, which know where they are.
+        var grid: ?*c.IUIAutomationGridPattern = null;
+        try check(files.lpVtbl.*.GetCurrentPatternAs.?(files, c.UIA_GridPatternId, &c.IID_IUIAutomationGridPattern, @ptrCast(&grid)));
+        defer release(grid.?);
+        var columns: c_int = 0;
+        try check(grid.?.lpVtbl.*.get_CurrentColumnCount.?(grid.?, &columns));
+        try std.testing.expectEqual(@as(c_int, 2), columns);
+        var rows: c_int = 0;
+        try check(grid.?.lpVtbl.*.get_CurrentRowCount.?(grid.?, &rows));
+        try std.testing.expect(rows >= 1);
+        var place: ?*c.IUIAutomationGridItemPattern = null;
+        try check(size.lpVtbl.*.GetCurrentPatternAs.?(size, c.UIA_GridItemPatternId, &c.IID_IUIAutomationGridItemPattern, @ptrCast(&place)));
+        defer release(place.?);
+        var column: c_int = -1;
+        try check(place.?.lpVtbl.*.get_CurrentColumn.?(place.?, &column));
+        try std.testing.expectEqual(@as(c_int, 1), column);
+        var containing: ?*c.IUIAutomationElement = null;
+        try check(place.?.lpVtbl.*.get_CurrentContainingGrid.?(place.?, &containing));
+        defer release(containing.?);
+        try std.testing.expect(try named(containing.?, "Files"));
+        var cell: ?*c.IUIAutomationElement = null;
+        try check(grid.?.lpVtbl.*.GetItem.?(grid.?, 0, 1, &cell));
+        defer release(cell.?);
+        try std.testing.expect(try named(cell.?, "Size"));
+        var table: ?*c.IUIAutomationTablePattern = null;
+        try check(files.lpVtbl.*.GetCurrentPatternAs.?(files, c.UIA_TablePatternId, &c.IID_IUIAutomationTablePattern, @ptrCast(&table)));
+        defer release(table.?);
+        var headers: ?*c.IUIAutomationElementArray = null;
+        try check(table.?.lpVtbl.*.GetCurrentColumnHeaders.?(table.?, &headers));
+        defer release(headers.?);
+        var header_count: c_int = 0;
+        try check(headers.?.lpVtbl.*.get_Length.?(headers.?, &header_count));
+        try std.testing.expectEqual(@as(c_int, 2), header_count);
+
+        // Landmarks: a banner is a group of the custom landmark type named
+        // after it, the main content the main landmark, and a tab's content
+        // a pane called a tab panel.
+        const top = try find(expanded, c.UIA_GroupControlTypeId, "Top");
+        defer release(top);
+        var landmark = try property(top, c.UIA_LandmarkTypePropertyId);
+        try std.testing.expectEqual(@as(c_long, c.UIA_CustomLandmarkTypeId), landmark.unnamed_0.unnamed_0.unnamed_0.lVal);
+        try expectText(top, c.UIA_LocalizedLandmarkTypePropertyId, "banner");
+        try expectText(top, c.UIA_AriaRolePropertyId, "banner");
+        const body = try find(expanded, c.UIA_GroupControlTypeId, "Body");
+        defer release(body);
+        landmark = try property(body, c.UIA_LandmarkTypePropertyId);
+        try std.testing.expectEqual(@as(c_long, c.UIA_MainLandmarkTypeId), landmark.unnamed_0.unnamed_0.unnamed_0.lVal);
+        try expectText(body, c.UIA_LocalizedControlTypePropertyId, "main");
+        const panel = try find(expanded, c.UIA_PaneControlTypeId, "General");
+        defer release(panel);
+        try expectText(panel, c.UIA_LocalizedControlTypePropertyId, "tab panel");
+        try expectText(panel, c.UIA_AriaRolePropertyId, "tabpanel");
+
         // Tokens are items of their field, each with a remove button.
         const tags = try find(expanded, c.UIA_ListControlTypeId, "Tags");
         defer release(tags);
@@ -619,6 +673,14 @@ const Collections = struct {
         try v.tokenField(.{ .name = "Tags", .self_align = .stretch });
         for (self.tags) |tag| _ = try v.token(tag, .{ .key = view.key(tag) });
         try v.end();
+        try v.column(.{ .role = .banner, .name = "Top" });
+        try v.text("Notes", .{});
+        try v.end();
+        try v.column(.{ .role = .main, .name = "Body" });
+        try v.column(.{ .role = .tab_panel, .name = "General" });
+        try v.text("General settings", .{});
+        try v.end();
+        try v.end();
     }
 };
 
@@ -630,10 +692,10 @@ pub fn runCollections(allocator: std.mem.Allocator) !void {
     var state: Collections = .{};
     state.tree = .init(.single, &state.tree_storage);
     state.table = .init(.multiple, &state.table_storage);
-    var storage: view.Storage(64, 512) = .{};
+    var storage: view.Storage(80, 512) = .{};
     var host = view.Host.init(&state, Collections.build, storage.buffers(), .{});
     host.context.render_mode = .gdi;
-    const window = try app.createWindow(.{ .width = 360, .height = 480 });
+    const window = try app.createWindow(.{ .width = 360, .height = 640 });
     try host.attach(window);
     paint(window);
     if (host.last_error) |err| return err;
@@ -655,5 +717,5 @@ pub fn runCollections(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualSlices(u64, &.{ 1, 3 }, state.table.items());
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
-    std.debug.print("view UIA collections passed: tree ExpandCollapse/LeafNode/selection, data grid header Invoke/ItemStatus and multiple row selection, token field items\n", .{});
+    std.debug.print("view UIA collections passed: tree ExpandCollapse/LeafNode/selection, data grid header Invoke/ItemStatus, Grid/Table/GridItem places and multiple row selection, banner/main landmarks and tab panel, token field items\n", .{});
 }

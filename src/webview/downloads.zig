@@ -50,13 +50,17 @@ fn validOutputName(name: []const u8) bool {
     if (builtin.os.tag != .windows) return true;
     if (name[name.len - 1] == '.' or name[name.len - 1] == ' ') return false;
     for (name) |byte| if (byte < 32 or std.mem.indexOfScalar(u8, "<>:\"/\\|?*", byte) != null) return false;
+    return !deviceName(name);
+}
+/// Whether Windows takes `name` for a device, as "con.txt" or "COM1".
+fn deviceName(name: []const u8) bool {
     const stem = std.mem.trim(u8, name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len], " ");
-    for ([_][]const u8{ "con", "prn", "aux", "nul", "conin$", "conout$" }) |device| if (std.ascii.eqlIgnoreCase(stem, device)) return false;
+    for ([_][]const u8{ "con", "prn", "aux", "nul", "conin$", "conout$" }) |device| if (std.ascii.eqlIgnoreCase(stem, device)) return true;
     if (stem.len >= 4 and (std.ascii.startsWithIgnoreCase(stem, "com") or std.ascii.startsWithIgnoreCase(stem, "lpt"))) {
         const number = stem[3..];
-        if ((number.len == 1 and number[0] >= '1' and number[0] <= '9') or std.mem.eql(u8, number, "¹") or std.mem.eql(u8, number, "²") or std.mem.eql(u8, number, "³")) return false;
+        if ((number.len == 1 and number[0] >= '1' and number[0] <= '9') or std.mem.eql(u8, number, "¹") or std.mem.eql(u8, number, "²") or std.mem.eql(u8, number, "³")) return true;
     }
-    return true;
+    return false;
 }
 /// The file name to save a download as, from the page's or server's
 /// untrusted suggestion: its last path component (either slash separates),
@@ -69,7 +73,7 @@ pub fn safeName(buffer: []u8, suggested: []const u8) []const u8 {
     if (builtin.os.tag == .windows) name = std.mem.trimEnd(u8, name, ". ");
     if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) name = "download";
     var length: usize = 0;
-    if (builtin.os.tag == .windows and !validOutputName(name)) {
+    if (builtin.os.tag == .windows and deviceName(name)) {
         buffer[0] = '_';
         length = 1;
     }

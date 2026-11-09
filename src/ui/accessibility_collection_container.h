@@ -339,7 +339,7 @@ static HRESULT collection_anchor_new_for(State *state, uint64_t id, const Collec
         binding = collection_native_binding_locked(state, key, NULL);
         if (binding) {
             anchor->registration = key;
-            provider_initialize_locked(state, id, ROLE_LIST, &anchor->provider);
+            provider_initialize_locked(state, id, patterns_for_role(ROLE_LIST), &anchor->provider);
             *out = &anchor->provider;
             hr = S_OK;
         } else hr = UIA_E_ELEMENTNOTAVAILABLE;
