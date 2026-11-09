@@ -99,8 +99,13 @@ const Probe = struct {
                 menu.remove(web.context_menu.ids.copy_link);
                 menu.append(.separator) catch |err| return self.fail(err);
                 menu.append(.{ .command = .{ .label = "Open in browser", .command = 7 } }) catch |err| return self.fail(err);
-                // WebView2 draws the menu itself, out of a test's reach.
-                if (windows) self.app.post(.{ .context = self, .call = selectText }) catch |err| self.fail(err);
+                // WebView2 draws the menu itself, out of a test's reach, and
+                // drops the next right-click while one is open, so Windows
+                // checks the items and the append and does not show it.
+                if (windows) {
+                    menu.prevent();
+                    self.app.post(.{ .context = self, .call = selectText }) catch |err| self.fail(err);
+                }
             },
             .selection => {
                 const selection = menu.target.selection orelse return self.fail(error.SelectionMissing);
