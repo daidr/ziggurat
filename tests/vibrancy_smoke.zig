@@ -65,6 +65,7 @@ const State = struct {
     owner: system.Owner = undefined,
     surface: Surface = .{},
     menu_seen: bool = false,
+    menu_tries: u8 = 0,
     caps: z.WindowCapabilities = undefined,
     failure: ?anyerror = null,
     thread_failure: ?anyerror = null,
@@ -136,13 +137,22 @@ const State = struct {
             if (caps.transparent) {
                 // F10 opens the menus in a popup, a native menu loop in
                 // which App tasks keep running, with or without a material.
-                _ = c.PostMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_KEYMENU, 0);
-                const thread = try std.Thread.spawn(.{}, watchMenu, .{ self, c.GetCurrentThreadId() });
-                thread.detach();
+                try self.openMenu();
                 return;
             }
         }
         self.finish();
+    }
+    /// Opens the menus with F10 and watches for the menu loop. Another
+    /// window taking the foreground (smokes run side by side) closes the
+    /// menu on its own, so a menu gone before the task is opened again.
+    fn openMenu(self: *State) !void {
+        self.menu_tries += 1;
+        const hwnd: c.HWND = @ptrCast(self.window.nativeHandle().?);
+        _ = c.SetForegroundWindow(hwnd);
+        _ = c.PostMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_KEYMENU, 0);
+        const thread = try std.Thread.spawn(.{}, watchMenu, .{ self, c.GetCurrentThreadId() });
+        thread.detach();
     }
     /// From another thread: waits for the main thread's menu loop, then
     /// posts the task that closes the menu, which runs only if App tasks
@@ -163,7 +173,10 @@ const State = struct {
         const self: *State = @ptrCast(@alignCast(ptr));
         var info = std.mem.zeroes(c.GUITHREADINFO);
         info.cbSize = @sizeOf(c.GUITHREADINFO);
-        if (c.GetGUIThreadInfo(0, &info) == 0 or info.flags & c.GUI_POPUPMENUMODE == 0) return self.fail(error.MenuClosedBeforeTask);
+        if (c.GetGUIThreadInfo(0, &info) == 0 or info.flags & c.GUI_POPUPMENUMODE == 0) {
+            if (self.menu_tries >= 5) return self.fail(error.MenuClosedBeforeTask);
+            return self.openMenu() catch |err| self.fail(err);
+        }
         self.menu_seen = true;
         _ = c.EndMenu();
         self.app.post(.{ .context = self, .call = finishTask }) catch |err| self.fail(err);
