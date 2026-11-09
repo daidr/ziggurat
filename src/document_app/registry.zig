@@ -483,6 +483,9 @@ pub const Registry = struct {
         const document = self.documentOf(window) orelse return .allow;
         const slot = self.get(document) catch return .allow;
         if (!slot.blocks()) return .allow;
+        // The OS ends the session: there is no time to ask. The document's
+        // recovery snapshot keeps its unsaved changes for the next launch.
+        if (reason == .session_end) return .allow;
         if (reason == .quit) {
             self.blockQuit();
         } else {

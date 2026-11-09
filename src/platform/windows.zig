@@ -1281,8 +1281,22 @@ fn dispatchProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callc
         }
         return 0;
     }
+    if (message == c.WM_ENDSESSION and wp != 0) {
+        // The session ends once this returns: finish the quit here.
+        const address = c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA);
+        if (address != 0) {
+            const app: *core.App = @ptrFromInt(@as(usize, @bitCast(address)));
+            app.endSession();
+        }
+        return 0;
+    }
     if (message == c.WM_NCDESTROY) _ = c.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
     return c.DefWindowProcW(hwnd, message, wp, lp);
+}
+/// The App's dispatcher window, which hears the session's end
+/// (WM_QUERYENDSESSION, WM_ENDSESSION) for the whole App.
+pub fn dispatcherWindow(app: *core.App) ?*anyopaque {
+    return app.native.dispatcher;
 }
 
 fn size(hwnd: c.HWND) core.Size {
