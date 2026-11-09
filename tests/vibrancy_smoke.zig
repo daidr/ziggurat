@@ -66,8 +66,8 @@ const State = struct {
     surface: Surface = .{},
     menu_seen: bool = false,
     caps: z.WindowCapabilities = undefined,
-    attempts: usize = 0,
     failure: ?anyerror = null,
+    thread_failure: ?anyerror = null,
     fn fail(self: *State, err: anyerror) void {
         std.debug.print("vibrancy smoke failed: {s}\n", .{@errorName(err)});
         if (self.failure == null) self.failure = err;
@@ -137,26 +137,44 @@ const State = struct {
                 // F10 opens the menus in a popup, a native menu loop in
                 // which App tasks keep running, with or without a material.
                 _ = c.PostMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_KEYMENU, 0);
-                try self.app.post(.{ .context = self, .call = watchMenu });
+                const thread = try std.Thread.spawn(.{}, watchMenu, .{ self, c.GetCurrentThreadId() });
+                thread.detach();
                 return;
             }
         }
         self.finish();
     }
-    fn watchMenu(ptr: *anyopaque) void {
+    /// From another thread: waits for the main thread's menu loop, then
+    /// posts the task that closes the menu, which runs only if App tasks
+    /// keep being dispatched inside the loop.
+    fn watchMenu(self: *State, thread: u32) void {
+        var info = std.mem.zeroes(c.GUITHREADINFO);
+        info.cbSize = @sizeOf(c.GUITHREADINFO);
+        for (0..5000) |_| {
+            if (c.GetGUIThreadInfo(thread, &info) != 0 and info.flags & c.GUI_POPUPMENUMODE != 0) {
+                self.app.post(.{ .context = self, .call = closeMenu }) catch |err| return self.failLater(err);
+                return;
+            }
+            zio.sleep(std.time.ns_per_ms);
+        }
+        self.failLater(error.MenuPopupNotShown);
+    }
+    fn closeMenu(ptr: *anyopaque) void {
         const self: *State = @ptrCast(@alignCast(ptr));
         var info = std.mem.zeroes(c.GUITHREADINFO);
         info.cbSize = @sizeOf(c.GUITHREADINFO);
-        if (c.GetGUIThreadInfo(0, &info) != 0 and info.flags & c.GUI_POPUPMENUMODE != 0) {
-            self.menu_seen = true;
-            _ = c.EndMenu();
-            self.app.post(.{ .context = self, .call = finishTask }) catch |err| self.fail(err);
-            return;
-        }
-        self.attempts += 1;
-        if (self.attempts > 2000) return self.fail(error.MenuPopupNotShown);
-        zio.sleep(std.time.ns_per_ms);
-        self.app.post(.{ .context = self, .call = watchMenu }) catch |err| self.fail(err);
+        if (c.GetGUIThreadInfo(0, &info) == 0 or info.flags & c.GUI_POPUPMENUMODE == 0) return self.fail(error.MenuClosedBeforeTask);
+        self.menu_seen = true;
+        _ = c.EndMenu();
+        self.app.post(.{ .context = self, .call = finishTask }) catch |err| self.fail(err);
+    }
+    fn failLater(self: *State, err: anyerror) void {
+        self.thread_failure = err;
+        self.app.post(.{ .context = self, .call = reportThread }) catch {};
+    }
+    fn reportThread(ptr: *anyopaque) void {
+        const self: *State = @ptrCast(@alignCast(ptr));
+        self.fail(self.thread_failure.?);
     }
     fn finishTask(ptr: *anyopaque) void {
         const self: *State = @ptrCast(@alignCast(ptr));
@@ -204,7 +222,9 @@ pub fn main() !void {
 
     try app.post(.{ .context = &state, .call = State.start });
     try app.run();
+    if (watchdog.expired) std.debug.print("vibrancy smoke: timed out\n", .{});
     if (state.failure) |err| return err;
+    if (watchdog.expired) return error.Timeout;
     const caps = state.caps;
     if (windows and caps.vibrancy) try std.testing.expect(state.menu_seen);
     try state.owner.detach();
