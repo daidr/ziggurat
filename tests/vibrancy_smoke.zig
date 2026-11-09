@@ -133,9 +133,9 @@ const State = struct {
             // A window without a redirection bitmap (transparent, with or
             // without a material) has no menu bar.
             try std.testing.expectEqual(caps.transparent, c.GetMenu(hwnd) == null);
-            if (caps.vibrancy) {
+            if (caps.transparent) {
                 // F10 opens the menus in a popup, a native menu loop in
-                // which App tasks keep running.
+                // which App tasks keep running, with or without a material.
                 _ = c.PostMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_KEYMENU, 0);
                 try self.app.post(.{ .context = self, .call = watchMenu });
                 return;

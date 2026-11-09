@@ -146,9 +146,13 @@ pub const Tray = struct {
                 if (self.guid) |guid| identifier.guidItem = guid;
                 var rect = std.mem.zeroes(c.RECT);
                 if (c.Shell_NotifyIconGetRect(&identifier, &rect) >= 0) {
-                    placement.x = rect.left;
-                    placement.y = rect.top;
-                    placement.exclude = .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.bottom };
+                    if (native_menu.trayPlacement(rect, c.GetDpiForWindow(self.hwnd))) |tray| {
+                        placement = tray;
+                    } else {
+                        placement.x = rect.left;
+                        placement.y = rect.top;
+                        placement.exclude = .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.bottom };
+                    }
                 } else {
                     if (c.GetCursorPos(&cursor) == 0) return self.failed(error.MenuStartFailed);
                     placement.x = cursor.x;

@@ -169,6 +169,9 @@ pub const Placement = struct {
     exclude: ?Rect = null,
     /// Tray menus must own the foreground to be dismissed by outside clicks.
     foreground: bool = false,
+    /// TrackPopupMenuEx alignment flags; null aligns the menu's corner to
+    /// the point, beside `exclude` vertically when there is one.
+    alignment: ?c.UINT = null,
 };
 
 /// Keep at a stable address while pending. The helper window links back to
@@ -324,7 +327,7 @@ fn helperProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callcon
     var params = std.mem.zeroes(c.TPMPARAMS);
     params.cbSize = @sizeOf(c.TPMPARAMS);
     if (placement.exclude) |rect| params.rcExclude = .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.bottom };
-    const flags: c.UINT = @intCast(c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_RIGHTBUTTON | if (placement.exclude != null) c.TPM_VERTICAL else 0);
+    const flags: c.UINT = @as(c.UINT, @intCast(c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_RIGHTBUTTON)) | (placement.alignment orelse @as(c.UINT, if (placement.exclude != null) c.TPM_VERTICAL else 0));
     const command = c.TrackPopupMenuEx(menu, flags, placement.x, placement.y, target, if (placement.exclude != null) &params else null);
     tracking_depth -= 1;
     if (placement.foreground) _ = c.PostMessageW(target, c.WM_NULL, 0, 0);
@@ -338,4 +341,53 @@ fn helperProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callcon
     host.tracking = false;
     host.finish(@intCast(@max(command, 0)));
     return 0;
+}
+
+/// How far from the taskbar, in DIPs, Windows 11 opens the menus of the
+/// notification area it shows itself: centered on their icons, rather than
+/// at the pointer as Win32 menus open.
+const tray_menu_gap = 12;
+
+/// Where a tray icon's menu opens on Windows 11, as the system opens its own:
+/// centered on the icon along the taskbar, `tray_menu_gap` DIPs from it.
+/// Null on Windows 10, whose own menus open at the pointer, and for an icon
+/// that is not on the taskbar (in its overflow, or nowhere).
+pub fn trayPlacement(icon: c.RECT, dpi: u32) ?Placement {
+    if (!windows11()) return null;
+    var bar = std.mem.zeroes(c.APPBARDATA);
+    bar.cbSize = @sizeOf(c.APPBARDATA);
+    if (c.SHAppBarMessage(c.ABM_GETTASKBARPOS, &bar) == 0) return null;
+    if (!(icon.left < bar.rc.right and bar.rc.left < icon.right and icon.top < bar.rc.bottom and bar.rc.top < icon.bottom)) return null;
+    return trayMenuAt(icon, bar.rc, bar.uEdge, c.MulDiv(tray_menu_gap, @intCast(if (dpi == 0) 96 else dpi), 96));
+}
+/// The placement of a menu for an icon on a taskbar along an edge of its
+/// monitor (ABE_*): the point, the flags that align the menu to it, and the
+/// rectangle the menu keeps out of, the taskbar and the gap.
+pub fn trayMenuAt(icon: c.RECT, bar: c.RECT, edge: c.UINT, gap: c_int) Placement {
+    const x = @divTrunc(icon.left + icon.right, 2);
+    const y = @divTrunc(icon.top + icon.bottom, 2);
+    return switch (edge) {
+        c.ABE_TOP => .{ .x = x, .y = bar.bottom + gap, .foreground = true, .alignment = c.TPM_CENTERALIGN | c.TPM_VERTICAL, .exclude = .{ .left = bar.left, .top = bar.top, .right = bar.right, .bottom = bar.bottom + gap } },
+        c.ABE_LEFT => .{ .x = bar.right + gap, .y = y, .foreground = true, .alignment = c.TPM_VCENTERALIGN, .exclude = .{ .left = bar.left, .top = bar.top, .right = bar.right + gap, .bottom = bar.bottom } },
+        c.ABE_RIGHT => .{ .x = bar.left - gap, .y = y, .foreground = true, .alignment = c.TPM_RIGHTALIGN | c.TPM_VCENTERALIGN, .exclude = .{ .left = bar.left - gap, .top = bar.top, .right = bar.right, .bottom = bar.bottom } },
+        else => .{ .x = x, .y = bar.top - gap, .foreground = true, .alignment = c.TPM_CENTERALIGN | c.TPM_BOTTOMALIGN | c.TPM_VERTICAL, .exclude = .{ .left = bar.left, .top = bar.top - gap, .right = bar.right, .bottom = bar.bottom } },
+    };
+}
+fn windows11() bool {
+    var info: std.os.windows.RTL_OSVERSIONINFOW = undefined;
+    info.dwOSVersionInfoSize = @sizeOf(std.os.windows.RTL_OSVERSIONINFOW);
+    return std.os.windows.ntdll.RtlGetVersion(&info) == .SUCCESS and (info.dwMajorVersion > 10 or (info.dwMajorVersion == 10 and info.dwBuildNumber >= 22000));
+}
+
+test "a tray menu opens centered on its icon, a gap from the taskbar" {
+    const bar: c.RECT = .{ .left = 0, .top = 1040, .right = 1920, .bottom = 1080 };
+    const icon: c.RECT = .{ .left = 1700, .top = 1044, .right = 1732, .bottom = 1076 };
+    const bottom = trayMenuAt(icon, bar, c.ABE_BOTTOM, 12);
+    try std.testing.expectEqual(@as(i32, 1716), bottom.x);
+    try std.testing.expectEqual(@as(i32, 1028), bottom.y);
+    try std.testing.expectEqual(@as(i32, 1028), bottom.exclude.?.top);
+    const left_bar: c.RECT = .{ .left = 0, .top = 0, .right = 48, .bottom = 1080 };
+    const left = trayMenuAt(.{ .left = 8, .top = 900, .right = 40, .bottom = 932 }, left_bar, c.ABE_LEFT, 12);
+    try std.testing.expectEqual(@as(i32, 60), left.x);
+    try std.testing.expectEqual(@as(i32, 916), left.y);
 }

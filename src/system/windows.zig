@@ -500,6 +500,10 @@ pub const Owner = struct {
             self.menu_key = .{ .popup = popup, .key = key };
             _ = c.PostMessageW(self.hwnd, c.WM_CHAR, key, 0);
         }
+        // The menu loop only dispatches messages: a wake whose message the
+        // main loop dropped this turn would leave App tasks waiting until
+        // the menu closes.
+        window.app.enterNativeLoop();
         const command = c.TrackPopupMenuEx(popup, c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, point.x, point.y, self.hwnd, null);
         self.menu_key = .{};
         if (command <= 0 or window.isClosed() or self.window == null) return;

@@ -34,7 +34,7 @@ const PointerDispatch = struct {
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
 pub const AppData = struct { popup_shadow_class: c.ATOM = 0, taskbar_created: c.UINT = 0, taskbar: ?*TaskbarList = null, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
-pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, cloaked: bool = false };
+pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, cloaked: bool = false, material: core.Vibrancy = .none, glass: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } };
 var active_app: std.atomic.Value(bool) = .init(false);
 
 pub fn init(app: *core.App) !void {
@@ -880,11 +880,31 @@ fn backdropFor(material: core.Vibrancy) u32 {
 /// Windows before 11 22H2 ignore the backdrop attribute.
 pub fn setVibrancy(window: *core.WindowRecord, material: core.Vibrancy) void {
     const hwnd = window.native.hwnd;
-    const margins: Margins = if (material == .none) .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } else .{ .left = -1, .right = -1, .top = -1, .bottom = -1 };
-    _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+    window.native.material = material;
+    extendGlass(window, hwnd, true);
     const backdrop = backdropFor(material);
     _ = DwmSetWindowAttribute(hwnd, dwm_system_backdrop_type, &backdrop, @sizeOf(u32));
     _ = c.InvalidateRect(hwnd, null, c.FALSE);
+}
+/// Extends the frame over the client area for the material: a sheet over the
+/// whole window, or, for a maximized window with the system's title bar,
+/// from the bottom over the client area alone. Extended all over, the frame
+/// keeps a maximized window's caption buttons as tall as a restored one's,
+/// past its shorter title bar, where the one under the pointer shows through
+/// a translucent page; extended from the bottom, the frame's top is the
+/// title bar, which holds them.
+fn extendGlass(window: *core.WindowRecord, hwnd: c.HWND, always: bool) void {
+    var margins: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
+    if (window.native.material != .none) {
+        if (window.options.decoration == .system and !window.native.fullscreen and c.IsZoomed(hwnd) != 0) {
+            var client: c.RECT = undefined;
+            const height = if (c.GetClientRect(hwnd, &client) != 0) client.bottom - client.top else 1;
+            margins = .{ .left = 0, .right = 0, .top = 0, .bottom = @max(height, 1) };
+        } else margins = .{ .left = -1, .right = -1, .top = -1, .bottom = -1 };
+    }
+    if (!always and std.meta.eql(margins, window.native.glass)) return;
+    window.native.glass = margins;
+    _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
 }
 pub fn setBackdrop(window: *core.WindowRecord, material: core.WindowBackdrop) !void {
     const hwnd = window.native.hwnd;
@@ -1618,6 +1638,7 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             if (wp == c.SIZE_MAXIMIZED) fitWorkArea(window, hwnd);
             if (!sameWindow(window, hwnd)) return 0;
             if (wp != c.SIZE_MINIMIZED) fillUncovered(window, hwnd, lp);
+            if (wp != c.SIZE_MINIMIZED and window.native.material != .none) extendGlass(window, hwnd, false);
             window.emitPointerLifecycle(operation, .{ .resize = size(hwnd) });
             window.emitPointerState(operation);
             invalidate(window);
