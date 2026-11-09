@@ -1,10 +1,12 @@
 name: native checks
 
 on:
-  # Pull requests already run every check on their head; a branch push would
-  # start a second, identical run.
+  # Pull requests run only the platforms their files touch (see the changes
+  # job); every push to dev runs all of them plus the ReleaseSafe unit tests,
+  # so nothing a narrowed pull request skipped goes unchecked. Feature branch
+  # pushes would start a second run beside the pull request's.
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -18,10 +20,69 @@ permissions:
 
 concurrency:
   group: native-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A new push to a pull request replaces its running checks. Pushes to dev
+  # and main finish; GitHub keeps only the newest one waiting behind them.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    # Chooses the native jobs a pull request needs from its file list
+    # (scripts/ci-changes.py): files named for one platform select only that
+    # platform, documentation selects none, anything else selects all. The
+    # full-ci label, manual runs and pushes select everything. It runs on the
+    # macOS runner, whose jobs are short, so no job waits behind a busy runner
+    # to learn it can skip; the repository variable CHANGES_RUNS_ON overrides
+    # the labels (it needs python3 and curl).
+    runs-on: ${{ fromJSON(vars.CHANGES_RUNS_ON || '["self-hosted", "macOS"]') }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      windows: ${{ steps.select.outputs.windows }}
+      linux: ${{ steps.select.outputs.linux }}
+      macos: ${{ steps.select.outputs.macos }}
+      release_tests: ${{ steps.select.outputs.release_tests }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PULL: ${{ github.event.pull_request.number }}
+          FULL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+        run: |
+          set -eu
+          choose() { python3 -B scripts/ci-changes.py "$@" | tee -a "$GITHUB_OUTPUT"; }
+          if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then
+            pages="$RUNNER_TEMP/pull-files.jsonl"
+            : > "$pages"
+            page=1
+            # 30 pages of 100 is the API's 3000-file cap.
+            while [ "$page" -le 30 ]; do
+              curl -fsSL --retry 4 --connect-timeout 20 --max-time 60 \
+                -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PULL/files?per_page=100&page=$page" > "$RUNNER_TEMP/page.json"
+              count=$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$RUNNER_TEMP/page.json")
+              python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$RUNNER_TEMP/page.json" >> "$pages"
+              [ "$count" -lt 100 ] && break
+              page=$((page + 1))
+            done
+            # The checkout is the merge result, so the import graph matches it.
+            choose --github-files --explain < "$pages"
+          elif [ "$EVENT" = pull_request ] || { [ "$EVENT" = push ] && [ "$REF" = refs/heads/dev ]; }; then
+            # ReleaseSafe on main and manual runs comes from their full matrix.
+            choose --all --release-tests < /dev/null
+          else
+            choose --all < /dev/null
+          fi
+
   windows:
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
     # Self-hosted Windows x64 runner with PowerShell 7, Python 3 and tar on
     # PATH, running in an interactive desktop session. The repository variable
     # WINDOWS_RUNS_ON overrides the labels with a JSON value, for example
@@ -32,8 +93,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests run Debug only; ReleaseSafe runs on main and manual runs.
-        optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+        # Pull requests and dev run Debug; ReleaseSafe runs on main and manual runs.
+        optimize: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/dev')) && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
     env:
       # A cold Debug build fills about 24 GB of Zig cache, and the runner's
       # 60 GB data disk also holds the page file and the runner. Keep the
@@ -115,6 +176,8 @@ jobs:
           retention-days: 7
 
   linux:
+    needs: changes
+    if: needs.changes.outputs.linux == 'true'
     # Self-hosted Linux runner (Debian/Ubuntu with apt). The repository variable
     # LINUX_RUNS_ON overrides the labels with a JSON value, for example
     # '"ubuntu-24.04"' to return to a hosted runner.
@@ -123,8 +186,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests run Debug only; ReleaseSafe runs on main and manual runs.
-        optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+        # Pull requests and dev run Debug; ReleaseSafe runs on main and manual runs.
+        optimize: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/dev')) && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
     env:
       # Each job adds several GB to the shared Zig caches and the script wipes
       # them whole once they pass the cap, so a small cap made most jobs start
@@ -293,10 +356,13 @@ jobs:
           retention-days: 7
 
   linux-release-tests:
-    # Unit tests built ReleaseSafe on every pull request. Zig 0.17.0 has
-    # optimizer-only miscompiles (see zio.asUnsigned) that Debug runs miss,
-    # and main publishes ReleaseSafe builds.
-    if: github.event_name == 'pull_request'
+    # Unit tests built ReleaseSafe on every push to dev, and on pull requests
+    # labelled full-ci. Zig 0.17.0 has optimizer-only miscompiles (see
+    # zio.asUnsigned) that Debug runs miss, and main publishes ReleaseSafe
+    # builds. A cold build takes about 45 minutes on the one Linux runner, so
+    # running it for every pull request held every other Linux job back.
+    needs: changes
+    if: needs.changes.outputs.release_tests == 'true'
     runs-on: ${{ fromJSON(vars.LINUX_RUNS_ON || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 75
     env:
@@ -321,6 +387,8 @@ jobs:
         run: zig build test -Doptimize=ReleaseSafe
 
   macos:
+    needs: changes
+    if: needs.changes.outputs.macos == 'true'
     # Self-hosted macOS runner with the Xcode command line tools, which give
     # Zig the SDK. The repository variable MACOS_RUNS_ON overrides the labels
     # with a JSON value, for example '"macos-15"' for a hosted runner.
@@ -329,8 +397,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests run Debug only; ReleaseSafe runs on main and manual runs.
-        optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+        # Pull requests and dev run Debug; ReleaseSafe runs on main and manual runs.
+        optimize: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/dev')) && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -344,6 +412,9 @@ jobs:
       - name: Unit tests and compile everything for macOS
         timeout-minutes: 30
         run: |
+          # The Linux and Windows jobs also check formatting, but a macOS-only
+          # pull request runs neither.
+          zig fmt --check build.zig build_support src examples tests tools
           zig build test check --test-timeout 5m -Doptimize=${{ matrix.optimize }} --summary failures
       - name: AppKit window, system, file-watch, audio and automation smokes
         timeout-minutes: 10
@@ -463,6 +534,8 @@ jobs:
           retention-days: 7
 
   macos-packaging:
+    needs: changes
+    if: needs.changes.outputs.macos == 'true'
     # Self-hosted macOS runner with the Xcode command line tools. The
     # repository variable MACOS_RUNS_ON overrides the labels with a JSON
     # value, for example '"macos-15"' to use a hosted runner.
