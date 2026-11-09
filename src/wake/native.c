@@ -53,9 +53,16 @@ static const CFTimeInterval parked = 1.0e10;
 static void release_state(ZWake *state) { atomic_fetch_sub(&states, 1); free(state); }
 static void ready(CFRunLoopTimerRef timer, void *data) {
     ZWake *state = data;
-    /* A cancel or rearm earlier in the same run loop pass wins over a fire
-       the run loop had already selected. */
-    if (state->closed || !state->armed || CFAbsoluteTimeGetCurrent() < state->due) return;
+    /* A cancel earlier in the same run loop pass wins over a fire the run
+       loop had already selected. */
+    if (state->closed || !state->armed) return;
+    /* The run loop schedules on its own clock and can call a hair before the
+       deadline by this one. Moving the date inside the callout keeps it: the
+       run loop only advances a repeating timer whose date the callout left. */
+    if (CFAbsoluteTimeGetCurrent() < state->due) {
+        CFRunLoopTimerSetNextFireDate(timer, state->due);
+        return;
+    }
     state->armed = 0;
     CFRunLoopTimerSetNextFireDate(timer, CFAbsoluteTimeGetCurrent() + parked);
     state->callbacks++;
