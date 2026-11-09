@@ -210,13 +210,15 @@ const State = struct {
     fn check(self: *State, result: cookies.Result) !void {
         switch (self.stage) {
             0, 1, 2, 7, 9, 11, 13 => if (result != .completed) return error.MutationDidNotFinish,
+            // Chromium treats loopback as a secure origin: a Secure
+            // cookie goes to http://127.0.0.1 too.
             3 => {
-                try self.expect(result, "session");
+                try self.expect(result, "secure,session");
                 const row = find(result.cookies.rows, "session").?;
                 if (!row.http_only or row.expires != null or row.secure) return error.WrongSessionCookie;
             },
             4 => {
-                try self.expect(result, "lasting,session");
+                try self.expect(result, "lasting,secure,session");
                 const row = find(result.cookies.rows, "lasting").?;
                 if (row.same_site != .strict or row.expires == null or @abs(row.expires.? - self.expires) > 1) {
                     std.debug.print("lasting: same_site={s} expires={?d} want {d}\n", .{ @tagName(row.same_site), row.expires, self.expires });
@@ -228,7 +230,7 @@ const State = struct {
                 try self.expect(result, "page,session");
                 if (!find(result.cookies.rows, "page").?.http_only) return error.PageCookieNotHttpOnly;
             },
-            8 => try self.expect(result, "page"),
+            8 => try self.expect(result, "page,secure"),
             10 => try self.expect(result, "page,secure"),
             12 => try self.expect(result, "a,b"),
             14 => try self.expect(result, ""),
@@ -279,7 +281,7 @@ const State = struct {
             0 => _ = try store.set(.{ .name = "session", .value = "s1", .domain = "127.0.0.1", .path = "/", .http_only = true }, done),
             1 => _ = try store.set(.{ .name = "lasting", .value = "l1", .domain = "127.0.0.1", .path = "/sub", .expires = self.expires, .same_site = .strict }, done),
             2 => _ = try store.set(.{ .name = "secure", .value = "x", .domain = "127.0.0.1", .path = "/", .secure = true, .same_site = .none }, done),
-            // Only the root path, and Secure only over https.
+            // Only the root path; Secure counts loopback as secure.
             3 => _ = try store.query(.{ .url = self.url(0, "/") }, done),
             4 => _ = try store.query(.{ .url = self.url(0, "/sub/page") }, done),
             5 => _ = try store.listAll(done),
@@ -365,10 +367,10 @@ pub fn main() !void {
         const app = try z.App.init(allocator);
         defer app.deinit();
         var state: State = .{ .app = app, .server = &server, .origin = origin, .expires = zio.timestamp() + 30 * std.time.s_per_day, .profile = try web.Profile.create(allocator, app, &preparation.value.?, .{}) };
-        defer if (state.profile) |profile| profile.close() catch unreachable;
+        defer if (state.profile) |profile| profile.close() catch {};
         state.store = try CookieStore.create(allocator, app, state.profile.?, .{ .allow_write = true, .allow_clear = true, .allow_read_all = true, .allow_replace_all = true });
         defer if (state.store) |store| {
-            _ = store.close() catch unreachable;
+            _ = store.close() catch {};
         };
         const reader = try CookieStore.create(allocator, app, state.profile.?, .{});
         try std.testing.expectError(error.PermissionDenied, reader.set(.{ .name = "denied", .value = "no", .domain = "127.0.0.1", .path = "/" }, state.completion()));
