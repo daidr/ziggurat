@@ -235,9 +235,11 @@ fn runWindows(require_wm: bool) !void {
     const previous = c.GetThreadDesktop(c.GetCurrentThreadId());
     const desktop = c.CreateDesktopW(&wide, null, null, 0, c.DESKTOP_CREATEWINDOW | c.DESKTOP_CREATEMENU | c.DESKTOP_READOBJECTS | c.DESKTOP_WRITEOBJECTS, null);
     if (desktop == null) return error.CreateDesktopFailed;
-    defer std.debug.assert(c.CloseDesktop(desktop) != 0);
+    // Neither can be undone while the thread still has a window there, such
+    // as one an input method left behind; the process ends right after.
+    defer _ = c.CloseDesktop(desktop);
     if (c.SetThreadDesktop(desktop) == 0) return error.SetThreadDesktopFailed;
-    defer std.debug.assert(c.SetThreadDesktop(previous) != 0);
+    defer _ = c.SetThreadDesktop(previous);
     try runRelationships(require_wm);
 }
 

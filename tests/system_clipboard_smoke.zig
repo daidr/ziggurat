@@ -240,7 +240,9 @@ const Round = struct {
     fn start(context: *anyopaque) void {
         const self: *Round = @ptrCast(@alignCast(context));
         self.board.write(&.{.{ .format = .{ .kind = .text }, .data = "round" }}) catch self.app.quit();
-        self.board.read(&self.request, .{ .kind = .text }, &self.buffer, self, result, .{}) catch self.app.quit();
+        // Another process, such as an input method, can hold the clipboard
+        // for a moment on a busy machine; wait for it as long as allowed.
+        self.board.read(&self.request, .{ .kind = .text }, &self.buffer, self, result, .{ .attempts = clipboard.max_retry_attempts, .interval_ms = 100 }) catch self.app.quit();
     }
 };
 fn rounds(allocator: std.mem.Allocator) !void {
