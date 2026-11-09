@@ -226,9 +226,16 @@ static LRESULT CALLBACK embed_subclass(HWND hwnd,UINT m,WPARAM wp,LPARAM lp,UINT
     (void)id;
     EmbedLayer *l=(EmbedLayer *)data;
     if ((m>=WM_MOUSEFIRST&&m<=WM_MOUSELAST)) {
-        LRESULT result=0;
         BOOL down=embed_button_down(m);
         Embed *before=l->capture;
+        /* A release goes to the page that took the press before the
+           content's handling lets go of the capture, which would forget
+           that page. */
+        if (embed_button_up(m)) {
+            embed_mouse(l,m,wp,lp);
+            return DefSubclassProc(hwnd,m,wp,lp);
+        }
+        LRESULT result=0;
         /* The content's handling first: a press there may take the focus
            to the window, which the page then takes. */
         if (!(m==WM_MOUSEWHEEL||m==WM_MOUSEHWHEEL)) result=DefSubclassProc(hwnd,m,wp,lp);
@@ -243,7 +250,8 @@ static LRESULT CALLBACK embed_subclass(HWND hwnd,UINT m,WPARAM wp,LPARAM lp,UINT
         if (l->hover&&!l->capture) { embed_leave(l->hover);l->hover=NULL; }
         break;
     case WM_CAPTURECHANGED:
-        if ((HWND)lp!=hwnd) l->capture=NULL;
+        /* Another window took the capture: the press is over. */
+        if ((HWND)lp!=hwnd&&l->capture) { embed_leave(l->capture);l->capture=NULL; }
         break;
     case WM_SETCURSOR:
         if ((HWND)wp==hwnd&&LOWORD(lp)==HTCLIENT&&embed_set_cursor(l)) return TRUE;
