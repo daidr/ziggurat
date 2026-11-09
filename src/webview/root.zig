@@ -2523,7 +2523,9 @@ pub const View = struct {
         var password: [http_auth.limits.credential_bytes + 1:0]u16 = undefined;
         if (!wideCredential(&user, credentials.username) or !wideCredential(&password, credentials.password)) return;
         defer std.crypto.secureZero(u16, &password);
-        _ = zwv_auth_answer(call, &user, &password);
+        // An answer the engine refused leaves the sign-in cancelled.
+        const hr = zwv_auth_answer(call, &user, &password);
+        if (hr < 0) self.last_hresult = hr;
     }
     fn wideCredential(out: *[http_auth.limits.credential_bytes + 1:0]u16, text: []const u8) bool {
         if (text.len > http_auth.limits.credential_bytes) return false;
