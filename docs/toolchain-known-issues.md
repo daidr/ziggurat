@@ -13,6 +13,8 @@ The self-hosted COFF linker needs four workarounds, all applied only to those st
 - With libc linked, the calls that `@sin`, `@cos`, `@exp`, `@log` and similar lower to are bound to the UCRT imports rather than compiler-rt's weak definitions (LLVM builds import none of them). UCRT differs in the last bit for some inputs, such as sin(-pi/4), which broke pixel-exact SVG marker tests. `src/c/windows/math` compiles compiler-rt's own transcendental code, copied from the Zig installation at build time, into a static library with strong `sin`/`cos`/`tan`/`exp`/`exp2`/`log`/`log2`/`log10` definitions and their `f` variants. Correctly rounded functions such as `sqrt`, `floor` and `fma` still come from UCRT.
 - The linker drops resource sections, both from the `.rc` file a module adds and from COFF objects, so executables lost their icons, version information and manifest (and with it common controls 6, DPI awareness and the supported-OS list). `build.zig` takes the resource file off the executable, compiles it with `zig rc /:output-format coff`, and `tools/pe_resources.zig` adds a `.rsrc` section and resource directory to the linked image in place, before it is installed or run.
 
+Steps that link the SQLite amalgamation (`test-sqlite`) keep LLVM: built by the self-hosted backend and linker, most of their tests crash with an access violation at once, and the cause is not yet located.
+
 The self-hosted backend writes no PDB, so installs skip it and panics print no stack trace (`(empty stack trace)`). To debug a Windows-only crash, rebuild with `-Dwindows-llvm=true`.
 
 ## Linux x86 Debug optional-error comparison

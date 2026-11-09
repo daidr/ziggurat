@@ -3392,6 +3392,16 @@ pub fn build(b: *std.Build) void {
 /// so they link src/c/windows/math, which defines those symbols from
 /// compiler-rt's code. The self-hosted backend writes no PDB, so installs
 /// skip it.
+/// Debug images with the SQLite amalgamation crash in most tests when Zig's
+/// own backend and linker build them; those keep LLVM.
+fn linksSqlite(compile: *std.Build.Step.Compile) bool {
+    if (std.mem.eql(u8, compile.name, "sqlite-native")) return true;
+    for (compile.root_module.getGraph().modules) |module| for (module.link_objects.items) |object| switch (object) {
+        .other_step => |other| if (std.mem.eql(u8, other.name, "sqlite-native")) return true,
+        else => {},
+    };
+    return false;
+}
 fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
     var steps: std.array_hash_map.Auto(*std.Build.Step, void) = .empty;
     var it = b.top_level_steps.iterator();
@@ -3407,6 +3417,7 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
         if (llvm) continue;
         const optimize = compile.root_module.optimize orelse .debug;
         if (optimize != .debug) continue;
+        if (linksSqlite(compile)) continue;
         compile.use_llvm = false;
         for (compile.root_module.getGraph().modules) |module| for (module.link_objects.items) |*object| switch (object.*) {
             .system_lib => |library| if (std.ascii.eqlIgnoreCase(library.name, "uiautomationcore")) {
