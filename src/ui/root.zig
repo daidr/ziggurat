@@ -24,8 +24,8 @@ const GpuOptions = if (builtin.os.tag == .windows) d3d11.Options else if (builti
 /// and Gaussian filters). Without them a frame using one draws in software.
 const gpu_layers = build_options.gpu and builtin.os.tag == .windows;
 /// Whether the GPU renderer keeps its frame for the next to draw only what
-/// changed (Metal, OpenGL).
-const gpu_damage = build_options.gpu and (builtin.os.tag == .macos or builtin.os.tag == .linux or builtin.os.tag == .wasi);
+/// changed (Metal, OpenGL, Direct3D 11).
+const gpu_damage = build_options.gpu and (builtin.os.tag == .macos or builtin.os.tag == .linux or builtin.os.tag == .wasi or builtin.os.tag == .windows);
 pub const Rect = input.Rect;
 pub const layout = @import("layout.zig");
 pub const grid = @import("grid.zig");
@@ -594,6 +594,9 @@ pub const Context = struct {
     gpu_domain: ?*gpu_resources.DeviceDomain = null,
     attached_render_mode: RenderMode = .automatic,
     gpu_unavailable: bool = false,
+    /// After a frame the GPU did not finish in time, frames draw in memory
+    /// until the rest is over.
+    gpu_rest: @import("gpu_rest.zig").Rest = .{},
     gpu_wait: ?z.NativeWaitToken = null,
     last_paint_size: ?z.Size = null,
     deferred_frames: usize = 0,
@@ -2936,6 +2939,8 @@ pub const Context = struct {
     fn gpuFailure(self: *Context, window: z.Window, err: anyerror) void {
         if (build_options.gpu) {
             self.fallbacks += 1;
+            // The driver is wedged, not gone: leave it alone a while.
+            if (err == error.GpuTimedOut) self.gpu_rest.timedOut(zio.milliTimestamp());
             // Keep the accepted GPU front until a software end succeeds.
             // Device/domain validation failure cannot be repaired by readback.
             self.gpu_renderer.discard();
@@ -3171,7 +3176,8 @@ pub const Context = struct {
                 self.last_paint_size = paint.size;
                 if (self.input_state.scopes != null) self.beginShortcutAttempt();
                 var using_gpu = false;
-                if (build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi) {
+                if (build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi and self.gpu_rest.allowed(zio.milliTimestamp())) {
+                    if (comptime builtin.os.tag == .windows) self.gpu_renderer.setKeepPlane(true);
                     if (self.gpu_renderer.begin(paint)) {
                         using_gpu = true;
                     } else |err| {
@@ -4714,6 +4720,17 @@ pub const Frame = struct {
         }
         try self.context.command_buffer.backdropShader(entry);
     }
+    /// Clears `box`, in the window's DIPs and inside corners of `radius`,
+    /// to transparent: native content composed under the window's frames
+    /// shows there, as a web view's page in native UI does on Windows
+    /// (`z.Window.composeUnder`), under what the frame paints after it.
+    pub fn composedHole(self: *Frame, box: Rect, radius: f32) void {
+        if (box.width <= 0 or box.height <= 0) return;
+        const corner = @min(@max(radius, 0), @min(box.width, box.height) / 2);
+        self.context.command_buffer.backdropEffect(.{ .bounds = box, .radius = corner, .kind = .hole, .fallback = .{ .r = 0, .g = 0, .b = 0, .a = 0 } }) catch |err| {
+            self.failure = self.failure orelse err;
+        };
+    }
     /// Leaves a hole for the system's glass of `glass` over `box` and notes
     /// where it shows, when the window draws it there: not under Reduce
     /// Transparency, for an interactive glass, inside a transform, group or
@@ -5290,6 +5307,7 @@ fn nativeRect(bounds: affine.Rect) Rect {
 
 test {
     _ = gdi;
+    _ = @import("gpu_rest.zig");
     _ = opacity_group;
     _ = clip_mask;
     _ = @import("mask_mix.zig");

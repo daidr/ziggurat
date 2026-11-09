@@ -10,7 +10,7 @@ const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struc
 pub const max_nodes = 128;
 pub const text_capacity = 32768;
 pub const root_id: u64 = 0;
-pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image, tree, tree_item, table, table_header, column_header, table_row, token_field, token, popup, calendar, color_well, dialog, alert_dialog, menu, menu_item, menu_item_checkbox, menu_item_radio, region, log, timer, alert, separator, row_header, option, article, cell, heading, grid, tree_grid, deletion, insertion };
+pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image, tree, tree_item, table, table_header, column_header, table_row, token_field, token, popup, calendar, color_well, dialog, alert_dialog, menu, menu_item, menu_item_checkbox, menu_item_radio, region, log, timer, alert, separator, row_header, option, article, cell, heading, grid, tree_grid, deletion, insertion, tab_panel, main, banner, content_info, complementary };
 /// The kind of popup an element opens, as ARIA's aria-haspopup.
 pub const Popup = enum(u3) { none, menu, list_box, tree, grid, dialog };
 /// Which item an element is the current one of, as ARIA's aria-current:
@@ -122,7 +122,9 @@ pub const Node = struct {
     /// Native content inside the node whose own tree assistive technology
     /// reads there, such as a web view's page: its GtkWidget on Linux,
     /// whose accessible becomes the node's first child, or its NSView on
-    /// macOS, which becomes the element's first child. Ignored on Windows.
+    /// macOS, which becomes the element's first child, or WebView2's UI
+    /// Automation provider of the page on Windows, which the node answers
+    /// with.
     native: ?*anyopaque = null,
 };
 /// Nodes holding native content (`Node.native`) in one publication.
@@ -1075,7 +1077,7 @@ pub const Bridge = struct {
             const len = std.unicode.utf8ToUtf16Le(&units, item.text) catch continue;
             _ = zua_announce(self.native.?, &units, @intCast(len), @intFromBool(item.assertive));
         }
-        if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
+        {
             // The trees of native content, such as web pages, inside the
             // nodes standing for them.
             var ids: [max_native_pages]u64 = undefined;

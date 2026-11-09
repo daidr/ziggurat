@@ -55,6 +55,7 @@ extern fn zmtl_rebuild(*anyopaque) c_int;
 extern fn zmtl_offscreen_prepare(*anyopaque, u32, u32) c_int;
 extern fn zmtl_texture(*anyopaque, *const drawing.GpuTextureToken, *const drawing.ImagePlan) c_int;
 extern fn zmtl_inject_loss(*anyopaque) void;
+extern fn zmtl_inject_timeout(*anyopaque) void;
 extern fn zmtl_offscreen_commit(*anyopaque) void;
 extern fn zmtl_offscreen_objects(*anyopaque) u32;
 extern fn zmtl_read_front(*anyopaque, [*]u32, u32, u32) c_int;
@@ -118,7 +119,7 @@ extern fn zmtl_test_layer_under_subviews(*anyopaque) c_int;
 extern fn zmtl_test_layer_flipped(*anyopaque) c_int;
 extern fn zmtl_test_atlas_levels(*anyopaque) u32;
 
-const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64, effect_passes: u64, layers: u64, filter_passes: u64, partial_frames: u64, cached_pipelines: u64, backdrops: u64, indicators: u64, offscreen_targets: u64, device_losses: u64, sweeps: u64 };
+const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64, effect_passes: u64, layers: u64, filter_passes: u64, partial_frames: u64, cached_pipelines: u64, backdrops: u64, indicators: u64, offscreen_targets: u64, device_losses: u64, sweeps: u64, timeouts: u64 };
 /// A backdrop effect's plan for src/ui/metal.m (ZmGlass).
 const Glass = extern struct { box: [4]f32, clip: [4]f32, tone: [4]f32, tint: [4]f32, line: [4]f32, line2: [4]f32, misc: [4]f32, misc2: [4]f32, background: [4]f32, fill: [4]f32, region: [4]u32, out: [4]u32 };
 const GlassLevel = extern struct { radius: u32, lo: f32, hi: f32, weights: u32 };
@@ -150,7 +151,7 @@ pub const Options = struct {
 /// backdrops backdrop effects and indicators loading indicators drawn,
 /// offscreen_targets offscreen targets made and device_losses the devices
 /// this renderer lost with its domain.
-pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, effect_passes: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, cached_pipelines: u64 = 0, backdrops: u64 = 0, indicators: u64 = 0, offscreen_targets: u64 = 0, device_losses: u64 = 0, sweeps: u64 = 0 };
+pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, effect_passes: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, cached_pipelines: u64 = 0, backdrops: u64 = 0, indicators: u64 = 0, offscreen_targets: u64 = 0, device_losses: u64 = 0, sweeps: u64 = 0, timeouts: u64 = 0 };
 
 /// Renderers and device domains alive.
 pub fn liveObjects() u32 {
@@ -308,6 +309,8 @@ pub const Renderer = struct {
                 self.capturing = true;
                 return error.NotDrawingToScreen;
             },
+            // A frame before did not finish in time: the GPU is wedged.
+            5 => return error.GpuTimedOut,
             else => return error.GraphicsFailed,
         }
         self.render_scope = scope;
@@ -359,6 +362,11 @@ pub const Renderer = struct {
     /// The next offscreen frame fails as one on a removed device does.
     pub fn injectDeviceLoss(self: *Renderer) void {
         if (self.native) |native| zmtl_inject_loss(native);
+    }
+    /// The next frame reports that one before it did not finish in time,
+    /// as after the watchdog killed it.
+    pub fn injectTimeout(self: *Renderer) void {
+        if (self.native) |native| zmtl_inject_timeout(native);
     }
     pub fn end(self: *Renderer) !void {
         if (!self.active) return error.NotDrawing;

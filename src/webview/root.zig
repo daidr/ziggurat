@@ -601,7 +601,7 @@ const NativeActions = extern struct {
     download_offer: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, [*:0]const u16, i64, *anyopaque) callconv(.c) void = null,
     download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
-const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, audio_muted: bool = false, content_verdict: ?ContentVerdict = null, content_style: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null, context_menu: u32 = 0, context_offer: ?*const fn (*anyopaque, *const NativeContextTarget, [*]const NativeContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null, gestures: u32 = 0 };
+const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, audio_muted: bool = false, content_verdict: ?ContentVerdict = null, content_style: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null, context_menu: u32 = 0, context_offer: ?*const fn (*anyopaque, *const NativeContextTarget, [*]const NativeContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null, gestures: u32 = 0, composition: bool = false };
 const NativeContextItem = extern struct { name: [*:0]const u16, label: [*:0]const u16, kind: u32, flags: u32 };
 const NativeContextTarget = extern struct { link: ?[*:0]const u16, link_text: ?[*:0]const u16, image: ?[*:0]const u16, media: ?[*:0]const u16, selection: ?[*:0]const u16, frame: ?[*:0]const u16, editable: u32 };
 const PermissionScratch = struct {
@@ -758,6 +758,11 @@ extern fn zwv_create(?*anyopaque, [*:0]const u16, [*:0]const u16, ?[*:0]const u1
 extern fn zwv_close(*anyopaque) void;
 extern fn zwv_resize(*anyopaque) i32;
 extern fn zwv_viewport(*anyopaque, i32, i32, i32, i32, bool) i32;
+extern fn zwv_embed_place(*anyopaque, *const [4]f32, *const [4]f32, *const [2]f32, *const [4]f32, [*]const f32, u32, bool, bool) i32;
+extern fn zwv_embed_tab_into(*anyopaque, bool) i32;
+extern fn zwv_embed_focused(*anyopaque) c_int;
+extern fn zwv_embed_automation(*anyopaque) ?*anyopaque;
+extern fn zwv_embed_test_bounds(*anyopaque, *[4]i32, *c_int) i32;
 extern fn zwv_parent_position(*anyopaque) i32;
 extern fn zwv_session_viewport(*anyopaque, i32, i32, bool) i32;
 extern fn zwv_post(*anyopaque, [*:0]const u16) i32;
@@ -1372,6 +1377,10 @@ pub const View = struct {
     on_event: *const fn (*anyopaque, *View, Event) void,
     window: ?z.Window = null,
     region: ?z.composition.Region = null,
+    /// The window's frames show their alpha over this page, composed under
+    /// them (`Window.composeUnder`), while it is attached to a region on
+    /// Windows.
+    composed_under: bool = false,
     session: ?*PageSession = null,
     attachment_phase: enum { detached, attaching, attached, detaching } = .detached,
     native: ?*anyopaque = null,
@@ -1557,11 +1566,17 @@ pub const View = struct {
         self.region = region;
         self.window = snapshot.window;
         errdefer {
+            if (self.composed_under) snapshot.window.composeUnder(false);
+            self.composed_under = false;
             self.discardNativeAttachment();
             self.region = null;
             self.window = null;
         }
         try self.startNative(self.access().?);
+        if (!is_webkit and !self.composed_under) {
+            snapshot.window.composeUnder(true);
+            self.composed_under = true;
+        }
         // Native preparation releases foreign scratch before returning. Its
         // final allocator callback may have revoked this provisional region.
         if (self.attachmentClosed() or appStopping(snapshot.window)) return error.Closed;
@@ -1631,7 +1646,23 @@ pub const View = struct {
             }
             return;
         }
-        self.last_hresult = zwv_viewport(native, edges[0], edges[1], edges[2], edges[3], viewport.visible and b.width > 0 and b.height > 0);
+        if (self.region != null) {
+            // The page composes under the window's frames: placed by its
+            // clip, frame and layout size, cut to its corners, and taking
+            // the pointer outside what the content paints over it.
+            const to = scale;
+            const shown = viewport.shown();
+            const clip: [4]f32 = .{ shown.x * to, shown.y * to, shown.width * to, shown.height * to };
+            const frame: [4]f32 = .{ b.x * to, b.y * to, b.width * to, b.height * to };
+            const size = viewport.layoutSize();
+            const layout: [2]f32 = .{ @max(1, @round(size[0] * to)), @max(1, @round(size[1] * to)) };
+            const radii: [4]f32 = .{ viewport.radii[0] * to, viewport.radii[1] * to, viewport.radii[2] * to, viewport.radii[3] * to };
+            var covers: [4 * z.composition.max_covers]f32 = undefined;
+            const list = viewport.coverList();
+            for (list, 0..) |cover, index| covers[4 * index ..][0..4].* = .{ cover.x * to, cover.y * to, cover.width * to, cover.height * to };
+            const wheel = if (self.config) |config| config.options.scroll_to_container else false;
+            self.last_hresult = zwv_embed_place(native, &clip, &frame, &layout, &radii, &covers, @intCast(list.len), viewport.visible and b.width > 0 and b.height > 0, wheel);
+        } else self.last_hresult = zwv_viewport(native, edges[0], edges[1], edges[2], edges[3], viewport.visible and b.width > 0 and b.height > 0);
         if (self.last_hresult < 0) return error.ViewportFailed;
         if (self.attachmentClosed()) return error.Closed;
     }
@@ -1772,7 +1803,7 @@ pub const View = struct {
         defer if (content_style) |value| self.allocator.free(value);
         const facts = try self.factsScript(.windows);
         defer if (facts) |value| self.allocator.free(value);
-        const settings: NativeSettings = .{ .context_menu = @backingInt(config.options.context_menu), .context_offer = if (config.options.context_menu == .handler) View.windowsContextMenu else null, .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = browserArguments(config.options), .gestures = gestureFlags(config.options), .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null };
+        const settings: NativeSettings = .{ .context_menu = @backingInt(config.options.context_menu), .context_offer = if (config.options.context_menu == .handler) View.windowsContextMenu else null, .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = browserArguments(config.options), .gestures = gestureFlags(config.options), .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null, .composition = self.region != null };
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
         errdefer {
             nativeClose(self.native.?);
@@ -3797,7 +3828,6 @@ pub const View = struct {
     /// does: at its first element that takes the focus, or its last when
     /// `back`, as Shift+Tab does. Tab past its other end gives the keyboard
     /// back to the native UI, as a Tab of its own (`KeyInput.from_page`).
-    /// WebKit backends only: WebView2 gives the page the keyboard as it is.
     pub fn tabInto(self: *View, back: bool) !void {
         _ = try self.attachedWindow();
         if (self.region == null) return error.NotSupported;
@@ -3805,21 +3835,36 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         if (is_webkit) return webkit.check(webkit.zwk_tab_into(native, @intFromBool(back)));
-        return error.UnsupportedCapability;
+        if (!self.ready) return error.NotReady;
+        self.last_hresult = zwv_embed_tab_into(native, back);
+        if (self.last_hresult < 0) return error.WebViewPropertyFailed;
     }
-    /// Whether a page shown in native UI has the keyboard. WebKit backends
-    /// only; false elsewhere.
+    /// Test hook, WebView2 only: the page's bounds in the window's client
+    /// pixels (left, top, right, bottom) as its controller has them, and
+    /// whether it shows.
+    pub fn testControllerBounds(self: *View) ?struct { edges: [4]i32, visible: bool } {
+        if (is_webkit or self.attachmentClosed()) return null;
+        const native = self.native orelse return null;
+        var edges: [4]i32 = undefined;
+        var visible: c_int = 0;
+        if (zwv_embed_test_bounds(native, &edges, &visible) < 0) return null;
+        return .{ .edges = edges, .visible = visible != 0 };
+    }
+    /// Whether a page shown in native UI has the keyboard.
     pub fn holdsKeyboard(self: *View) bool {
-        if (!is_webkit or self.region == null or self.attachmentClosed()) return false;
+        if (self.region == null or self.attachmentClosed()) return false;
         const native = self.native orelse return false;
+        if (!is_webkit) return zwv_embed_focused(native) != 0;
         return webkit.zwk_has_focus(native) != 0;
     }
     /// The native object whose accessible holds the page's tree, for the
     /// node of native UI standing for the page (`accessibility.Node.native`):
-    /// the page's widget on Linux, its WKWebView on macOS, null elsewhere.
+    /// the page's widget on Linux, its WKWebView on macOS, WebView2's UI
+    /// Automation provider of the page on Windows.
     pub fn accessibleNative(self: *View) ?*anyopaque {
-        if (!is_webkit or self.attachmentClosed()) return null;
+        if (self.attachmentClosed()) return null;
         const native = self.native orelse return null;
+        if (!is_webkit) return if (self.region != null) zwv_embed_automation(native) else null;
         return webkit.zwk_widget(native);
     }
     fn audioResult(self: *View, hr: i32) !void {
@@ -4368,6 +4413,15 @@ pub const View = struct {
                 if (self.attachmentClosed() or appStopping(window) or self.recovering) return;
                 self.on_event(self.context, self, .{ .process_failed = .{ .native_kind = hr } });
             },
+            20, 21 => {
+                // Tab left the page past its last element, Shift+Tab past
+                // its first, and gave the window the keyboard back: the
+                // content moves its focus on from the page.
+                const target = window.window orelse return;
+                const record = target.beginCallback() orelse return;
+                defer record.end();
+                _ = record.record.keyInput(.{ .key = .tab, .modifiers = .{ .shift = kind == 21 }, .from_page = true });
+            },
             9 => {
                 if (self.attachmentClosed() or appStopping(window)) {
                     self.recovering = false;
@@ -4565,6 +4619,8 @@ pub const View = struct {
         self.custom_local_budget = null;
         if (!is_webkit) if (self.action_budget) |budget| zwv_action_budget_release(budget);
         self.action_budget = null;
+        if (self.composed_under) if (self.window) |window| window.composeUnder(false);
+        self.composed_under = false;
         self.region = null;
         self.window = null;
         self.ready = false;

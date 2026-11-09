@@ -8,7 +8,8 @@
 - 销毁与最终 native cleanup 使用独立侵入链表，不消耗业务队列容量，退出时清空。
 - 16 个 one-shot 原生等待槽；GPU 忙时登记就绪事件，等待期间合并重绘，不用定时器反复尝试。
 - 每帧命令/文本/clip/命中表有明确预算；布局、命令记录和已初始化的编辑操作不做每帧 Zig 堆分配。
-- GDI/Cairo surface 与字体资源复用；D3D11/D2D/DirectWrite 按 Context 拥有资源，设备丢失后重建。
+- GDI/Cairo surface 与字体资源复用；GDI 与 Cairo 平面保留上一帧，只重画变化的矩形。D3D11/D2D/DirectWrite 按 Context 拥有资源，设备丢失后重建；未指定 Domain 的窗口 renderer 按 driver 共享一个 D3D11 device，避免每个窗口多占几十 MB 驱动内存。
+- GPU 没能按时完成一帧（Metal 看门狗 `MTLCommandBufferErrorTimeout`）时驱动卡住而非设备消失：下一帧改在内存里画，之后 1 秒内不碰 GPU；一分钟内再次超时则休息时间翻倍，最长 30 秒。设备真正丢失仍立即重建。
 - WebView 资源从内存读取；磁盘快照使用应用管理的 worker，初始化时排序元数据，资源请求二分查找。
 - 核心不依赖内容模块；纯自绘构建不编译 WebView 适配或安装 Loader。IPC JSON/UTF 转换等分配明确使用调用者 allocator。
 

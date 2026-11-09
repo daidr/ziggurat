@@ -238,12 +238,16 @@ pub const VideoPicture = extern struct {
     strides: [2]u32 = .{ 0, 0 },
     /// The picture on the GPU as the platform's renderer takes it: a
     /// CVPixelBufferRef on macOS, which Metal wraps as textures without a
-    /// copy. The producer keeps it valid until it gives the next picture.
+    /// copy; on Windows the NT handle of a BGRA texture shared under a
+    /// keyed mutex (key 0), which Direct3D 11 opens on its own device. The
+    /// producer keeps it valid until it gives the next picture.
     native: ?*anyopaque = null,
     /// In browsers, the number of the video element playing it, which
     /// WebGL uploads from, GPU to GPU; 0 for none.
     element: u32 = 0,
-    reserved: u32 = 0,
+    /// On Windows, the shared texture's identity, which no other texture
+    /// of the process has: a renderer opens each once by it.
+    native_id: u32 = 0,
     /// Writes the picture as premultiplied BGRA rows into `pixels` when
     /// its planes are not in memory (a native picture or an element);
     /// false when it could not. Called on the main thread.

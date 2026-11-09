@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("../root.zig");
 const icons = @import("windows_icons.zig");
 const text_input = @import("windows_text.zig");
+const pointers = @import("windows_pointer.zig");
 const pointer_press = @import("pointer_press.zig");
 const work_area = @import("work_area.zig");
 const c = @import("ziggurat_c_win32");
@@ -34,7 +35,87 @@ const PointerDispatch = struct {
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
 pub const AppData = struct { popup_shadow_class: c.ATOM = 0, taskbar_created: c.UINT = 0, taskbar: ?*TaskbarList = null, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
-pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, cloaked: bool = false, material: core.Vibrancy = .none, glass: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } };
+pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, pen: PenState = .{}, held: HeldKeys = .{}, cloaked: bool = false, material: core.Vibrancy = .none, glass: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } };
+/// The pen or finger of the last WM_POINTER message, which the mouse messages
+/// Windows makes of it carry.
+const PenState = struct {
+    pressure: ?f32 = null,
+    at: c.POINT = .{ .x = 0, .y = 0 },
+    /// The system took the press of the pen or the finger: the mouse
+    /// button's release that follows is its, and goes nowhere.
+    canceled_up: bool = false,
+};
+/// The keys the content got pressed and not yet released, whose releases a
+/// menu's loop takes: Alt and a letter opening a menu of the bar, Alt and
+/// Space the window's menu, F10 or Alt the bar. The window keeps the focus
+/// meanwhile, so no WM_KILLFOCUS lets go of them.
+const HeldKeys = struct {
+    keys: [16]core.KeyInput = undefined,
+    len: u8 = 0,
+    fn hold(self: *HeldKeys, input: core.KeyInput) void {
+        for (self.keys[0..self.len]) |held| if (held.code == input.code and held.key == input.key) return;
+        if (self.len == self.keys.len) return;
+        self.keys[self.len] = input;
+        self.keys[self.len].repeat = false;
+        self.len += 1;
+    }
+    fn release(self: *HeldKeys, input: core.KeyInput) void {
+        for (self.keys[0..self.len], 0..) |held, i| if ((held.code != .unknown and held.code == input.code) or (held.code == .unknown and held.key == input.key)) {
+            std.mem.copyForwards(core.KeyInput, self.keys[i .. self.len - 1], self.keys[i + 1 .. self.len]);
+            self.len -= 1;
+            return;
+        };
+    }
+};
+/// Let go of the keys held as a menu's loop takes the keyboard, and their
+/// releases with it.
+fn liftKeys(window: *core.WindowRecord) void {
+    var held = window.native.held;
+    window.native.held = .{};
+    const content = window.content orelse return;
+    if (content.key_release == null) return;
+    for (held.keys[0..held.len]) |input| {
+        if (window.phase != .open) return;
+        window.keyRelease(.{ .key = input.key, .modifiers = keyModifiers(), .physical = input.physical, .code = input.code });
+    }
+}
+/// Note the device and pressure of a mouse message before the content gets
+/// it, as Windows marks those it makes of a pen's or a finger's.
+fn noteMouse(window: *core.WindowRecord, message: c.UINT, wp: c.WPARAM) void {
+    const device = pointers.deviceOf(@bitCast(c.GetMessageExtraInfo()));
+    const pressure = if (device == .mouse) null else window.native.pen.pressure;
+    window.notePointer(device, pressure, if (message == c.WM_MOUSEMOVE) null else buttonPhase(message), nativeButton(message, wp) orelse .primary);
+}
+/// A pen's or a finger's WM_POINTER message, whose mouse messages
+/// DefWindowProc makes. A pen pressing harder or softer where it stands
+/// makes no mouse message: the window moves the pointer where it is, with
+/// the new pressure, as Pointer Events fire pointermove. A pointer the
+/// system took, as for an edge's gesture, ends its press with no release.
+fn penMessage(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: c.WPARAM) void {
+    const sample = pointers.sample(wp) orelse {
+        window.native.pen.pressure = null;
+        return;
+    };
+    const pen = &window.native.pen;
+    if (message == pointers.wm_pointer_update and window.pointer_buttons != 0 and sample.at.x == pen.at.x and sample.at.y == pen.at.y and !std.meta.eql(sample.pressure, pen.pressure)) {
+        var at = sample.at;
+        if (c.ScreenToClient(hwnd, &at) != 0) {
+            window.notePointer(sample.device, sample.pressure, null, .primary);
+            const scale = size(hwnd).scale;
+            window.emit(.{ .pointer_move = .{ .x = @as(f32, @floatFromInt(at.x)) / scale, .y = @as(f32, @floatFromInt(at.y)) / scale } });
+        }
+    }
+    pen.pressure = sample.pressure;
+    pen.at = sample.at;
+    if (message == pointers.wm_pointer_up and pointers.canceled(wp) and window.pointer_buttons != 0) {
+        // The release DefWindowProc may make of it goes nowhere. The
+        // capture goes after the buttons, so that losing it cancels no more.
+        window.pointer_buttons = 0;
+        pen.canceled_up = true;
+        window.emitPointerLifecycle(window.invalidatePointer(false), .cancel_input);
+        if (c.GetCapture() == hwnd) _ = c.ReleaseCapture();
+    }
+}
 var active_app: std.atomic.Value(bool) = .init(false);
 
 pub fn init(app: *core.App) !void {
@@ -497,7 +578,9 @@ fn nativeKeyInput(window: *core.WindowRecord, hwnd: c.HWND, wp: c.WPARAM, lp: c.
     const control = c.GetKeyState(c.VK_CONTROL) < 0;
     // Layout-generated AltGr text uses Right Alt plus a synthetic Control.
     if (control and c.GetKeyState(c.VK_RMENU) < 0) return false;
-    return window.keyInput(.{ .key = keyCode(wp), .modifiers = keyModifiers(), .repeat = @as(usize, @bitCast(lp)) & (1 << 30) != 0, .physical = physicalKey(lp), .code = keyPosition(lp) });
+    const input: core.KeyInput = .{ .key = keyCode(wp), .modifiers = keyModifiers(), .repeat = @as(usize, @bitCast(lp)) & (1 << 30) != 0, .physical = physicalKey(lp), .code = keyPosition(lp) };
+    window.native.held.hold(input);
+    return window.keyInput(input);
 }
 fn keyModifiers() core.KeyModifiers {
     return .{ .shift = c.GetKeyState(c.VK_SHIFT) < 0, .control = c.GetKeyState(c.VK_CONTROL) < 0, .alt = c.GetKeyState(c.VK_MENU) < 0, .super = superDown() };
@@ -519,7 +602,9 @@ fn nativeKeyRelease(window: *core.WindowRecord, hwnd: c.HWND, wp: c.WPARAM, lp: 
     if (!window.inputAllowed() or c.IsWindowEnabled(hwnd) == 0) return;
     const content = window.content orelse return;
     if (content.key_release == null) return;
-    window.keyRelease(.{ .key = keyCode(wp), .modifiers = keyModifiers(), .physical = physicalKey(lp), .code = keyPosition(lp) });
+    const input: core.KeyInput = .{ .key = keyCode(wp), .modifiers = keyModifiers(), .physical = physicalKey(lp), .code = keyPosition(lp) };
+    window.native.held.release(input);
+    window.keyRelease(input);
 }
 fn superDown() bool {
     return c.GetKeyState(c.VK_LWIN) < 0 or c.GetKeyState(c.VK_RWIN) < 0;
@@ -1357,6 +1442,13 @@ fn point(hwnd: c.HWND, lp: c.LPARAM) core.Point {
     return .{ .x = @as(f32, @floatFromInt(@as(i16, @bitCast(@as(u16, @truncate(bits)))))) / scale, .y = @as(f32, @floatFromInt(@as(i16, @bitCast(@as(u16, @truncate(bits >> 16)))))) / scale };
 }
 
+/// The frames start or stop showing their alpha over the content composed
+/// under them: the next frame draws whole.
+pub fn composeUnder(window: *core.WindowRecord) void {
+    const hwnd = window.native.hwnd orelse return;
+    _ = c.InvalidateRect(hwnd, null, 0);
+}
+
 fn windowProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callconv(.winapi) c.LRESULT {
     if (message == c.WM_NCCREATE) {
         const cs: *const c.CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lp)));
@@ -1403,6 +1495,21 @@ fn windowMessage(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: 
         if (position.flags & c.SWP_SHOWWINDOW != 0) _ = c.SetTimer(hwnd, uncloak_timer, uncloak_after_ms, null);
     }
     if (message == c.WM_SHOWWINDOW and window.input_region != null) pollCursor(window, wp != 0);
+    if (pointers.isPointerMessage(message)) {
+        if (window.inputAllowed()) penMessage(window, hwnd, message, wp);
+        if (window.phase != .open or window.native.hwnd != hwnd) return 0;
+        return delegate(delegation, message, wp, lp);
+    }
+    if (message >= c.WM_MOUSEFIRST and message <= c.WM_MOUSELAST and message != c.WM_MOUSEWHEEL and message != c.WM_MOUSEHWHEEL) {
+        if (buttonPhase(message) == .up and window.native.pen.canceled_up and window.pointer_buttons == 0) {
+            // The release of a press the system took, which opens no
+            // context menu either.
+            window.native.pen.canceled_up = false;
+            return 0;
+        }
+        if (buttonPhase(message) == .down) window.native.pen.canceled_up = false;
+        noteMouse(window, message, wp);
+    }
     if (buttonPhase(message)) |phase| {
         // Mandatory even when raw timing is disabled or decoration consumes it.
         const operation = advancePointerOperation(window);
@@ -1457,6 +1564,11 @@ fn pointerContinuation(window: *core.WindowRecord, hwnd: c.HWND, operation: u64)
 }
 const NativeNotification = enum(u8) { ordinary, own_up_capture, focus_echo };
 fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM, delegation: *?NativeDelegate, operation: u64, sequence: u64, modifiers: core.KeyModifiers, delivered: ?*bool, notification: NativeNotification, capture_owned: bool) c.LRESULT {
+    if (message == c.WM_ENTERMENULOOP and window.native.held.len != 0) {
+        liftKeys(window);
+        if (window.phase != .open or window.native.hwnd == null) return 0;
+    }
+    if (message == c.WM_KILLFOCUS) window.native.held = .{};
     if (message == c.WM_ENTERSIZEMOVE or message == c.WM_ENTERMENULOOP) {
         window.native.native_loop_depth += 1;
         // The main loop drops queued wake messages and answers the kernel
@@ -1586,7 +1698,9 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             var ps: c.PAINTSTRUCT = undefined;
             const dc = c.BeginPaint(hwnd, &ps);
             defer _ = c.EndPaint(hwnd, &ps);
-            if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd), .transparent = window.native.no_redirect, .background = if (window.native.no_redirect) null else window.native.background } });
+            // Over native content composed under them (`Window.composeUnder`)
+            // the frames show their alpha through DirectComposition too.
+            if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd), .transparent = window.native.no_redirect or window.composed_under != 0, .background = if (window.native.no_redirect) null else window.native.background } });
             if (sameWindow(window, hwnd) and window.native.cloaked and c.IsWindowVisible(hwnd) != 0) uncloak(window, hwnd);
             return 0;
         },
@@ -1790,7 +1904,8 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
 }
 /// System cursor for a shape; Windows has no one-sided, column, row or
 /// vertical text cursors and uses the nearest ones, and the arrow for copy,
-/// alias and context menu. Shared system cursors need no release.
+/// alias and context menu. Shared system cursors need no release, and the
+/// drawn ones live as long as the process.
 fn cursorHandle(cursor: core.Cursor) c.HCURSOR {
     const id: usize = switch (cursor) {
         .none => return null,
@@ -1803,13 +1918,15 @@ fn cursorHandle(cursor: core.Cursor) c.HCURSOR {
         .resize_nwse => 32642,
         .resize_nesw => 32643,
         .not_allowed, .no_drop => 32648,
-        .crosshair, .cell => 32515,
+        .crosshair => 32515,
+        .cell => if (pointers.drawnCursor(cursor)) |drawn| return drawn else 32515,
         .progress => 32650,
         .wait => 32514,
         .help => 32651,
         .all_scroll => 32646,
-        // Windows has no zoom cursors; the arrow stands in.
-        .zoom_in, .zoom_out => 32512,
+        // Windows has no zoom or cell cursors: they are drawn, the arrow
+        // and the cross standing in where drawing fails.
+        .zoom_in, .zoom_out => if (pointers.drawnCursor(cursor)) |drawn| return drawn else 32512,
     };
     return c.LoadCursorW(null, @ptrFromInt(id));
 }
