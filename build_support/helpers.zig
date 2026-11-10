@@ -705,7 +705,7 @@ fn isUiLogicTest(step: *std.Build.Step) bool {
     if (isUiRoot(root)) return false;
     const file = root.root_source_file orelse return false;
     if (file != .src_path) return false;
-    for (platform_specific_tests) |path| if (std.mem.eql(u8, file.src_path.sub_path, path)) return false;
+    for (platform_specific_tests) |path| if (samePath(file.src_path.sub_path, path)) return false;
     // Code that links native libraries or C itself is tested where it runs.
     if (root.link_objects.items.len != 0 or root.link_libc == true) return false;
     for (root.getGraph().modules) |module| if (isUiRoot(module)) return true;
@@ -721,10 +721,17 @@ const platform_specific_tests = [_][]const u8{
     "src/game/root.zig",
 };
 
+/// Source paths use the host's separator: backslashes on Windows.
+fn samePath(source: []const u8, wanted: []const u8) bool {
+    if (source.len != wanted.len) return false;
+    for (source, wanted) |a, w| if (a != w and !(a == '\\' and w == '/')) return false;
+    return true;
+}
+
 fn isUiRoot(module: *std.Build.Module) bool {
     const file = module.root_source_file orelse return false;
     return switch (file) {
-        .src_path => |source| std.mem.eql(u8, source.sub_path, "src/ui/root.zig"),
+        .src_path => |source| samePath(source.sub_path, "src/ui/root.zig"),
         else => false,
     };
 }
