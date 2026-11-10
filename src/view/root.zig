@@ -362,6 +362,12 @@ pub const Style = struct {
     /// A list box, grid, tree or tree grid of the application's own whose
     /// items can be chosen together, as aria-multiselectable.
     multiselectable: bool = false,
+    /// The user cannot change the node's value, as aria-readonly: a text
+    /// box, combo box, check box, switch, slider, spin button, radio
+    /// group, list box, grid or tree grid of the application's own, or a
+    /// cell or header of a grid, locked. Other roles do not take it, and
+    /// the view's own controls behave as before.
+    read_only: bool = false,
     /// Chosen or not, as aria-selected, for a tab, option, row, cell or
     /// tree item that shows its choice its own way, without the accent a
     /// selected built-in row paints; null says nothing.
@@ -661,6 +667,16 @@ pub const AccessRole = enum {
     /// role=complementary. Name it with `Style.name` when a window has
     /// several.
     complementary,
+    /// The role's name as browsers name ARIA's roles: "tabpanel".
+    pub fn ariaName(self: AccessRole) []const u8 {
+        return switch (self) {
+            .tree_grid => "treegrid",
+            .cell => "gridcell",
+            .tab_panel => "tabpanel",
+            .content_info => "contentinfo",
+            else => @tagName(self),
+        };
+    }
     fn semantic(self: AccessRole) ui.accessibility.Role {
         return switch (self) {
             .group => .group,
@@ -7810,7 +7826,7 @@ pub const View = struct {
         const style = node.style;
         // The text input of a search field is a search box.
         const searching = style.search or (node.kind == .embed and node.parent != none and self.buffers.nodes[node.parent].kind == .search);
-        if (!searching and style.tab_stop and node.labelled_by == 0 and node.controls == 0 and node.described_by == 0 and node.error_message == 0 and !style.busy and style.current == .none and style.popup == null and style.sort == .none and style.auto_complete == .none and style.role_description.len == 0 and style.key_shortcuts.len == 0 and style.value_text.len == 0 and style.orientation == null and !style.invalid and !style.multiselectable and style.access_selected == null and style.position_in_set == 0 and style.set_size == 0 and style.row_count == 0 and style.column_count == 0 and style.row_index == 0 and style.column_index == 0) return null;
+        if (!searching and style.tab_stop and node.labelled_by == 0 and node.controls == 0 and node.described_by == 0 and node.error_message == 0 and !style.busy and style.current == .none and style.popup == null and style.sort == .none and style.auto_complete == .none and style.role_description.len == 0 and style.key_shortcuts.len == 0 and style.value_text.len == 0 and style.orientation == null and !style.invalid and !style.multiselectable and !style.read_only and style.access_selected == null and style.position_in_set == 0 and style.set_size == 0 and style.row_count == 0 and style.column_count == 0 and style.row_index == 0 and style.column_index == 0) return null;
         return .{
             .id = node.id,
             .tab_stop = style.tab_stop,
@@ -7834,6 +7850,7 @@ pub const View = struct {
                 .vertical => .vertical,
             } else null,
             .multiple = style.multiselectable,
+            .read_only = style.read_only,
             .selected = style.access_selected,
             .position = style.position_in_set,
             .set_size = style.set_size,

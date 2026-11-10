@@ -283,3 +283,34 @@ test "a grid of the application's own tells its rows and columns, choices, relat
     try testing.expect(!agreed.entry.invalid);
     try testing.expectEqualStrings("Read them first", agreed.description());
 }
+
+const Locked = struct {
+    on: bool = true,
+    level: f64 = 0.5,
+    fn build(self: *Locked, v: *View) anyerror!void {
+        _ = try v.checkbox(&self.on, "Keep", .{ .key = 1, .read_only = true });
+        _ = try v.slider(&self.level, .{ .minimum = 0, .maximum = 1 }, .{ .key = 2, .name = "Level", .read_only = true });
+        try v.column(.{ .key = 3, .role = .grid, .name = "Sheet", .read_only = true });
+        try v.row(.{ .key = 4, .role = .row });
+        try v.text("A1", .{ .key = 5, .role = .cell, .read_only = true });
+        try v.end();
+        try v.end();
+        // Neither a button nor a plain table's text takes it.
+        _ = try v.button("Save", .{ .key = 6, .read_only = true });
+        try v.column(.{ .key = 7, .role = .region, .name = "Notes", .read_only = true });
+        try v.end();
+        _ = try v.checkbox(&self.on, "Free", .{ .key = 8 });
+    }
+};
+
+test "read only is told on the roles that take it, as aria-readonly" {
+    var storage: Storage = .{};
+    var app: Locked = .{};
+    var h = Harness.init(&app, Locked.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    h.recordSemantics(&context) catch |err| if (err == error.SkipZigTest) return error.SkipZigTest else return err;
+    try h.render();
+    for ([_]u64{ 1, 2, 3, 5 }) |key| try testing.expect((try h.accessible(.{ .key = key })).entry.read_only);
+    for ([_]u64{ 6, 7, 8 }) |key| try testing.expect(!(try h.accessible(.{ .key = key })).entry.read_only);
+}

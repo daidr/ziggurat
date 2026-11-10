@@ -9,8 +9,19 @@ const protocol = @import("protocol.zig");
 const Node = view.Node;
 const Kind = view.Kind;
 
+/// The name of a role a container or text takes from `Style.role`.
+pub fn accessRoleName(access: view.AccessRole) []const u8 {
+    return switch (access) {
+        .tree_grid => "treeGrid",
+        .tab_panel => "tabPanel",
+        .content_info => "contentInfo",
+        else => @tagName(access),
+    };
+}
+
 /// The role of a node's element, or null when it has none.
 pub fn role(node: *const Node) ?[]const u8 {
+    if (node.style.role) |access| if (node.isContainer() or node.kind == .text) return accessRoleName(access);
     return switch (node.kind) {
         .button, .nav_button, .combo_toggle => "button",
         .disclosure => "disclosure",
@@ -44,6 +55,17 @@ pub fn role(node: *const Node) ?[]const u8 {
         .scroll => "scroll",
         .toast, .toasts => "status",
         .split => "splitter",
+        .breadcrumbs => "navigation",
+        .search => "search",
+        .menu => "menu",
+        .menu_item => switch (node.mark) {
+            .none => "menuItem",
+            .check => "menuItemCheckBox",
+            .radio => "menuItemRadio",
+        },
+        .menu_separator => "separator",
+        .token_field => "tokenField",
+        .token => "token",
         .spacer => null,
         else => if (node.style.name.len != 0) "group" else null,
     };
@@ -169,6 +191,7 @@ pub fn build(arena: std.mem.Allocator, window: u64, host: *const view.Host) erro
             if (node.checked) try states.append(arena, "expanded");
         }
         if (node.invalid) try states.append(arena, "invalid");
+        if (node.style.read_only) try states.append(arena, "readOnly");
         if (node.kind == .search) try states.append(arena, "search");
         if (node.kind == .segment) try states.append(arena, "segment");
         if (node.kind == .column_header) if (node.sort) |direction| try states.append(arena, if (direction == .ascending) "sortAscending" else "sortDescending");
@@ -225,4 +248,22 @@ test "selections count UTF-16 code units" {
     try std.testing.expectEqual(@as(u64, 3), utf16Length("abc"));
     try std.testing.expectEqual(@as(u64, 2), utf16Length("张三"));
     try std.testing.expectEqual(@as(u64, 3), utf16Length("a😀"));
+}
+
+test "roles of the application's own and of menus are named" {
+    const panel: Node = .{ .kind = .column, .id = 1, .style = .{ .role = .tab_panel, .name = "General" } };
+    try std.testing.expectEqualStrings("tabPanel", role(&panel).?);
+    const footer: Node = .{ .kind = .column, .id = 2, .style = .{ .role = .content_info } };
+    try std.testing.expectEqualStrings("contentInfo", role(&footer).?);
+    const main: Node = .{ .kind = .row, .id = 3, .style = .{ .role = .main } };
+    try std.testing.expectEqualStrings("main", role(&main).?);
+    const cell: Node = .{ .kind = .text, .id = 4, .style = .{ .role = .cell } };
+    try std.testing.expectEqualStrings("cell", role(&cell).?);
+    // A control keeps its own role.
+    const button: Node = .{ .kind = .button, .id = 5, .style = .{ .role = .heading } };
+    try std.testing.expectEqualStrings("button", role(&button).?);
+    const item: Node = .{ .kind = .menu_item, .id = 6, .style = .{}, .mark = .check };
+    try std.testing.expectEqualStrings("menuItemCheckBox", role(&item).?);
+    const menu: Node = .{ .kind = .menu, .id = 7, .style = .{} };
+    try std.testing.expectEqualStrings("menu", role(&menu).?);
 }

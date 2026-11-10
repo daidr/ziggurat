@@ -105,6 +105,10 @@ pub const Element = struct {
     /// In a subtree `Style.access_hidden` keeps out of the accessibility
     /// tree; the panel shows its role as ignored.
     access_hidden: bool = false,
+    /// The role `Style.role` gives a container or a text.
+    role: ?view.AccessRole = null,
+    /// A menu item's check or radio mark.
+    mark: ui.widgets.MenuMark = .none,
     value: f64 = 0,
     scroll_offset: ?Point = null,
     scroll_content: Size = .{},
@@ -400,6 +404,8 @@ pub const Inspector = struct {
                 .pose = s.pose != null,
                 .effect = s.effect != null,
                 .access_hidden = node.access_hidden,
+                .role = if (node.isContainer() or node.kind == .text) s.role else null,
+                .mark = node.mark,
                 .checked = node.checked,
                 .value = node.value,
                 .scroll_offset = if (node.scroll) |model| .{ .x = model.offset.x, .y = model.offset.y } else null,
@@ -1970,7 +1976,7 @@ pub const Inspector = struct {
         }
         var acc: [3]Decl = .{
             .{ .name = "Name", .value = accessibleName(e) },
-            .{ .name = "Role", .value = if (e.access_hidden) "ignored" else roleName(e.kind, e.name.len > 0) },
+            .{ .name = "Role", .value = if (e.access_hidden) "ignored" else elementRole(e) },
             .{ .name = "Keyboard-focusable", .value = if (focusable(e)) "\u{2713}" else "\u{2298}" },
         };
         var names: [32]u8 = undefined;
@@ -2094,6 +2100,18 @@ pub fn tagName(kind: Kind, buffer: []u8) []const u8 {
     return buffer[0..n];
 }
 
+/// The role assistive technology sees of an element: the one its style
+/// gives, or its kind's, named as browsers name roles.
+pub fn elementRole(e: *const Element) []const u8 {
+    if (e.role) |access| return access.ariaName();
+    if (e.kind == .menu_item) return switch (e.mark) {
+        .none => "menuitem",
+        .check => "menuitemcheckbox",
+        .radio => "menuitemradio",
+    };
+    return roleName(e.kind, e.name.len > 0);
+}
+
 /// The role assistive technology sees, named as browsers name roles.
 pub fn roleName(kind: Kind, named: bool) []const u8 {
     return switch (kind) {
@@ -2135,6 +2153,7 @@ pub fn roleName(kind: Kind, named: bool) []const u8 {
         .scroll => "scroll area",
         .search => "search",
         .toast, .toasts => "status",
+        .split => "separator",
         .fieldset, .field, .accordion => "group",
         .spacer => "none",
         else => if (named) "group" else "none",
@@ -2507,7 +2526,7 @@ pub const Details = struct {
         }
         self.section("Accessibility");
         self.property("name", self.print("\"{s}\"", .{accessibleName(e)}));
-        self.property("role", if (e.access_hidden) "ignored" else roleName(e.kind, e.name.len > 0));
+        self.property("role", if (e.access_hidden) "ignored" else elementRole(e));
         self.property("keyboard-focusable", bool_(focusable(e)));
         self.sections[self.section_count - 1].end = self.property_count;
     }

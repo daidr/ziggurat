@@ -3683,6 +3683,8 @@ pub const NodeExtras = struct {
     search: bool = false,
     orientation: ?enum { horizontal, vertical } = null,
     multiple: bool = false,
+    /// As aria-readonly, on the roles that take it.
+    read_only: bool = false,
     position: u32 = 0,
     set_size: u32 = 0,
     row_count: u32 = 0,
@@ -3713,6 +3715,12 @@ pub const NodeExtras = struct {
             node.horizontal = way == .horizontal;
         }
         node.multiple = node.multiple or self.multiple;
+        // ARIA's aria-readonly is for these roles alone; a table's cells
+        // and the rest do not take it.
+        if (self.read_only) switch (node.role) {
+            .text_box, .combo_box, .checkbox, .toggle_switch, .slider, .stepper, .radio_group, .list_box, .grid, .tree_grid, .cell, .column_header, .row_header => node.read_only = true,
+            else => {},
+        };
         // A row, option, tab or tree item says it is chosen as it is checked.
         if (self.selected) |chosen| switch (node.role) {
             .list_item, .tree_item, .table_row, .option, .tab, .radio => node.checked = chosen,
