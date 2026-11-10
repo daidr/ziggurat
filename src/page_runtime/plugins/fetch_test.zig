@@ -7,6 +7,16 @@ const TestServer = net.fetch_api.TestServer;
 const allocator = std.testing.allocator;
 const service = "plugin:fetch";
 
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
+/// the streamed body is then a sixth as long, still several times the credit.
+fn quick() bool {
+    return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");
+}
+
+fn streamedBlocks() usize {
+    return if (quick()) 200 else 1200;
+}
+
 const Fixture = struct {
     page: runtime.testing.Page = undefined,
     plugin: fetch.Plugin = undefined,
@@ -124,7 +134,7 @@ test "a streamed body larger than the page's credit arrives whole and in order" 
             var buffer: [4096]u8 = undefined;
             var writer = try request.respondStreaming(&buffer, .{ .respond_options = .{ .status = .created, .reason = "Made", .keep_alive = false, .extra_headers = &.{ .{ .name = "X-Kind", .value = "bytes" }, .{ .name = "Set-Cookie", .value = "a=1" }, .{ .name = "Set-Cookie2", .value = "b=2" } } } });
             var block: [1000]u8 = undefined;
-            for (0..1200) |index| {
+            for (0..streamedBlocks()) |index| {
                 for (&block, 0..) |*byte, offset| byte.* = @truncate(index * 7 + offset);
                 try writer.writer.writeAll(&block);
             }
@@ -155,8 +165,8 @@ test "a streamed body larger than the page's credit arrives whole and in order" 
         if (std.mem.eql(u8, header.name, "x-kind")) kind = header.value;
     }
     try std.testing.expectEqualStrings("bytes", kind.?);
-    try std.testing.expectEqual(1_200_000, body.items.len);
-    for (0..1200) |index| for (0..1000) |offset| {
+    try std.testing.expectEqual(streamedBlocks() * 1000, body.items.len);
+    for (0..streamedBlocks()) |index| for (0..1000) |offset| {
         if (body.items[index * 1000 + offset] != @as(u8, @truncate(index * 7 + offset))) return error.WrongByte;
     };
     try f.idle();

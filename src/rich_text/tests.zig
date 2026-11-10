@@ -5,6 +5,12 @@ const testing = std.testing;
 const Text = rt.Text;
 const Attributes = rt.Attributes;
 
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
+/// the random edit test then runs 60 seeds instead of 300.
+fn quick() bool {
+    return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");
+}
+
 fn expectString(t: *const Text, want: []const u8) !void {
     const s = try t.string(testing.allocator);
     defer testing.allocator.free(s);
@@ -413,7 +419,7 @@ const SetStyle = struct {
 
 test "random edits keep a text as a naive one of a cell a rune" {
     const gpa = testing.allocator;
-    for (0..300) |seed| {
+    for (0..if (quick()) @as(usize, 60) else 300) |seed| {
         var prng: std.Random.DefaultPrng = .init(seed * 7 + 1);
         const rng = prng.random();
         var at = try randomText(rng);
