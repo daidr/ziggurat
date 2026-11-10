@@ -474,7 +474,7 @@ pub fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, tar
         if (std.mem.eql(u8, dependency.name, "ziggurat_webview")) run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
     }
     run.addPassthruArgs();
-    smoke_runs.append(b.allocator, run) catch @panic("OOM");
+    smoke_runs.append(b.allocator, .{ .run = run, .exe = exe, .install = &install.step }) catch @panic("OOM");
     b.step(name, "Run integration checks with hidden windows").dependOn(&run.step);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
     return exe;
@@ -603,19 +603,35 @@ pub fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
 }
 
 /// The runs of every addSmokeExecutable, for configurePullRequestRuns.
-var smoke_runs: std.ArrayList(*std.Build.Step.Run) = .empty;
+var smoke_runs: std.ArrayList(struct { run: *std.Build.Step.Run, exe: *std.Build.Step.Compile, install: *std.Build.Step }) = .empty;
 
 /// Options for pull request checks, which run often and need to finish fast.
 /// `cache_smokes` runs a smoke only when its executable changed: without
 /// passthrough arguments and with its exit code checked, Zig caches the run
 /// like a test's (its standard output is dropped, standard error is still
-/// printed). `quick_tests` sets ZIGGURAT_QUICK_TESTS for every test run, so
+/// printed). Such a smoke runs the executable in the cache, not its installed
+/// copy: a fresh checkout installs a new copy, and a run whose input file was
+/// written again is never cached. `quick_tests` sets ZIGGURAT_QUICK_TESTS for every test run, so
 /// the long randomized and exhaustive tests take a shorter path; the nightly
 /// and full-ci runs leave both off.
 pub fn configurePullRequestRuns(b: *std.Build, cache_smokes: bool, quick_tests: bool) void {
-    if (cache_smokes) for (smoke_runs.items) |run| {
-        for (run.argv.items, 0..) |arg, index| if (arg == .passthru) {
-            _ = run.argv.orderedRemove(index);
+    if (cache_smokes) for (smoke_runs.items) |smoke| {
+        const run = smoke.run;
+        var index: usize = 0;
+        while (index < run.argv.items.len) switch (run.argv.items[index]) {
+            .passthru => _ = run.argv.orderedRemove(index),
+            .lazy_path => |path| {
+                if (path.lazy_path == .relative and path.lazy_path.relative.base == .install_bin) {
+                    // The installed executable becomes the compiled one.
+                    run.argv.items[index] = .{ .artifact = .{ .prefix = path.prefix, .suffix = path.suffix, .artifact = smoke.exe, .make_absolute = path.make_absolute } };
+                    smoke.exe.getEmittedBin().addStepDependencies(&run.step);
+                }
+                index += 1;
+            },
+            else => index += 1,
+        };
+        for (run.step.dependencies.items, 0..) |dependency, at| if (dependency == smoke.install) {
+            _ = run.step.dependencies.orderedRemove(at);
             break;
         };
         run.expectExitCode(0);
