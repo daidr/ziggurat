@@ -200,9 +200,12 @@ const State = struct {
         try self.synchronize(true);
         try expectHr(c.UIA_E_ELEMENTNOTAVAILABLE, toggle.?.lpVtbl.*.Toggle.?(toggle.?));
         try expectHr(c.UIA_E_ELEMENTNOTAVAILABLE, selection.?.lpVtbl.*.Select.?(selection.?));
-        // The client retains read-only metadata and still rejects SetValue.
-        // Check the independently retained native provider for disconnection.
-        try expectHr(c.UIA_E_INVALIDOPERATION, progress.?.lpVtbl.*.SetValue.?(progress.?, 50));
+        // The client still rejects SetValue: by the read-only metadata it
+        // retains, or, when it asks the provider first, as no longer
+        // available. Check the independently retained native provider for
+        // disconnection.
+        const removed: u32 = @bitCast(progress.?.lpVtbl.*.SetValue.?(progress.?, 50));
+        if (removed != c.UIA_E_INVALIDOPERATION) try std.testing.expectEqual(@as(u32, c.UIA_E_ELEMENTNOTAVAILABLE), removed);
         const retained = self.retained_progress.?;
         try expectHr(c.UIA_E_ELEMENTNOTAVAILABLE, retained.lpVtbl.*.get_Value.?(retained, &amount));
         try expectHr(c.UIA_E_ELEMENTNOTAVAILABLE, retained.lpVtbl.*.SetValue.?(retained, 50));
