@@ -390,7 +390,7 @@ jobs:
         if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
         run: |
           sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11
-          xvfb-run -a -s '-screen 0 1280x800x24' zig build test-webkit-dmabuf smoke-webview-content-rules smoke-webview-scroll-linux smoke-webview-media-linux smoke-webview-regions-linux smoke-webview-overlay-linux -Dwebview=true -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build test-webkit-dmabuf smoke-webview-content-rules smoke-webview-scroll-linux smoke-webview-media-linux smoke-webview-regions-linux smoke-webview-overlay-linux smoke-webview-forced-appearance -Dwebview=true -Doptimize=${{ matrix.optimize }}
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-overlay-linux -Dwebview=true -Daccessibility=true -Doptimize=${{ matrix.optimize }}
       - name: Capture Cairo submission and idle evidence
         if: matrix.optimize == 'ReleaseSafe'
