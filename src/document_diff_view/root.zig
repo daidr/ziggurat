@@ -15,6 +15,7 @@ pub const Info = presentation.Info;
 pub const Stats = presentation.Stats;
 pub const Direction = presentation.Direction;
 pub const Side = presentation.Side;
+pub const noNewlineMark = presentation.noNewlineMark;
 pub const editable = @import("editable.zig");
 pub const EditableSplit = editable.View;
 pub const EditableUnified = editable.Unified;
@@ -34,6 +35,7 @@ pub const intraline = @import("intraline.zig");
 pub const context_index = @import("context_index.zig");
 test {
     _ = requests;
+    _ = presentation;
     _ = index;
     _ = editable;
     _ = @import("unified_index.zig");

@@ -10,8 +10,21 @@
 //! comment or a string the hunk before ends in does not go on into it.
 //! The highlighter moves them with the edits since
 //! (`syntax.Highlighter.restartLines`, `Highlighting.restarts`), so that
-//! highlighting of the host's own can start the hunks as well.
+//! highlighting of the host's own can start the hunks as well. With the
+//! files too, `compareFiles` makes the comparison a diff view shows of
+//! them whose changes are the patch's.
 const std = @import("std");
+const patch_files = @import("patch_files.zig");
+
+/// The comparison of a patch's files whose changes are its runs of - and +
+/// lines, as git aligned them, and the comparison after an edit of the new
+/// file that keeps them (`patch_files.zig`).
+pub const compareFiles = patch_files.compareFiles;
+pub const recompare = patch_files.recompare;
+
+test {
+    _ = patch_files;
+}
 
 /// A hunk of a `FilePatch`: lines from `old_start` (from 1) of the old file,
 /// `old_lines` of them, and `new_start` and `new_lines` of the new.
@@ -334,6 +347,18 @@ pub const Partial = struct {
     /// The changes, the patch's runs of - and + lines as it says them, not
     /// what comparing the texts would find.
     changes: []const Change,
+    /// Whether the old and the new file end without a newline, as the
+    /// patch's "\ No newline at end of file" lines say of the line before
+    /// them: a deleted line's the old file, an added line's the new, and a
+    /// line of both both. The texts end without one either way, so a diff
+    /// view marks these sides (`document_diff_view.Parameters.no_newline`).
+    old_no_newline: bool = false,
+    new_no_newline: bool = false,
+
+    /// Which sides end without a newline, old then new.
+    pub fn noNewline(self: *const Partial) [2]bool {
+        return .{ self.old_no_newline, self.new_no_newline };
+    }
 
     /// The texts of `patch`'s hunks' lines.
     pub fn init(allocator: std.mem.Allocator, patch: FilePatch) !Partial {
@@ -350,8 +375,11 @@ pub const Partial = struct {
         var changes: std.ArrayList(Change) = .empty;
         var old_line: usize = 0;
         var new_line: usize = 0;
+        var old_no_newline = false;
+        var new_no_newline = false;
         for (patch.hunks) |hunk| {
             var run: ?usize = null;
+            var previous: u8 = 0;
             try old_starts.append(a, old_line);
             try new_starts.append(a, new_line);
             try old_file.append(a, hunk.old_start -| 1);
@@ -359,7 +387,13 @@ pub const Partial = struct {
             const header = try std.fmt.allocPrint(a, "@@ -{d},{d} +{d},{d} @@", .{ hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines });
             try headers.append(a, if (hunk.section.len > 0) try std.mem.concat(a, u8, &.{ header, " ", hunk.section }) else header);
             for (hunk.lines) |line| {
-                if (line.len == 0 or line[0] == '\\') continue;
+                if (line.len > 0 and line[0] == '\\') {
+                    old_no_newline = old_no_newline or previous == '-' or previous == ' ';
+                    new_no_newline = new_no_newline or previous == '+' or previous == ' ';
+                    continue;
+                }
+                if (line.len == 0) continue;
+                previous = line[0];
                 const changed = line[0] == '-' or line[0] == '+';
                 if (!changed) run = null else if (run == null) {
                     try changes.append(a, .{ .old = .{ .start = old_line, .end = old_line }, .new = .{ .start = new_line, .end = new_line } });
@@ -381,7 +415,7 @@ pub const Partial = struct {
                 }
             }
         }
-        return .{ .arena = arena, .old_text = old.items, .new_text = new.items, .old_starts = old_starts.items, .new_starts = new_starts.items, .old_file = old_file.items, .new_file = new_file.items, .headers = headers.items, .changes = changes.items };
+        return .{ .arena = arena, .old_text = old.items, .new_text = new.items, .old_starts = old_starts.items, .new_starts = new_starts.items, .old_file = old_file.items, .new_file = new_file.items, .headers = headers.items, .changes = changes.items, .old_no_newline = old_no_newline, .new_no_newline = new_no_newline };
     }
     pub fn deinit(self: *Partial) void {
         self.arena.deinit();
@@ -512,4 +546,20 @@ test "a patch's partial texts start each hunk on its own line, numbered as in th
     try std.testing.expectEqual(@as(usize, 10), partial.fileLine(.new, 3));
     try std.testing.expectEqual(@as(usize, 1), partial.fileLine(.old, 1));
     try std.testing.expect(partial.hunkOf(.new, 2).first and partial.hunkOf(.new, 2).index == 1);
+}
+
+test "a patch's partial texts know which files end without a newline" {
+    const cases = [_]struct { text: []const u8, sides: [2]bool }{
+        .{ .text = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n\\ No newline at end of file\n+a\n", .sides = .{ true, false } },
+        .{ .text = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n", .sides = .{ false, true } },
+        .{ .text = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-a\n+b\n c\n\\ No newline at end of file\n", .sides = .{ true, true } },
+        .{ .text = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n", .sides = .{ false, false } },
+    };
+    for (cases) |case| {
+        var patch = try parse(std.testing.allocator, case.text, null);
+        defer patch.deinit();
+        var partial = try Partial.init(std.testing.allocator, patch.files[0]);
+        defer partial.deinit();
+        try std.testing.expectEqual(case.sides, partial.noNewline());
+    }
 }
