@@ -314,6 +314,20 @@ pub const Options = struct {
     /// Change it when what `span_styler` does changes, for the paragraphs
     /// to be laid out again.
     spans_version: u64 = 0,
+    /// Room to leave above a paragraph, more than the theme's, as a list
+    /// opens a place where an item dragged would go.
+    space: ?Spacer = null,
+};
+
+/// Room above a paragraph (`Options.space`): `above` is given paragraph
+/// `index` (from 0) and returns the room in DIP to leave above it, more
+/// than the theme's; a negative room is none. It is asked as the
+/// paragraphs are laid out, in every frame for those in view, so what it
+/// returns can change from frame to frame, and the paragraphs below and
+/// their boxes (`visibleParagraphs`) move with it.
+pub const Spacer = struct {
+    context: ?*anyopaque = null,
+    above: *const fn (?*anyopaque, index: usize) f32,
 };
 
 /// Whether two lists of spans hold the same text.
@@ -844,6 +858,13 @@ pub const Editor = struct {
     /// of code's padding at its ends, the spacing between body paragraphs,
     /// above the second.
     fn space(self: *const Editor, p: usize, st: ParagraphStyle) struct { above: f32, below: f32 } {
+        const room = self.themeSpace(p, st);
+        const spacer = self.options.space orelse return .{ .above = room.above, .below = room.below };
+        const extra = spacer.above(spacer.context, p);
+        return .{ .above = room.above + (if (std.math.isFinite(extra)) @max(0, extra) else 0), .below = room.below };
+    }
+    /// The room around paragraph p that the theme gives.
+    fn themeSpace(self: *const Editor, p: usize, st: ParagraphStyle) struct { above: f32, below: f32 } {
         const size = self.options.font.size;
         const paras = self.paras.items;
         if (body(st)) {

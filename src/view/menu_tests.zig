@@ -813,3 +813,82 @@ test "a secondary press tells the leaf under it where, which takes the focus the
     try testing.expectEqual(@as(usize, 1), app.chosen);
     try testing.expectEqual(view.Kind.embed, h.focused().?.kind);
 }
+
+const Styled = struct {
+    open: bool = false,
+    panel: ?view.MenuPanel = .{ .background = 0x1e1e2e, .border = 0x45475a, .border_width = 1, .radius = 12, .padding = .all(10) },
+    fn build(self: *Styled, v: *View) anyerror!void {
+        if (try v.popoverMenuButtonWith("More", .{ .open = &self.open, .panel = self.panel }, .{})) {
+            _ = try v.menuItem("Rename", .{}, .{});
+            if (try v.submenu("Share", .{})) {
+                _ = try v.menuItem("Copy link", .{}, .{});
+            }
+            try v.end();
+        }
+        try v.end();
+    }
+};
+
+fn paintMenus(h: *Harness, context: *ui.Context) ![]const ui.commands.Command {
+    context.command_buffer.reset();
+    context.input_state.beginFrame();
+    var frame: ui.Frame = .{ .context = context, .size = .{ .width = 640, .height = 480, .scale = 1 } };
+    try h.view.paint(&frame);
+    if (frame.failure) |err| return err;
+    context.input_state.commitFrame();
+    return context.command_buffer.commands();
+}
+
+fn filled(commands: []const ui.commands.Command, color: u32) usize {
+    var count: usize = 0;
+    for (commands) |command| if (command == .shape and command.shape.color.hex() == color) {
+        count += 1;
+    };
+    return count;
+}
+
+/// The radius of the first shape in `color`.
+fn radiusOf(commands: []const ui.commands.Command, color: u32) ?f32 {
+    for (commands) |command| if (command == .shape and command.shape.color.hex() == color) return command.shape.radius;
+    return null;
+}
+
+test "a menu button's panel, and its submenus', wear the look its options give" {
+    var storage: Storage = .{};
+    var app: Styled = .{};
+    var h = Harness.init(&app, Styled.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    app.open = true;
+    try h.render();
+    try h.render();
+    // The padding the panel gives keeps the items from its edge.
+    const panel = try h.boundsOf(.{ .kind = .menu, .nth = 0 });
+    const item = try h.boundsOf(.{ .text = "Rename" });
+    try testing.expectApproxEqAbs(panel.x + 10, item.x, 0.01);
+    try testing.expectApproxEqAbs(panel.y + 10, item.y, 0.01);
+    var commands = try paintMenus(&h, &context);
+    try testing.expectEqual(@as(usize, 1), filled(commands, 0x1e1e2e));
+    try testing.expectEqual(@as(usize, 1), filled(commands, 0x45475a));
+    try testing.expectEqual(@as(?f32, 12), radiusOf(commands, 0x45475a));
+    try testing.expectEqual(@as(?f32, 11), radiusOf(commands, 0x1e1e2e));
+    // The submenu that opens wears it too.
+    try h.click(.{ .text = "Share" });
+    try h.render();
+    commands = try paintMenus(&h, &context);
+    try testing.expectEqual(@as(usize, 2), filled(commands, 0x1e1e2e));
+    // A border 0 wide draws none; without a panel the theme's look comes back.
+    app.panel = .{ .background = 0x1e1e2e, .border_width = 0 };
+    try h.render();
+    commands = try paintMenus(&h, &context);
+    try testing.expectEqual(@as(usize, 0), filled(commands, 0x45475a));
+    try testing.expect(filled(commands, 0x1e1e2e) >= 1);
+    app.panel = null;
+    try h.render();
+    commands = try paintMenus(&h, &context);
+    try testing.expectEqual(@as(usize, 0), filled(commands, 0x1e1e2e));
+    // A look that cannot be drawn is refused.
+    app.panel = .{ .radius = -1 };
+    try testing.expectError(error.InvalidValue, h.render());
+}

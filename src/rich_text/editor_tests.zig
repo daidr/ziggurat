@@ -864,3 +864,44 @@ test "a drag goes on in the text the application put in its place with fewer par
     try testing.expect(sel.anchor <= doc.text.len() and sel.caret <= doc.text.len());
     try testing.expectEqual(@as(usize, 1), e.paras.items.len);
 }
+
+const Gap = struct {
+    at: usize = 1,
+    room: f32 = 30,
+    fn above(ptr: ?*anyopaque, index: usize) f32 {
+        const self: *const Gap = @ptrCast(@alignCast(ptr.?));
+        return if (index == self.at) self.room else 0;
+    }
+};
+
+test "the room the application asks for above a paragraph moves it and those below" {
+    var doc = Document.init(gpa, try Text.of(gpa, &.{
+        .{ .runs = &.{.{ .text = "one" }} },
+        .{ .runs = &.{.{ .text = "two" }} },
+        .{ .runs = &.{.{ .text = "three" }} },
+    }));
+    defer doc.deinit();
+    var gap: Gap = .{ .room = 0 };
+    var e = try tester(&doc, .{ .space = .{ .context = &gap, .above = Gap.above } });
+    defer e.deinit();
+    var boxes = try e.visibleParagraphs();
+    const second = boxes[1].top;
+    const third = boxes[2].top;
+    // It is asked again as the paragraphs are laid out, frame after frame.
+    gap.room = 30;
+    try e.layoutNow();
+    boxes = try e.visibleParagraphs();
+    try testing.expectEqual(second + 30, boxes[1].top);
+    try testing.expectEqual(third + 30, boxes[2].top);
+    try testing.expectEqual(@as(f32, e.pad_y), boxes[0].top);
+    // Moved to the last, only it moves; a negative room is none.
+    gap.at = 2;
+    try e.layoutNow();
+    boxes = try e.visibleParagraphs();
+    try testing.expectEqual(second, boxes[1].top);
+    try testing.expectEqual(third + 30, boxes[2].top);
+    gap.room = -20;
+    try e.layoutNow();
+    boxes = try e.visibleParagraphs();
+    try testing.expectEqual(third, boxes[2].top);
+}
