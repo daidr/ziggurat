@@ -93,7 +93,7 @@ void zlm_app_destroy(NativeApp *app){app->owner=NULL;if(current_app==app)current
 typedef struct NativeWindow {
     NSWindow *window;ZigView *view;ZigDelegate *delegate;
     void *owner;Emit emit;int refs,destroyed;
-    int decoration,popup,enabled,keyboard,fullscreen_requested,topmost_requested,shown;
+    int decoration,popup,enabled,keyboard,fullscreen_requested,topmost_requested,shown,fullscreen_moving;
     /* Hide ordered the window out while it was in the Dock: it no longer
        counts as visible until it shows or deminiaturizes again. */
     int hid_miniaturized;
@@ -176,6 +176,19 @@ static void notify_state(NativeWindow *s){NativeEvent event={0};event.kind=16;em
    as above. AppKit lays the title bar out again when the window resizes,
    leaves full screen, its title or its appearance changes, so this runs
    after each of them. */
+static void fullscreen_settled(NativeWindow *s){
+    s->fullscreen_moving=0;
+    if(s->destroyed||s->popup)return;
+    retain_window(s);
+    dispatch_async(dispatch_get_main_queue(),^{
+        if(!s->destroyed&&!s->fullscreen_moving){
+            const int current=([s->window styleMask]&NSWindowStyleMaskFullScreen)!=0;
+            if(current!=!!s->fullscreen_requested)@autoreleasepool{[s->window toggleFullScreen:nil];}
+            else notify_state(s);
+        }
+        release_window(s);
+    });
+}
 static void layout_lights(NativeWindow *s){
     if(!s||s->destroyed||!s->title_style||!s->lights_set||([s->window styleMask]&NSWindowStyleMaskFullScreen))return;
     NSButton *close=[s->window standardWindowButton:NSWindowCloseButton],*mini=[s->window standardWindowButton:NSWindowMiniaturizeButton];
@@ -637,8 +650,14 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
 }
 - (void)windowDidMiniaturize:(NSNotification *)note{(void)note;if(native)notify_state(native);}
 - (void)windowDidDeminiaturize:(NSNotification *)note{(void)note;if(native){native->hid_miniaturized=0;notify_state(native);}}
-- (void)windowDidEnterFullScreen:(NSNotification *)note{(void)note;if(native)notify_state(native);}
-- (void)windowDidExitFullScreen:(NSNotification *)note{(void)note;if(native){layout_lights(native);notify_state(native);}}
+/* AppKit ignores toggleFullScreen while a transition animates, so a
+   request made then is applied once the transition settles. */
+- (void)windowWillEnterFullScreen:(NSNotification *)note{(void)note;if(native){native->fullscreen_moving=1;native->fullscreen_requested=1;}}
+- (void)windowWillExitFullScreen:(NSNotification *)note{(void)note;if(native){native->fullscreen_moving=1;native->fullscreen_requested=0;}}
+- (void)windowDidEnterFullScreen:(NSNotification *)note{(void)note;if(native){fullscreen_settled(native);notify_state(native);}}
+- (void)windowDidExitFullScreen:(NSNotification *)note{(void)note;if(native){layout_lights(native);fullscreen_settled(native);notify_state(native);}}
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window{(void)window;if(native){native->fullscreen_requested=0;fullscreen_settled(native);notify_state(native);}}
+- (void)windowDidFailToExitFullScreen:(NSWindow *)window{(void)window;if(native){native->fullscreen_requested=1;fullscreen_settled(native);notify_state(native);}}
 /* The toolbar that insets the buttons holds no items: in full screen it
    hides with the menu bar instead of covering the top of the content. */
 - (NSApplicationPresentationOptions)window:(NSWindow *)window willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)proposed{
@@ -803,7 +822,7 @@ int zlm_window_fullscreen(NativeWindow *s,int enabled){
     if(s->popup)return 1;
     s->fullscreen_requested=enabled;
     const int current=([s->window styleMask]&NSWindowStyleMaskFullScreen)!=0;
-    if(current!=!!enabled)@autoreleasepool{[s->window toggleFullScreen:nil];}
+    if(!s->fullscreen_moving&&current!=!!enabled)@autoreleasepool{[s->window toggleFullScreen:nil];}
     return 0;
 }
 int zlm_window_topmost(NativeWindow *s,int enabled){
