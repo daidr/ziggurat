@@ -17,6 +17,7 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
 const md = @import("ziggurat_markdown");
+const update = @import("ziggurat_update");
 const md_view = @import("ziggurat_markdown_view");
 pub const strings = @import("strings.zig");
 pub const prefs = @import("prefs.zig");
@@ -133,7 +134,9 @@ fn defaultNow() i64 {
 
 pub const Screen = enum { idle, unavailable, checking, up_to_date, check_failed, available, downloading, installing, install_failed, ready };
 
-const Job = enum { none, check, install };
+/// `recheck` checks again while the window offers a release: when the user
+/// asks again, and before installing.
+const Job = enum { none, check, recheck, install };
 
 /// Window sizes in DIP: status screens and the release screen with notes.
 pub const Size = struct { width: u32, height: u32 };
@@ -174,6 +177,8 @@ pub const Updater = struct {
     total: u64 = 0,
     /// The checkbox of the release screen.
     automatic_choice: bool = false,
+    /// The release screen's Install waits for the check under way.
+    install_after_recheck: bool = false,
     /// A version installed during this run, which runs at the next launch.
     installed: [max_version]u8 = undefined,
     installed_len: usize = 0,
@@ -219,7 +224,10 @@ pub const Updater = struct {
 
     /// A check the user asked for: the window shows at once and reports the
     /// outcome, and shows versions the user skipped. During a check already
-    /// under way, its window comes forward instead.
+    /// under way, its window comes forward instead. While the window offers
+    /// a release it checks again first, so that it offers a newer version
+    /// that came out since, then brings the window forward; Install checks
+    /// again the same way before installing.
     pub fn checkForUpdates(self: *Updater) void {
         self.begin(true);
     }
@@ -298,10 +306,15 @@ pub const Updater = struct {
     fn begin(self: *Updater, user: bool) void {
         self.app.assertOwner();
         if (self.screen != .idle) {
-            if (user) {
-                self.user = true;
-                self.show();
+            if (!user) return;
+            self.user = true;
+            // A newer version may have come out since the window offered
+            // this one: check again, then bring the window forward.
+            if (self.screen == .available) {
+                if (self.job == .none) self.recheck();
+                return;
             }
+            self.show();
             return;
         }
         if (!user and self.installed_len != 0) return;
@@ -330,6 +343,33 @@ pub const Updater = struct {
         };
     }
 
+    fn recheck(self: *Updater) void {
+        self.startJob(.recheck);
+        self.backend.check(self.backend.context, self, .{ .generation = self.generation }) catch {
+            self.job = .none;
+            self.rechecked();
+        };
+    }
+    /// The check while the window offered a release ended; a newer release
+    /// it found has taken that one's place.
+    fn rechecked(self: *Updater) void {
+        if (self.install_after_recheck) {
+            self.install_after_recheck = false;
+            return self.install();
+        }
+        self.set(.available);
+        self.show();
+    }
+    /// Whether `found` is newer than the release offered. Versions the
+    /// update module cannot read count as newer when they differ, since a
+    /// check reports the latest release.
+    fn newer(self: *const Updater, found: []const u8) bool {
+        const offered = self.releaseVersion();
+        const a = update.retention.parseVersion(found) catch return !std.mem.eql(u8, found, offered);
+        const b = update.retention.parseVersion(offered) catch return !std.mem.eql(u8, found, offered);
+        return a.order(b) == .gt;
+    }
+
     fn startJob(self: *Updater, job: Job) void {
         self.generation += 1;
         self.job = job;
@@ -341,6 +381,24 @@ pub const Updater = struct {
     /// The Backend's answer to `check`. Stale tokens are ignored.
     pub fn checkFinished(self: *Updater, token: Token, result: CheckResult) void {
         self.app.assertOwner();
+        if (self.live(token, .recheck)) {
+            self.job = .none;
+            switch (result) {
+                // The release offered stays.
+                .failed => {},
+                .current => self.succeeded(false),
+                .available => |release| {
+                    var available_changed = false;
+                    if (self.newer(release.version)) {
+                        self.keepRelease(release);
+                        self.notes_scroll = .{};
+                        available_changed = self.setAvailable(self.releaseVersion());
+                    }
+                    self.succeeded(available_changed);
+                },
+            }
+            return self.rechecked();
+        }
         if (!self.live(token, .check)) return;
         self.job = .none;
         switch (result) {
@@ -450,7 +508,12 @@ pub const Updater = struct {
                     available_changed = self.setAvailable("");
                 }
                 if (self.storeQuietly(next) or available_changed) self.changed();
-                if (action == .install) self.install() else self.finish();
+                if (action != .install) return self.finish();
+                // A newer version may have come out while the window was
+                // open: check again first, then install the newest.
+                self.install_after_recheck = true;
+                self.set(.checking);
+                if (self.job != .recheck) self.recheck();
             },
             .relaunch => {
                 self.backend.relaunch(self.backend.context);
@@ -471,6 +534,7 @@ pub const Updater = struct {
         self.screen = .idle;
         self.user = false;
         self.shown = false;
+        self.install_after_recheck = false;
         self.reopen = false;
         if (self.window) |window| {
             self.window = null;

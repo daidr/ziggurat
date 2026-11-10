@@ -291,7 +291,7 @@ pub fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, targ
             _ = native_support.add(b, module, "system-taskbar-native", "src/system/taskbar_windows.c", &.{"-std=c11"}, target, optimize);
             _ = native_support.add(b, module, "system-jump-list-native", "src/system/jump_list_windows.c", &.{"-std=c11"}, target, optimize);
             _ = native_support.add(b, module, "system-notification-image-native", "src/system/notification_image_windows.c", &.{"-std=c11"}, target, optimize);
-            for ([_][]const u8{ "advapi32", "ole32", "shell32", "windowscodecs" }) |library| module.linkSystemLibrary(library, .{});
+            for ([_][]const u8{ "advapi32", "ole32", "shell32", "shlwapi", "windowscodecs" }) |library| module.linkSystemLibrary(library, .{});
             module.link_libc = true;
         },
         .linux => {
@@ -474,6 +474,7 @@ pub fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, tar
         if (std.mem.eql(u8, dependency.name, "ziggurat_webview")) run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
     }
     run.addPassthruArgs();
+    smoke_runs.append(b.allocator, .{ .run = run, .exe = exe, .install = &install.step }) catch @panic("OOM");
     b.step(name, "Run integration checks with hidden windows").dependOn(&run.step);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
     return exe;
@@ -601,9 +602,58 @@ pub fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
     }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
 }
 
+/// The runs of every addSmokeExecutable, for configurePullRequestRuns.
+var smoke_runs: std.ArrayList(struct { run: *std.Build.Step.Run, exe: *std.Build.Step.Compile, install: *std.Build.Step }) = .empty;
+
+/// For pull request checks, which run often and need to finish fast: with
+/// `cache_smokes` a smoke runs only when its executable changed. Without
+/// passthrough arguments and with its exit code checked, Zig caches the run
+/// like a test's (its standard output is dropped, standard error is still
+/// printed). Such a smoke runs the executable in the cache, not its installed
+/// copy: a fresh checkout installs a new copy, and a run whose input file was
+/// written again is never cached.
+pub fn configurePullRequestRuns(cache_smokes: bool) void {
+    if (cache_smokes) for (smoke_runs.items) |smoke| {
+        const run = smoke.run;
+        var index: usize = 0;
+        while (index < run.argv.items.len) switch (run.argv.items[index]) {
+            .passthru => _ = run.argv.orderedRemove(index),
+            .lazy_path => |path| {
+                if (path.lazy_path == .relative and path.lazy_path.relative.base == .install_bin) {
+                    // The installed executable becomes the compiled one.
+                    run.argv.items[index] = .{ .artifact = .{ .prefix = path.prefix, .suffix = path.suffix, .artifact = smoke.exe, .make_absolute = path.make_absolute } };
+                    smoke.exe.getEmittedBin().addStepDependencies(&run.step);
+                }
+                index += 1;
+            },
+            else => index += 1,
+        };
+        for (run.step.dependencies.items, 0..) |dependency, at| if (dependency == smoke.install) {
+            _ = run.step.dependencies.orderedRemove(at);
+            break;
+        };
+        run.expectExitCode(0);
+    };
+}
+
 /// b.addTest with build_support/macos_test_runner.zig on macOS targets.
 pub fn addTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
     var with = options;
+    // Named after the root file (test-ui-widgets), so the build summary
+    // says which tests ran.
+    if (std.mem.eql(u8, with.name, "test")) if (with.root_module.root_source_file) |root| switch (root) {
+        .src_path => |source| {
+            const path = @constCast(b.dupe(source.sub_path));
+            std.mem.replaceScalar(u8, path, '\\', '/');
+            var name = std.mem.trimEnd(u8, path, ".zig");
+            if (std.mem.startsWith(u8, name, "src/")) name = name["src/".len..];
+            if (std.mem.endsWith(u8, name, "/root")) name = name[0 .. name.len - "/root".len];
+            const named = b.fmt("test-{s}", .{name});
+            std.mem.replaceScalar(u8, named, '/', '-');
+            with.name = named;
+        },
+        else => {},
+    };
     if (with.test_runner == null) if (with.root_module.resolved_target) |target| if (target.result.os.tag == .macos) {
         with.test_runner = .{ .path = b.path("build_support/macos_test_runner.zig"), .mode = .server };
     };

@@ -233,7 +233,7 @@ static ZspGuide *active_guide; /* whose panel may show; main thread */
 @public
     _Atomic int ended;
     int draggable;
-    NSString *app, *name, *title;
+    NSString *app, *name, *title, *sentence, *hintText;
     NSPanel *panel;
     NSTextField *label;
     NSView *border, *closeButton, *cardBox, *icon, *nameLabel, *hint, *hand, *card;
@@ -345,13 +345,21 @@ static NSBox *new_box(NSColor *fill, CGFloat radius) {
     return box;
 }
 /* "Drag **MyApp** to the list above to allow **Accessibility**." */
-static NSAttributedString *panel_text(NSString *app, NSString *permission) {
+/* The sentence marks the app's name with \x01 and the permission's with
+ * \x02, which show in bold, in the order the translation gives them. */
+static NSAttributedString *panel_text(NSString *sentence, NSString *app, NSString *permission) {
     NSMutableAttributedString *text = [NSMutableAttributedString new];
-    NSArray *runs = @[@[@"Drag ", @NO], @[app, @YES], @[@" to the list above to allow ", @NO], @[permission, @YES], @[@".", @NO]];
-    for (NSArray *run in runs) {
-        NSFont *font = [run[1] boolValue] ? [NSFont boldSystemFontOfSize:13] : [NSFont systemFontOfSize:13];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:run[0] attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: [NSColor labelColor]}]];
+    NSDictionary *plain = @{NSFontAttributeName: [NSFont systemFontOfSize:13], NSForegroundColorAttributeName: [NSColor labelColor]};
+    NSDictionary *bold = @{NSFontAttributeName: [NSFont boldSystemFontOfSize:13], NSForegroundColorAttributeName: [NSColor labelColor]};
+    NSUInteger start = 0;
+    for (NSUInteger i = 0; i < sentence.length; i++) {
+        const unichar c = [sentence characterAtIndex:i];
+        if (c != 1 && c != 2) continue;
+        if (i > start) [text appendAttributedString:[[NSAttributedString alloc] initWithString:[sentence substringWithRange:NSMakeRange(start, i - start)] attributes:plain]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:c == 1 ? app : permission attributes:bold]];
+        start = i + 1;
     }
+    if (start < sentence.length) [text appendAttributedString:[[NSAttributedString alloc] initWithString:[sentence substringFromIndex:start] attributes:plain]];
     return text;
 }
 
@@ -376,7 +384,7 @@ static NSAttributedString *panel_text(NSString *app, NSString *permission) {
     border = new_box([NSColor clearColor], panel_radius);
     [effect addSubview:border];
     label = [NSTextField wrappingLabelWithString:@""];
-    label.attributedStringValue = panel_text(name, title);
+    label.attributedStringValue = panel_text(sentence, name, title);
     [effect addSubview:label];
 
     NSButton *button = [[NSButton alloc] initWithFrame:NSZeroRect];
@@ -404,13 +412,13 @@ static NSAttributedString *panel_text(NSString *app, NSString *permission) {
     appLabel.font = [NSFont systemFontOfSize:15];
     [effect addSubview:appLabel];
     nameLabel = appLabel;
-    NSTextField *hintLabel = [NSTextField labelWithString:@"Drag"];
+    NSTextField *hintLabel = [NSTextField labelWithString:hintText];
     hintLabel.font = [NSFont systemFontOfSize:9];
     hintLabel.textColor = [NSColor secondaryLabelColor];
     hintLabel.alignment = NSTextAlignmentCenter;
     [effect addSubview:hintLabel];
     hint = hintLabel;
-    NSImage *handImage = symbol(@"hand.draw", @"Drag");
+    NSImage *handImage = symbol(@"hand.draw", hintText);
     if (handImage) {
         NSImageView *view = [NSImageView imageViewWithImage:handImage];
         view.contentTintColor = [NSColor secondaryLabelColor];
@@ -566,7 +574,7 @@ static NSString *app_name(NSString *path) {
     return [[[path stringByStandardizingPath] lastPathComponent] stringByDeletingPathExtension];
 }
 
-void *zsp_guide_start(int permission, int draggable, const char *app, const char *name, const char *title) {
+void *zsp_guide_start(int permission, int draggable, const char *app, const char *name, const char *title, const char *sentence, const char *hint) {
     (void)permission;
     @autoreleasepool {
         ZspGuide *guide = [ZspGuide new];
@@ -574,8 +582,10 @@ void *zsp_guide_start(int permission, int draggable, const char *app, const char
         guide->app = app[0] ? [NSString stringWithUTF8String:app] : default_app();
         guide->name = name[0] ? [NSString stringWithUTF8String:name] : app_name(guide->app);
         guide->title = [NSString stringWithUTF8String:title];
+        guide->sentence = [NSString stringWithUTF8String:sentence];
+        guide->hintText = [NSString stringWithUTF8String:hint];
         guide->started = [NSDate date];
-        if (!guide->app || !guide->name || !guide->title) return NULL;
+        if (!guide->app || !guide->name || !guide->title || !guide->sentence || !guide->hintText) return NULL;
         /* One panel shows at a time: the one before ends. */
         if (active_guide) [active_guide end];
         active_guide = guide;

@@ -1,6 +1,7 @@
 /* Included after Renderer. All objects are created by explicit layer prepare;
    ordinary replay only clears and composites these owned targets. */
 #include "layer_resource.h"
+void *zfont_gray_map(void);
 #include "gaussian_scope.h"
 typedef struct CairoGaussian {ZgGaussianCapacity capacity;ZgGaussianFrame frames[4];uint32_t *scratch;uint64_t visits;} CairoGaussian;
 typedef struct CairoTarget {cairo_surface_t *surface;cairo_t *context;cairo_pattern_t *pattern;uint32_t saves;double origin[2];} CairoTarget;
@@ -194,6 +195,19 @@ int zlc_offscreen_prepare(Renderer *s){
     cairo_font_options_t *options=cairo_font_options_create();if(cairo_font_options_status(options)!=CAIRO_STATUS_SUCCESS){cairo_font_options_destroy(options);return 2;}
     cairo_font_options_set_antialias(options,CAIRO_ANTIALIAS_GRAY);
     for(uint32_t i=0;i<s->layers->capacity+2;i++)cairo_set_font_options(s->layers->targets[i].context,options);
+    /* Offscreen text is gray coverage: lay it out on the grayscale font map
+       (zfont_gray), with the settings of the layout it replaces. */
+    PangoFontMap *gray=zfont_gray_map();
+    if(gray&&pango_context_get_font_map(pango_layout_get_context(s->layers->layout))!=gray){
+        PangoContext *context=pango_font_map_create_context(gray);
+        PangoLayout *layout=context?pango_layout_new(context):NULL;
+        if(context)g_object_unref(context);
+        if(layout){
+            pango_cairo_update_context(s->layers->targets[0].context,pango_layout_get_context(layout));
+            pango_layout_set_font_description(layout,s->layers->font);pango_layout_set_single_paragraph_mode(layout,TRUE);pango_layout_set_ellipsize(layout,PANGO_ELLIPSIZE_END);pango_layout_set_height(layout,-1);
+            g_object_unref(s->layers->layout);s->layers->layout=layout;
+        }
+    }
     pango_cairo_context_set_font_options(pango_layout_get_context(s->layers->layout),options);pango_layout_context_changed(s->layers->layout);cairo_font_options_destroy(options);return 0;
 }
 int zlc_offscreen_begin(Renderer *s){

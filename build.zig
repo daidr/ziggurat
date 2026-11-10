@@ -617,6 +617,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_system", .module = system },
             .{ .name = "os_integration_probe", .module = integration_probe },
         });
+        if (target.result.os.tag == .linux) addSmoke(b, "smoke-program-name", "tests/program_name_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
     }
     if (target.result.os.tag == .windows) {
         core.linkSystemLibrary("user32", .{});
@@ -1422,7 +1426,7 @@ pub fn build(b: *std.Build) void {
     }) });
     const shell_test_module = b.createModule(.{ .root_source_file = b.path("src/system/shell.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows or target.result.os.tag == .linux });
     if (target.result.os.tag == .windows) {
-        for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| shell_test_module.linkSystemLibrary(library, .{});
+        for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32", "shlwapi" }) |library| shell_test_module.linkSystemLibrary(library, .{});
     }
     const shell_tests = addTest(b, .{ .root_module = shell_test_module });
     const clipboard_tests = addTest(b, .{ .root_module = b.createModule(.{
@@ -1463,6 +1467,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&update_tool.step);
     const setup_format_module = b.createModule(.{ .root_source_file = b.path("tools/setup_format.zig"), .target = target, .optimize = optimize });
     const deb_module = b.createModule(.{ .root_source_file = b.path("tools/deb.zig"), .target = target, .optimize = optimize });
+    const rpm_module = b.createModule(.{ .root_source_file = b.path("tools/rpm.zig"), .target = target, .optimize = optimize });
     const setup_module = b.createModule(.{
         .root_source_file = b.path("tools/setup.zig"),
         .target = target,
@@ -1479,7 +1484,7 @@ pub fn build(b: *std.Build) void {
     const install_setup_stub = b.addInstallArtifact(setup_stub, .{});
     b.step("setup-stub", "Build the self-extracting setup, launcher and uninstaller stub").dependOn(&install_setup_stub.step);
     check.dependOn(&setup_stub.step);
-    for ([_]*std.Build.Module{ setup_format_module, deb_module }) |module| {
+    for ([_]*std.Build.Module{ setup_format_module, deb_module, rpm_module }) |module| {
         const module_tests = addTest(b, .{ .root_module = module });
         check.dependOn(&module_tests.step);
         test_step.dependOn(&b.addRunArtifact(module_tests).step);
@@ -1511,6 +1516,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "cli_options", .module = cli_options.createModule() },
             .{ .name = "setup_format", .module = setup_format_module },
             .{ .name = "deb", .module = deb_module },
+            .{ .name = "rpm", .module = rpm_module },
             .{ .name = "ziggurat_i18n", .module = i18n },
         },
     });
@@ -2012,5 +2018,6 @@ pub fn build(b: *std.Build) void {
     });
     addExamples(b, target, optimize);
     shareCommonModules(b, target, optimize, check, test_step);
+    helpers.configurePullRequestRuns(b.option(bool, "cache-smokes", "Run each smoke only when its executable changed (pull request checks)") orelse false);
     useWindowsSelfHostedBackend(b, b.option(bool, "windows-llvm", "Build Windows Debug artifacts with the LLVM backend instead of Zig's self-hosted backend") orelse false);
 }

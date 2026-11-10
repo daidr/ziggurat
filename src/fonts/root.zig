@@ -270,4 +270,5 @@ test "family ids are stable, case-insensitive and bounded" {
 test {
     _ = sfnt;
     _ = @import("files.zig");
+    if (builtin.os.tag == .linux) _ = @import("linux.zig");
 }

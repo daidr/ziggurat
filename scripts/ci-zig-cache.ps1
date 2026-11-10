@@ -44,17 +44,39 @@ if ($tier -cnotmatch '^[a-z0-9]+$') { throw 'ZIGGURAT_CI_CACHE_TIER must be lowe
 $localName = if ($tier -eq 'core') { "local-$key" } else { "local-$key-$tier" }
 $local = Join-Path $root $localName
 
+# Walking the caches takes seconds, so their size is measured once and again
+# only after something was removed.
+$script:usedMb = $null
 function Remove-Cache([string]$Path) {
-    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+        $script:usedMb = $null
+    }
 }
 function Get-UsedMb {
-    $bytes = (Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-    [long](($bytes + 0) / 1MB)
+    if ($null -eq $script:usedMb) {
+        $bytes = (Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        $script:usedMb = [long](($bytes + 0) / 1MB)
+    }
+    $script:usedMb
 }
 function Get-FreeMb {
     [long]([System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($root)).AvailableFreeSpace / 1MB)
 }
 function Test-Over { (Get-UsedMb) -gt $maxMb -or (Get-FreeMb) -lt $minFreeMb }
+
+# Test scripts work in ziggurat-* folders under the temporary directory and
+# remove them when they finish; a job that was cancelled or killed leaves
+# them behind (setup smokes hold whole installs). Only one job runs on a
+# runner at a time, so folders older than two hours belong to no live job.
+$temporary = [System.IO.Path]::GetTempPath()
+$stale = [DateTime]::UtcNow.AddHours(-2)
+foreach ($dir in @(Get-ChildItem -LiteralPath $temporary -Directory -Filter 'ziggurat-*' -Force -ErrorAction SilentlyContinue)) {
+    if ($dir.LastWriteTimeUtc -lt $stale) {
+        Write-Host "removing stale temporary folder $($dir.FullName)"
+        Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 
 Get-ChildItem -LiteralPath $ci -Directory -Filter 'zig-*' | Where-Object { $_.Name -ne "zig-$version" } | ForEach-Object { Remove-Cache $_.FullName }
 $now = [DateTime]::UtcNow

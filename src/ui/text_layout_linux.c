@@ -6,6 +6,8 @@
 typedef struct Engine {PangoFontMap *map;uint64_t fonts_seen;} Engine;
 /* Fonts the application registered since the map last looked. */
 void zfont_refresh(void *map,uint64_t *seen);
+/* Prepared text is coverage the renderer tints: grayscale glyphs. */
+void zfont_gray(void *map);
 /* spacing: Pango puts letter spacing between graphemes, half on either
    side of each and none past a line's ends; widths count it after every
    grapheme, as the other engines lay it out, the last one's included. */
@@ -22,6 +24,7 @@ static float dip(int value){return (float)value/PANGO_SCALE;}
 int ztl_engine_init(void *storage,ZtlError *error){
     Engine *s=storage;memset(s,0,sizeof(*s));*error=(ZtlError){0};
     s->map=pango_cairo_font_map_new();if(!s->map)return ZTL_OOM;
+    zfont_gray(s->map);
     OWN();g_atomic_int_inc(&engines);return ZTL_OK;
 }
 void ztl_engine_close(void *storage){Engine *s=storage;DROP_OBJECT(s->map);g_atomic_int_add(&engines,-1);}

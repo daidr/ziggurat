@@ -12,6 +12,8 @@ const fake = if (builtin.os.tag == .linux) struct {
     extern fn zsf_calls(uri: [*]u8, capacity: c_uint, count: *c_uint) c_uint;
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 } else struct {};
+const default_scheme = "ziggurat-default-probe";
+const default_entry = "ziggurat-default-probe.desktop";
 const words = [_][]const u8{ "", "two words", "中文🦎", "embedded\"quote", "tail\\", "\\\"", "$(literal);&|<>%^!", "line\nbreak" };
 const Probe = struct {
     main_thread: std.Thread.Id,
@@ -22,6 +24,7 @@ const Probe = struct {
     data_home: []const u8,
     trash_note: []const u8 = "not run",
     reveal_note: []const u8 = "not run",
+    default_note: []const u8 = "not run",
     err: ?anyerror = null,
     fn run(self: *Probe) void {
         self.checked() catch |err| {
@@ -231,7 +234,33 @@ const Probe = struct {
             try std.testing.expectError(error.NoAssociation, worker.openUrl("ziggurat-unhandled-test:probe", .{ .extra_schemes = &.{"ziggurat-unhandled-test"} }));
             try std.testing.expect(worker.last_failure != null and worker.last_failure.?.domain == .gio);
             try self.revealProvider(worker, existing);
+            try self.defaultApps(worker);
         }
+    }
+    /// The private desktop entry main wrote opens the private scheme, a
+    /// folder, and a Makefile that does not exist, known by its whole name.
+    fn defaultApps(self: *Probe, worker: *shell.Worker) !void {
+        const allocator = std.heap.page_allocator;
+        const makefile = try std.fs.path.join(allocator, &.{ self.cwd, "no such folder", "Makefile" });
+        defer allocator.free(makefile);
+        const folder_url = try std.fmt.allocPrint(allocator, "file://{s}", .{self.cwd});
+        defer allocator.free(folder_url);
+        const escaped = try std.mem.replaceOwned(u8, allocator, folder_url, " ", "%20");
+        defer allocator.free(escaped);
+        for ([_][]const u8{ default_scheme ++ ":probe", self.cwd, escaped, makefile }) |url| {
+            var found = worker.defaultApp(allocator, url) catch |err| {
+                std.debug.print("defaultApp({s}): {s}\n", .{ url, @errorName(err) });
+                return err;
+            };
+            defer found.deinit();
+            try std.testing.expectEqualStrings(default_entry, found.app.id);
+            try std.testing.expectEqualStrings("Ziggurat Default Probe", found.app.name);
+            try std.testing.expect(std.mem.endsWith(u8, found.app.path, "/applications/" ++ default_entry));
+        }
+        try std.testing.expectError(error.NoAssociation, worker.defaultApp(allocator, "ziggurat-unhandled-test:probe"));
+        try std.testing.expectError(error.InvalidUrl, worker.defaultApp(allocator, "file://elsewhere/a"));
+        try std.testing.expectError(error.EmbeddedNul, worker.defaultApp(allocator, "/a\x00b"));
+        self.default_note = "scheme, folder, folder URL and Makefile by name";
     }
     fn revealProvider(self: *Probe, worker: *shell.Worker, existing: []const u8) !void {
         const address = zio.getenv("DBUS_SESSION_BUS_ADDRESS") orelse {
@@ -362,7 +391,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer memory.free(executable);
     // Linux: a private HOME and XDG data home on the test directory's device,
     // set before the first GLib call, so trash goes to <temp>/data/Trash.
-    try temporary.dir.createDirPath(zio.io(), "home/data");
+    try temporary.dir.createDirPath(zio.io(), "home/data/applications");
+    try temporary.dir.createDirPath(zio.io(), "home/config");
+    // The handler defaultApp finds for a private scheme, a folder and a
+    // Makefile: a desktop entry that mimeapps.list makes their default.
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "home/data/applications/" ++ default_entry, .data = "[Desktop Entry]\nType=Application\nName=Ziggurat Default Probe\nExec=/bin/true %u\nMimeType=x-scheme-handler/" ++ default_scheme ++ ";inode/directory;text/x-makefile;\n" });
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "home/config/mimeapps.list", .data = "[Default Applications]\nx-scheme-handler/" ++ default_scheme ++ "=" ++ default_entry ++ "\ninode/directory=" ++ default_entry ++ "\ntext/x-makefile=" ++ default_entry ++ "\n" });
     const home = try zio.realPathAlloc(temporary.dir, "home", memory);
     defer memory.free(home);
     const data_home = try std.fs.path.join(memory, &.{ home, "data" });
@@ -372,7 +406,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         defer memory.free(home_z);
         const data_z = try memory.dupeSentinel(u8, data_home, 0);
         defer memory.free(data_z);
-        if (fake.setenv("HOME", home_z, 1) != 0 or fake.setenv("XDG_DATA_HOME", data_z, 1) != 0) return error.EnvironmentUnavailable;
+        const config_z = try std.fmt.allocPrintSentinel(memory, "{s}/config", .{home}, 0);
+        defer memory.free(config_z);
+        if (fake.setenv("HOME", home_z, 1) != 0 or fake.setenv("XDG_DATA_HOME", data_z, 1) != 0 or fake.setenv("XDG_CONFIG_HOME", config_z, 1) != 0) return error.EnvironmentUnavailable;
     }
     var probe: Probe = .{ .main_thread = std.Thread.getCurrentId(), .executable = executable, .cwd = cwd, .output = output, .data_home = data_home };
     const thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});
@@ -381,5 +417,5 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const result = try std.Io.Dir.cwd().readFileAlloc(zio.io(), output, memory, .limited(32 * 1024));
     defer memory.free(result);
     try std.testing.expectEqualStrings(cwd, result);
-    std.debug.print("shell smoke passed: exact Unicode argv/cwd, cancellation/failure, owned child termination/reap, resources stable; file and type icons={any}; open/reveal/trash validation; trash: {s}; reveal: {s}\n", .{ shell.capabilities.type_icon, probe.trash_note, probe.reveal_note });
+    std.debug.print("shell smoke passed: exact Unicode argv/cwd, cancellation/failure, owned child termination/reap, resources stable; file and type icons={any}; open/reveal/trash validation; trash: {s}; reveal: {s}; default apps: {s}\n", .{ shell.capabilities.type_icon, probe.trash_note, probe.reveal_note, probe.default_note });
 }

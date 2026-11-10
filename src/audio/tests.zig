@@ -13,6 +13,12 @@ const ramp_frames = mixer.ramp_frames;
 const testing = std.testing;
 const allocator = testing.allocator;
 
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
+/// the pitch test then measures the first and the last of its cases.
+fn quick() bool {
+    return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");
+}
+
 fn manual() !*Engine {
     return Engine.init(allocator, .{ .output = .manual });
 }
@@ -972,7 +978,8 @@ test "preserving pitch keeps a sine's frequency at 1.5x, as resampling raises it
         .{ .at = 24000, .frequencies = &.{220} },
         .{ .at = 96000, .frequencies = &.{ 200, 300 } },
     };
-    for (cases) |case| {
+    for (cases, 0..) |case, index| {
+        if (quick() and index != 0 and index != cases.len - 1) continue;
         const samples = try sines(case.at, 2, case.frequencies);
         defer allocator.free(samples);
         const tone = try Sound.fromSamples(allocator, case.at, @intCast(case.frequencies.len), samples);

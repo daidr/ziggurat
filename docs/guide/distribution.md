@@ -42,7 +42,9 @@ dist/<identity>-<os>-<arch>-<version>.zip
 | --- | --- |
 | `ziggurat package setup --zip PACKAGE` | 单文件安装程序（Windows/Linux），支持用户范围与机器范围、静默安装、卸载与安装钩子 |
 | `ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>"` | Debian 包 |
+| `ziggurat package rpm --zip PACKAGE` | RPM 包（Fedora、openSUSE 等） |
 | `ziggurat package pkgbuild --zip PACKAGE` | Arch Linux 的 PKGBUILD |
+| `ziggurat package linux --zip PACKAGE --maintainer "NAME <EMAIL>"` | `linux.formats` 列出的全部 Linux 包 |
 | `ziggurat package app --zip PACKAGE [--dmg]` | macOS 应用包与磁盘映像 |
 | `ziggurat package install-script --zip PACKAGE` | `install.sh`，Linux 与 macOS 通用，可以 `curl … | sh` |
 | `ziggurat package install-ps1 --zip PACKAGE` | `install.ps1`，可以 `irm … | iex` |
