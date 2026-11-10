@@ -551,3 +551,56 @@ test "shared elements fly, morph and fly on as copies through a real frame" {
     try h.advance(100 * std.time.ns_per_ms);
     try testing.expect(!h.view.matches.moving());
 }
+
+const Switcher = struct {
+    mode: enum { light, dark, system } = .light,
+    fill: bool = true,
+    narrow: bool = false,
+    fn build(self: *Switcher, v: *View) anyerror!void {
+        try v.column(.{ .width = if (self.narrow) 90 else 400 });
+        try v.segmented(.{ .name = "Appearance", .fill_equally = self.fill });
+        const T = @TypeOf(self.mode);
+        _ = try v.segment(T, &self.mode, .light, "Light", .{});
+        _ = try v.segment(T, &self.mode, .dark, "Dark", .{});
+        _ = try v.segment(T, &self.mode, .system, "Use the system's appearance", .{ .enabled = false });
+        try v.end();
+        try v.end();
+    }
+};
+
+test "a segmented control filling its width shares it equally among its segments" {
+    var storage: Storage = .{};
+    var app: Switcher = .{};
+    var h = Harness.init(&app, Switcher.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const group = try h.find(.{ .kind = .segmented });
+    try testing.expectApproxEqAbs(@as(f32, 400), group.bounds.width, 0.01);
+    const light = (try h.find(.{ .text = "Light" })).bounds;
+    const dark = (try h.find(.{ .text = "Dark" })).bounds;
+    const system = (try h.find(.{ .text = "Use the system's appearance" })).bounds;
+    try testing.expectApproxEqAbs(light.width, dark.width, 0.01);
+    try testing.expectApproxEqAbs(light.width, system.width, 0.01);
+    try testing.expectApproxEqAbs(light.x + light.width, dark.x, 0.01);
+    try testing.expectApproxEqAbs(group.bounds.x + group.bounds.width, system.x + system.width, 0.01);
+    // Clicks and the arrows choose as before, past the disabled segment.
+    try h.click(.{ .text = "Dark" });
+    try testing.expectEqual(.dark, app.mode);
+    try testing.expect(try h.key(press(.right)));
+    try testing.expectEqual(.light, app.mode);
+    // Without it, each segment is as wide as its label.
+    app.fill = false;
+    try h.render();
+    const short = (try h.find(.{ .text = "Dark" })).bounds;
+    const long = (try h.find(.{ .text = "Use the system's appearance" })).bounds;
+    try testing.expect(long.width > short.width + 40);
+    // A parent narrower than the labels still shares what it has.
+    app.fill = true;
+    app.narrow = true;
+    try h.render();
+    const a = (try h.find(.{ .text = "Light" })).bounds;
+    const c = (try h.find(.{ .text = "Use the system's appearance" })).bounds;
+    try testing.expectApproxEqAbs(a.width, c.width, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 30), a.width, 0.01);
+}

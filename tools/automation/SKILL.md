@@ -111,8 +111,14 @@ Roles are `group`, `text`, `button`, `link`, `checkBox`,
 `meter`, `tab`, `tabList`, `list`, `listItem`, `tree`, `treeItem`,
 `table`, `row`, `columnHeader`, `dialog`, `alertDialog`, `popup`,
 `toolbar`, `image`, `comboBox`, `popUpButton`, `textField`, `scroll`,
-`status`, `splitter` and `disclosure`. States are `disabled`, `checked`,
-`mixed`, `selected`, `expandable`, `expanded`, `invalid`, `search`,
+`status`, `splitter`, `disclosure`, `navigation`, `search`, `menu`,
+`menuItem`, `menuItemCheckBox`, `menuItemRadio`, `separator`,
+`tokenField` and `token`; a role the app gives a container or text comes
+first: `region`, `article`, `log`, `timer`, `alert`, `heading`, `grid`,
+`treeGrid`, `row`, `cell`, `deletion`, `insertion`, `tabPanel`, `main`,
+`banner`, `contentInfo` and `complementary`. States are `disabled`,
+`checked`, `mixed`, `selected`, `expandable`, `expanded`, `invalid`,
+`readOnly`, `search`,
 `segment`, `sortAscending`, `sortDescending`, `vertical` and `offscreen`
 (scrolled or clipped out of sight). Only what assistive technology reads
 is there: rows and columns that only lay out others have no line.

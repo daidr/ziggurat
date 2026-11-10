@@ -441,3 +441,27 @@ test "states forced in the Styles tab show whatever the pointer and keyboard do"
     try h.render();
     try testing.expect(context.input_state.focused != button.id);
 }
+
+const Roles = struct {
+    fn build(_: *Roles, v: *View) anyerror!void {
+        try v.column(.{ .key = 1, .role = .tab_panel, .name = "General" });
+        try v.text("Settings", .{ .key = 2, .role = .heading });
+        try v.end();
+        try v.column(.{ .key = 3, .role = .content_info });
+        try v.end();
+    }
+};
+
+test "the role a style gives is the one the inspector names" {
+    var app: Roles = .{};
+    var storage: Storage = .{};
+    var h = Harness.init(&app, Roles.build, storage.buffers(), .{});
+    try h.render();
+    if (!inspector.enabled) return error.SkipZigTest;
+    var tools: Inspector = .{ .open = true };
+    tools.capture(&h.view, null, .{}, .{});
+    for ([_]struct { u64, []const u8 }{ .{ 1, "tabpanel" }, .{ 2, "heading" }, .{ 3, "contentinfo" } }) |case| {
+        const node = try h.find(.{ .key = case[0] });
+        try testing.expectEqualStrings(case[1], inspector.elementRole(&tools.elements[tools.indexOf(node.id).?]));
+    }
+}

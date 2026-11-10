@@ -306,6 +306,15 @@ pub const Result = struct {
     submitted: ?usize = null,
     /// A double click, on the row and the column under the pointer.
     double_clicked: ?CellRef = null,
+    /// A single click of the primary button without modifiers, released
+    /// on the row it pressed, with the row and the column under the
+    /// pointer (0 in a grid view): for rows that act on a
+    /// click, as a sidebar showing its page, while the click goes on
+    /// choosing the row. It reports a click on the row already chosen
+    /// too; not the keys moving the choice, a Shift- or Ctrl-click, a drag
+    /// choosing or moving rows, nor the later presses of a double click,
+    /// whose first press it reports and whose second `double_clicked` does.
+    clicked: ?CellRef = null,
     /// The user sorted the table again.
     sorted: bool = false,
     /// The user resized or moved columns; save `TableState.layout`.
@@ -324,6 +333,7 @@ pub const Result = struct {
         self.changed = self.changed or other.changed;
         if (other.submitted) |row| self.submitted = row;
         if (other.double_clicked) |cell| self.double_clicked = cell;
+        if (other.clicked) |cell| self.clicked = cell;
         self.sorted = self.sorted or other.sorted;
         self.arranged = self.arranged or other.arranged;
         if (other.moved) |move| self.moved = move;
@@ -333,13 +343,20 @@ pub const Result = struct {
 
 // ------------------------------------------------------------------- core
 
+/// A first press of the primary button without modifiers: one whose
+/// release on its row reports `Result.clicked`.
+fn singleClick(press: view.PointerPress) bool {
+    const mods = press.modifiers;
+    return press.count == 1 and !mods.shift and !mods.control and !mods.alt and !mods.super;
+}
+
 const Shape = enum { table, outline, grid };
 const Request = struct { row: usize, alignment: ScrollAlign };
 const Op = enum { set, toggle, range, range_add, cursor };
 
 const Press = union(enum) {
     none,
-    rows: struct { index: usize, column: ?usize, deferred: bool, add: bool, reordering: bool = false, selecting: bool = false, row_header: bool = false },
+    rows: struct { index: usize, column: ?usize, deferred: bool, add: bool, reordering: bool = false, selecting: bool = false, row_header: bool = false, single: bool = false },
     header: struct { column: usize, moving: bool = false, modifiers: z.KeyModifiers },
     resize: struct { column: usize, start: f32 },
     thumb: struct { vertical: bool, start_scroll: f64, origin: f32 },
@@ -387,6 +404,13 @@ const Core = struct {
     cursor_hint: usize = 0,
     anchor_hint: usize = 0,
     hover: ?usize = null,
+    /// Where the pointer rests over the leaf, local to it, for the row a
+    /// scroll brings under it to hover in the frame that shows the scroll.
+    hover_at: ?Point = null,
+    /// The style of the theme's scroll bars as of the last paint, which
+    /// input lays the bars out with.
+    bar_style: ui.scroll.Style = .{},
+    bar_hovered: bool = false,
     press: Press = .none,
     pointer: Point = .{},
     pointer_inside: bool = false,
@@ -439,6 +463,13 @@ const Core = struct {
         const key = selection.cursor orelse return null;
         const index = self.indexOf(key, self.cursor_hint) orelse return null;
         self.cursor_hint = index;
+        return index;
+    }
+    /// The row the keys are on, when it is chosen and not a section header.
+    fn chosenCursor(self: *Core) ?usize {
+        const index = self.cursorIndex() orelse return null;
+        if (!self.selected(index)) return null;
+        if (self.rows.header) |is_header| if (is_header(self.rows.context, index)) return null;
         return index;
     }
     fn anchorIndex(self: *Core) ?usize {
@@ -934,6 +965,25 @@ const Core = struct {
         return @max(1, (self.bounds.width - self.gap * (columns + 1)) / columns);
     }
 
+    /// Notes whether the pointer at `local` is over the vertical scroll
+    /// bar, which shows hovered; true when that changed.
+    fn hoverBar(self: *Core, local: ?Point) bool {
+        const over = if (local) |at| bodyBar(self, .{ .x = 0, .y = 0, .width = self.bounds.width, .height = self.bounds.height }, self.scroll_y).hit(at) else false;
+        defer self.bar_hovered = over;
+        return over != self.bar_hovered;
+    }
+    /// The row under a pointer resting at `local`, header and gaps aside.
+    fn hoverIndex(self: *const Core, local: Point) ?usize {
+        if (self.shape != .grid and local.y < self.bodyTop()) return null;
+        return self.indexAt(local, false);
+    }
+    /// The row under the resting pointer hovers at the offset the frame
+    /// shows, so a scroll by the wheel, the keys or the application moves
+    /// the hover with it in the same frame, not in the next.
+    fn rehover(self: *Core) void {
+        const at = self.hover_at orelse return;
+        self.hover = self.hoverIndex(at);
+    }
     fn wheel(self: *Core, delta: Point) bool {
         const before = self.scroll_y;
         const before_x = self.scroll_x;
@@ -941,6 +991,13 @@ const Core = struct {
         self.clampScroll();
         if (self.shape != .grid) self.table().scrollSideways(delta.x);
         return self.scroll_y != before or self.scroll_x != before_x;
+    }
+
+    /// Whether the release of a press on rows at `point` ends a single
+    /// click of the row it pressed (`Result.clicked`).
+    fn clickedOn(self: *const Core, rows: anytype, point: Point) bool {
+        if (!rows.single or rows.reordering or rows.selecting) return false;
+        return self.indexAt(point, false) == rows.index;
     }
 
     /// Keys every collection shares. Null for keys it leaves to its owner.
@@ -1030,16 +1087,22 @@ fn triangle(frame: *ui.Frame, bounds: Rect, direction: enum { right, down, up, l
 
 /// The vertical scroll bar of a collection's body, as a scroll container's.
 fn bodyBar(core: *const Core, origin: Rect, offset: f64) ui.scroll.Bar {
-    return .{ .box = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = origin.width, .height = core.bodyHeight() }, .view = core.bodyHeight(), .content = @floatCast(core.contentHeight()), .offset = @floatCast(offset) };
+    return .{ .box = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = origin.width, .height = core.bodyHeight() }, .view = core.bodyHeight(), .content = @floatCast(core.contentHeight()), .offset = @floatCast(offset), .style = core.bar_style };
 }
 
-fn paintScrollIndicators(frame: *ui.Frame, core: *const Core, origin: Rect, content_width: f32, view_width: f32, palette: ui.theme.Palette) void {
+/// The bars in the theme's style (`Theme.scrollbar`), which input then
+/// lays them out with; the bar under the pointer shows hovered.
+fn paintScrollIndicators(frame: *ui.Frame, core: *Core, origin: Rect, content_width: f32, view_width: f32, palette: ui.theme.Palette) void {
+    core.bar_style = frame.scrollbarStyle();
     const color = ui.Color.rgb(palette.track);
     const dragging = core.press == .thumb;
-    bodyBar(core, origin, core.scroll_y).paint(frame, color, dragging);
+    const down = bodyBar(core, origin, core.scroll_y);
+    const over = if (core.hover_at) |at| down.hit(.{ .x = origin.x + at.x, .y = origin.y + at.y }) else false;
+    down.paintStyled(frame, color, .{ .dragging = dragging, .hovered = over });
     const body: Rect = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = view_width, .height = core.bodyHeight() };
-    const across: ui.scroll.Bar = .{ .box = body, .axis = .horizontal, .view = view_width, .content = content_width, .offset = core.scroll_x };
-    across.paint(frame, color, false);
+    const across: ui.scroll.Bar = .{ .box = body, .axis = .horizontal, .view = view_width, .content = content_width, .offset = core.scroll_x, .style = core.bar_style };
+    const over_across = if (core.hover_at) |at| across.hit(.{ .x = origin.x + at.x, .y = origin.y + at.y }) else false;
+    across.paintStyled(frame, color, .{ .hovered = over_across });
 }
 
 // ------------------------------------------------------------------ table
@@ -1097,6 +1160,9 @@ pub const TableState = struct {
     // The columns' place and width by id, in the order shown.
     ids: [max_columns]u64 = undefined,
     widths: [max_columns]f32 = undefined,
+    /// The widths as a resize of a column began, for its release to tell
+    /// whether it changed them (`Result.arranged`).
+    widths_before: [max_columns]f32 = undefined,
     order: [max_columns]u8 = undefined,
     column_count: usize = 0,
     restore_storage: [max_columns]ColumnWidth = undefined,
@@ -1381,7 +1447,12 @@ pub const TableState = struct {
             self.widths[earlier] = g.width[at];
         };
         self.widths[column] = self.clampWidth(column, width);
-        self.core.pending.arranged = true;
+    }
+    /// Reports `Result.arranged` when the widths differ from those kept
+    /// as the resize began.
+    fn resized(self: *TableState) void {
+        const n = self.columns.len;
+        if (!std.mem.eql(f32, self.widths_before[0..n], self.widths[0..n])) self.core.pending.arranged = true;
     }
     fn sortClick(self: *TableState, column: usize, modifiers: z.KeyModifiers) void {
         if (column >= self.columns.len or !self.columns[column].sortable or self.columns[column].row_header) return;
@@ -1465,7 +1536,18 @@ pub const TableState = struct {
     }
 
     fn embed(self: *TableState) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input, .cursor = pointerShape, .drag = dragOut };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input, .cursor = pointerShape, .drag = dragOut, .menu_point = menuPoint };
+    }
+    /// The menu key opens a menu around the table below the chosen row the
+    /// keys are on, while it shows.
+    fn menuPoint(ptr: *anyopaque) ?Point {
+        const self: *TableState = @ptrCast(@alignCast(ptr));
+        const core = &self.core;
+        const index = core.chosenCursor() orelse return null;
+        const top: f32 = @floatCast(core.lineTop(index) - core.scroll_y);
+        const bottom = core.bodyTop() + top + core.row_height;
+        if (top < 0 or bottom > core.bounds.height) return null;
+        return .{ .x = 0, .y = bottom };
     }
     fn dragOut(ptr: *anyopaque, _: u64) ?view.EmbedDrag {
         const self: *TableState = @ptrCast(@alignCast(ptr));
@@ -1499,6 +1581,7 @@ pub const TableState = struct {
         core.clampScroll();
         self.scrollSideways(0);
         core.settle();
+        core.rehover();
         const theme = frame.currentTheme();
         const palette = theme.palette;
         const focused = focusedOn(frame, id) and core.enabled;
@@ -1790,13 +1873,17 @@ pub const TableState = struct {
         const core = &self.core;
         switch (event) {
             .pointer_move => |point| {
-                const hit = if (point.y >= core.bodyTop()) core.indexAt(point, false) else null;
-                if (std.meta.eql(hit, core.hover)) return false;
+                core.hover_at = point;
+                const bar = core.hoverBar(point);
+                const hit = core.hoverIndex(point);
+                if (std.meta.eql(hit, core.hover)) return bar;
                 core.hover = hit;
                 return true;
             },
             .pointer_leave => {
-                if (core.hover == null) return false;
+                core.hover_at = null;
+                const bar = core.hoverBar(null);
+                if (core.hover == null) return bar;
                 core.hover = null;
                 return true;
             },
@@ -1804,6 +1891,8 @@ pub const TableState = struct {
             .pointer_drag => |drag| return self.pointerDrag(drag),
             .pointer_up => |point| return self.pointerUp(point),
             .pointer_cancel => {
+                // A resize the window took away keeps its widths.
+                if (core.press == .resize) self.resized();
                 core.press = .none;
                 core.reorder_target = null;
                 self.move_target = null;
@@ -1841,8 +1930,10 @@ pub const TableState = struct {
         }
         if (point.y < core.header_height) {
             if (self.resizeEdgeAt(point.x)) |column| {
+                @memcpy(self.widths_before[0..self.columns.len], self.widths[0..self.columns.len]);
                 if (press.count >= 2) {
                     self.fit(column);
+                    self.resized();
                     core.press = .none;
                 } else core.press = .{ .resize = .{ .column = column, .start = self.geometry(core.bounds.width).width[self.positionOf(column).?] } };
                 return true;
@@ -1915,7 +2006,7 @@ pub const TableState = struct {
         }
         const selecting = !core.reorder and (core.drag_select or self.cells != null) and core.multiple();
         if (selecting) core.beginDragChoice(mods.control);
-        core.press = .{ .rows = .{ .index = index, .column = column, .deferred = deferred, .add = mods.control, .row_header = row_header } };
+        core.press = .{ .rows = .{ .index = index, .column = column, .deferred = deferred, .add = mods.control, .row_header = row_header, .single = singleClick(press) } };
         if (row_header) if (self.cells) |cells| {
             cells.all = true;
         };
@@ -1980,6 +2071,7 @@ pub const TableState = struct {
         core.press = .none;
         core.stopEdge();
         switch (pressed) {
+            .resize => self.resized(),
             .header => |header| {
                 if (header.moving) {
                     if (self.move_target) |target| self.moveColumn(header.column, target);
@@ -2000,6 +2092,7 @@ pub const TableState = struct {
                         cells.all = false;
                     };
                 }
+                if (core.clickedOn(rows, point)) core.pending.clicked = .{ .row = rows.index, .column = rows.column orelse self.firstTextColumn() };
             },
             else => {},
         }
@@ -2433,7 +2526,16 @@ pub const GridState = struct {
         core.grid_columns = if (value >= 1 and std.math.isFinite(value)) @intFromFloat(@min(value, 4096)) else 1;
     }
     fn embed(self: *GridState) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input, .drag = dragOut };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input, .drag = dragOut, .menu_point = menuPoint };
+    }
+    /// The menu key opens a menu around the grid below the chosen item the
+    /// keys are on, while it shows.
+    fn menuPoint(ptr: *anyopaque) ?Point {
+        const self: *GridState = @ptrCast(@alignCast(ptr));
+        const index = self.core.chosenCursor() orelse return null;
+        const rect = self.itemRect(index);
+        if (rect.y < 0 or rect.y + rect.height > self.core.bounds.height) return null;
+        return .{ .x = rect.x, .y = rect.y + rect.height };
     }
     fn dragOut(ptr: *anyopaque, _: u64) ?view.EmbedDrag {
         const self: *GridState = @ptrCast(@alignCast(ptr));
@@ -2467,6 +2569,7 @@ pub const GridState = struct {
         self.layoutColumns(bounds.width);
         core.resolveRequest();
         core.settle();
+        core.rehover();
         const theme = frame.currentTheme();
         const palette = theme.palette;
         const focused = focusedOn(frame, id) and core.enabled;
@@ -2530,13 +2633,17 @@ pub const GridState = struct {
         const core = &self.core;
         switch (event) {
             .pointer_move => |point| {
-                const hit = core.indexAt(point, false);
-                if (std.meta.eql(hit, core.hover)) return false;
+                core.hover_at = point;
+                const bar = core.hoverBar(point);
+                const hit = core.hoverIndex(point);
+                if (std.meta.eql(hit, core.hover)) return bar;
                 core.hover = hit;
                 return true;
             },
             .pointer_leave => {
-                if (core.hover == null) return false;
+                core.hover_at = null;
+                const bar = core.hoverBar(null);
+                if (core.hover == null) return bar;
                 core.hover = null;
                 return true;
             },
@@ -2561,7 +2668,7 @@ pub const GridState = struct {
                     deferred = true;
                 } else core.choose(index, .set);
                 if (core.drag_select and !core.reorder and core.multiple()) core.beginDragChoice(mods.control);
-                core.press = .{ .rows = .{ .index = index, .column = null, .deferred = deferred, .add = mods.control } };
+                core.press = .{ .rows = .{ .index = index, .column = null, .deferred = deferred, .add = mods.control, .single = singleClick(press) } };
                 return true;
             },
             .pointer_drag => |drag| {
@@ -2607,7 +2714,10 @@ pub const GridState = struct {
                         _ = &target;
                         core.reorder_target = null;
                         if (target != rows.index and target != rows.index + 1) core.pending.moved = .{ .row = rows.index, .to = target, .selection = core.selected(rows.index) };
-                    } else if (rows.deferred) core.choose(rows.index, .set),
+                    } else {
+                        if (rows.deferred) core.choose(rows.index, .set);
+                        if (core.clickedOn(rows, point)) core.pending.clicked = .{ .row = rows.index, .column = 0 };
+                    },
                     else => {},
                 }
                 return true;

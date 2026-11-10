@@ -4,7 +4,8 @@
 //! elsewhere paste with their formats. Markdown typed at the start of a
 //! paragraph ("# ", "- ", "1. ", "[ ] ", "```") and around words ("**bold**",
 //! "`code`") formats as it is typed. Text is measured with the platform's
-//! text layout, so that it wraps where it is drawn.
+//! text layout, so that it wraps where it is drawn. A right click opens a
+//! menu of Cut, Copy, Paste and Select All where it is.
 //!
 //! Run it with `zig build run-rich-text`.
 const std = @import("std");
@@ -72,6 +73,11 @@ const Notes = struct {
     }
 };
 
+/// The context menu: Cut, Copy, Paste and Select All.
+fn editMenu(_: ?*anyopaque, v: *view.View, editor: *rich.Editor) view.Error!void {
+    try editor.editItems(v);
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -99,6 +105,7 @@ pub fn main() !void {
         .placeholder = "Write something",
         .clipboard = system_clipboard.clipboard(),
         .font = .{ .size = 15 },
+        .menu = .{ .build = editMenu },
     });
     defer editor.deinit();
     notes.editor = &editor;

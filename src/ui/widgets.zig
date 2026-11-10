@@ -40,6 +40,10 @@ pub const Options = struct {
     /// False records the control's hit, focus and semantics and draws only
     /// its focus ring, for a control whose look its caller draws.
     look: bool = true,
+    /// A progress bar's fill (0xRRGGBB) in place of the accent.
+    fill_color: ?u32 = null,
+    /// A progress bar's or a meter's track in place of the theme's trough.
+    track_color: ?u32 = null,
 };
 pub const RangeOptions = struct { control: Options = .{}, vertical: bool = false };
 pub const RangeSliderIds = struct { group: u64, low: u64, high: u64 };
@@ -57,6 +61,12 @@ pub const SplitterOptions = struct { control: Options = .{}, vertical: bool = fa
 pub const MeterBands = struct {
     low: ?f64 = null,
     high: ?f64 = null,
+    /// The fill (0xRRGGBB) of a value within the bands, in place of the
+    /// theme's accent; a meter without bands fills in it throughout.
+    normal_color: ?u32 = null,
+    /// The fill of a value outside the bands, in place of the theme's
+    /// caution color.
+    caution_color: ?u32 = null,
     pub fn validate(self: MeterBands, spec: Range) error{InvalidRange}!void {
         inline for (.{ self.low, self.high }) |bound| if (bound) |value| if (!std.math.isFinite(value) or value < spec.minimum or value > spec.maximum) return error.InvalidRange;
         if (self.low != null and self.high != null and self.low.? > self.high.?) return error.InvalidRange;
@@ -251,8 +261,9 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
         .progress => {
             try fill(frame, bounds, border);
             const inside = inset(bounds, metrics.border);
-            try fill(frame, inside, colors.trough);
-            try fill(frame, .{ .x = inside.x, .y = inside.y, .width = inside.width * amount, .height = inside.height }, accent);
+            try fill(frame, inside, options.track_color orelse colors.trough);
+            const bar: u32 = if (options.enabled) options.fill_color orelse colors.accent else colors.disabled_accent;
+            try fill(frame, .{ .x = inside.x, .y = inside.y, .width = inside.width * amount, .height = inside.height }, bar);
         },
         .segment => {
             // Segments are joined buttons; the selected one is filled with the accent.
@@ -486,8 +497,9 @@ pub fn emitMeter(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spec:
     const colors = style.palette;
     try fill(frame, bounds, if (options.control.enabled) colors.border else colors.disabled_border);
     const inside = inset(bounds, style.metrics.border);
-    try fill(frame, inside, colors.trough);
-    const color: u32 = if (!options.control.enabled) colors.disabled_accent else if (options.bands.contains(value)) colors.accent else colors.caution;
+    try fill(frame, inside, options.control.track_color orelse colors.trough);
+    const bands = options.bands;
+    const color: u32 = if (!options.control.enabled) colors.disabled_accent else if (bands.contains(value)) bands.normal_color orelse colors.accent else bands.caution_color orelse colors.caution;
     try fill(frame, .{ .x = inside.x, .y = inside.y, .width = inside.width * valueFraction(spec, value), .height = inside.height }, color);
 }
 

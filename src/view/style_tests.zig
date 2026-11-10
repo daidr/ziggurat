@@ -560,3 +560,88 @@ test "letter spacing goes after each character of the texts inside, and 0 takes 
         }
     }.bad(&h.view));
 }
+
+const Gauges = struct {
+    used: f64 = 30,
+    fn build(self: *Gauges, v: *View) anyerror!void {
+        try v.column(.{ .gap = 8, .padding = .all(8) });
+        try v.meter(self.used, .{ .minimum = 0, .maximum = 100 }, .{ .high = 80, .normal_color = 0x8a8a8a, .caution_color = 0xf5a623 }, .{ .name = "Disk", .background = 0x202020 });
+        try v.meter(self.used, .{ .minimum = 0, .maximum = 100 }, .{ .normal_color = 0x00aa55 }, .{ .name = "Battery" });
+        try v.meter(self.used, .{ .minimum = 0, .maximum = 100 }, .{ .high = 80 }, .{ .name = "Plain" });
+        try v.progress(0.5, .{ .name = "Upload", .color = 0x7c3aed, .background = 0x111111 });
+        try v.end();
+    }
+};
+
+fn fillsOf(commands: []const ui.commands.Command, color: u32) usize {
+    var count: usize = 0;
+    for (commands) |command| if (command == .fill and command.fill.color & 0xffffff == color) {
+        count += 1;
+    };
+    return count;
+}
+
+test "meters and progress bars fill in colors of the application's own" {
+    var storage: Storage = .{};
+    var app: Gauges = .{};
+    var h = Harness.init(&app, Gauges.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const palette = h.config.theme.palette;
+    var commands = try paintAgain(&h, &context);
+    try testing.expectEqual(@as(usize, 1), fillsOf(commands, 0x8a8a8a));
+    try testing.expectEqual(@as(usize, 1), fillsOf(commands, 0x00aa55));
+    try testing.expectEqual(@as(usize, 1), fillsOf(commands, 0x7c3aed));
+    try testing.expect(fillsOf(commands, 0x202020) >= 1);
+    try testing.expect(fillsOf(commands, 0x111111) >= 1);
+    try testing.expectEqual(@as(usize, 0), fillsOf(commands, 0xf5a623));
+    // Past the band, the caution color of the meter's own; the meter
+    // without colors keeps the theme's.
+    app.used = 90;
+    try h.render();
+    commands = try paintAgain(&h, &context);
+    try testing.expectEqual(@as(usize, 1), fillsOf(commands, 0xf5a623));
+    try testing.expectEqual(@as(usize, 1), fillsOf(commands, 0x00aa55));
+    try testing.expect(fillsOf(commands, palette.caution & 0xffffff) >= 1);
+}
+
+const Paths = struct {
+    wrap: bool = false,
+    fn build(self: *Paths, v: *View) anyerror!void {
+        try v.column(.{ .width = 9 * 14 });
+        try v.text("/Users/me/Documents/Reports/summary-final.pdf", .{ .truncate_middle = true, .wrap = self.wrap, .max_lines = if (self.wrap) 2 else 0 });
+        try v.end();
+    }
+};
+
+fn shownText(h: *Harness, context: *ui.Context) ![]const u8 {
+    const commands = try paintAgain(h, context);
+    const bytes = context.command_buffer.textBytes();
+    var last: []const u8 = "";
+    for (commands) |command| if (command == .text) {
+        last = bytes[command.text.offset..][0..command.text.len];
+    };
+    return last;
+}
+
+test "a text cut in its middle keeps its start and its end" {
+    var storage: Storage = .{};
+    var app: Paths = .{};
+    var h = Harness.init(&app, Paths.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const node = try h.find(.{ .kind = .text });
+    try testing.expectApproxEqAbs(@as(f32, 9 * 14), node.bounds.width, 0.01);
+    var shown = try shownText(&h, &context);
+    try testing.expect(std.mem.startsWith(u8, shown, "/Users"));
+    try testing.expect(std.mem.endsWith(u8, shown, ".pdf"));
+    try testing.expect(std.mem.indexOf(u8, shown, "\u{2026}") != null);
+    // Wrapped, the last line shown keeps the paragraph's end.
+    app.wrap = true;
+    try h.render();
+    shown = try shownText(&h, &context);
+    try testing.expect(std.mem.endsWith(u8, shown, ".pdf"));
+    try testing.expect(std.mem.indexOf(u8, shown, "\u{2026}") != null);
+}

@@ -1,6 +1,6 @@
 //! A widget gallery: a sidebar list of pages beside a scrolling page that
 //! shows most `ziggurat_view` controls, each bound directly to a field of
-//! `Gallery`. It covers buttons, links, navigation buttons, badges and
+//! `Gallery`. It covers buttons, a split button, links, navigation buttons, badges and
 //! avatars; checkboxes, switches, radios, segments and tabs; sliders,
 //! steppers, progress, meters and ratings; breadcrumbs, disclosures and
 //! accordions; list boxes, combo boxes, trees and sortable tables; form
@@ -141,6 +141,14 @@ const Gallery = struct {
         if (try v.link("Reset count", .{ .enabled = self.presses != 0 })) self.presses = 0;
         try v.end();
         try v.textf("Pressed {d} times", .{self.presses}, .{ .color = muted });
+        // A button joined to a menu of related actions.
+        const add = try v.splitButton("Add one", .{}, .{ .self_align = .start });
+        if (add.shown) {
+            if (try v.menuItem("Add ten", .{}, .{})) self.presses += 10;
+            if (try v.menuItem("Add a hundred", .{}, .{})) self.presses += 100;
+        }
+        try v.end();
+        if (add.clicked) self.presses += 1;
         try v.row(.{ .gap = 8, .alignment = .center });
         if (try v.navButton(.back, .{})) self.presses -|= 1;
         if (try v.navButton(.forward, .{})) self.presses += 1;
@@ -373,6 +381,11 @@ test "pages respond to input" {
     try h.render();
     try h.click(.{ .text = "Press me" });
     try std.testing.expectEqual(@as(u32, 1), gallery.presses);
+    try h.click(.{ .text = "Add one" });
+    try std.testing.expectEqual(@as(u32, 2), gallery.presses);
+    try h.click(.{ .name = "More options" });
+    try h.click(.{ .text = "Add ten" });
+    try std.testing.expectEqual(@as(u32, 12), gallery.presses);
 
     gallery.page = .collections;
     try h.render();

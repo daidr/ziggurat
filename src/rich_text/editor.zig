@@ -223,6 +223,53 @@ pub const TagStyler = struct {
     style: *const fn (?*anyopaque, []const u8, *lay.Style) void,
 };
 
+/// How a span of a paragraph looks, and a span: its text and look.
+pub const SpanStyle = lay.Style;
+pub const Span = lay.Span;
+
+/// Builds the editor's context menu, which a secondary press over it or
+/// the menu key opens: `build` adds its items to the menu open in `v`, as
+/// `Editor.editItems` adds Cut, Copy, Paste and Select All.
+pub const MenuBuilder = struct {
+    context: ?*anyopaque = null,
+    build: *const fn (?*anyopaque, *view.View, *Editor) view.Error!void,
+};
+
+/// Asked about a key before the editor acts on it: true takes the key and
+/// the editor does nothing with it, as a popup over the text, a list of
+/// completions, takes the arrows, Enter and Escape.
+pub const KeyFilter = struct {
+    context: ?*anyopaque = null,
+    key: *const fn (?*anyopaque, *Editor, z.KeyCode, z.KeyModifiers) bool,
+};
+
+/// The spans of a paragraph as the application draws them: given the
+/// spans the editor would draw paragraph `index` as, appends to `out` the
+/// spans to draw instead, split, colored or in other fonts, their text the
+/// same and in the same order, as an application colors a block of code
+/// by its language. Their texts may be slices of those given; spans whose
+/// text differs are not used. The layouts are kept until
+/// `Options.spans_version` changes.
+pub const SpanStyler = struct {
+    context: ?*anyopaque = null,
+    spans: *const fn (?*anyopaque, Allocator, index: usize, style: ParagraphStyle, spans: []const Span, out: *std.ArrayList(Span)) anyerror!void,
+};
+
+/// Where the editor shows the caret, as `Editor.caretRect` gives it.
+pub const CaretBox = struct {
+    /// In DIP from the top left of the editor's leaf, scrolled.
+    rect: Rect,
+    /// Whether it is within the leaf.
+    visible: bool,
+};
+
+/// A context menu item of `Editor.editItems`.
+pub const MenuEntry = struct {
+    command: Command,
+    label: []const u8,
+    enabled: bool,
+};
+
 pub const Options = struct {
     /// Names the editor to assistive technology.
     name: []const u8 = "Rich text",
@@ -258,7 +305,41 @@ pub const Options = struct {
     on_change: ?Callback = null,
     attachment_painter: ?AttachmentPainter = null,
     tag_styler: ?TagStyler = null,
+    /// Builds the context menu; without it the editor has none.
+    menu: ?MenuBuilder = null,
+    /// Asked about each key before the editor acts on it.
+    on_key: ?KeyFilter = null,
+    /// Draws a paragraph's spans as the application wants them.
+    span_styler: ?SpanStyler = null,
+    /// Change it when what `span_styler` does changes, for the paragraphs
+    /// to be laid out again.
+    spans_version: u64 = 0,
 };
+
+/// Whether two lists of spans hold the same text.
+fn sameText(a: []const Span, b: []const Span) bool {
+    var i: usize = 0;
+    var off: usize = 0;
+    for (b) |span| {
+        var rest = span.text;
+        while (rest.len > 0) {
+            while (i < a.len and off == a[i].text.len) {
+                i += 1;
+                off = 0;
+            }
+            if (i >= a.len) return false;
+            const n = @min(rest.len, a[i].text.len - off);
+            if (!std.mem.eql(u8, rest[0..n], a[i].text[off .. off + n])) return false;
+            rest = rest[n..];
+            off += n;
+        }
+    }
+    while (i < a.len and off == a[i].text.len) {
+        i += 1;
+        off = 0;
+    }
+    return i >= a.len;
+}
 
 /// Whether the system may open `url`: http, https and mailto, without
 /// controls or backslashes.
@@ -337,7 +418,7 @@ const ParaView = struct {
     marker_len: u8 = 0,
 };
 
-const LookKey = struct { width: f32, font: view.Font, theme: ui.Theme, tags: bool };
+const LookKey = struct { width: f32, font: view.Font, theme: ui.Theme, tags: bool, spans: bool, spans_version: u64 };
 
 /// Where a paragraph is in an editor, as `Editor.visibleParagraphs` gives
 /// it.
@@ -417,6 +498,9 @@ pub const Editor = struct {
     /// DIPs below its top; `hovered` that the pointer is over the editor,
     /// which shows the bar.
     thumb: bool = false,
+    /// The theme's scroll bar style as of the last paint, which input
+    /// lays the bar out with.
+    bar_style: ui.scroll.Style = .{},
     thumb_grab: f32 = 0,
     hovered: bool = false,
     cursor: Cursor = .text,
@@ -439,6 +523,10 @@ pub const Editor = struct {
     /// whether it read them since the last paint.
     boxes: std.ArrayList(ParagraphBox) = .empty,
     boxes_read: bool = false,
+    /// The caret `caretRect` gave, which a paint that shows it elsewhere
+    /// asks another frame for.
+    caret_read: ?CaretBox = null,
+    caret_asked: bool = false,
 
     pub fn init(host: *view.Host, allocator: Allocator, doc: *Document, options: Options) Editor {
         var e: Editor = .{ .host = host, .allocator = allocator, .doc = doc, .options = options, .look = resolve(options.theme, .{}) };
@@ -461,7 +549,7 @@ pub const Editor = struct {
     /// The leaf to emit with `View.embed`. Give it a `Style.key` when
     /// siblings before it can change.
     pub fn embed(self: *Editor) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .status = status, .input = hoverInput, .takes_text = takesText };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .status = status, .input = hoverInput, .takes_text = takesText, .secondary_press = secondaryPress };
     }
     fn takesText(ptr: *anyopaque) bool {
         const self: *Editor = @ptrCast(@alignCast(ptr));
@@ -476,6 +564,91 @@ pub const Editor = struct {
             if (phase < blink_for_ns) v.wakeAt(self.now + (blink_ns - phase % blink_ns));
         }
         try v.embed(self.embed(), style);
+        if (self.options.menu) |builder| {
+            if (try v.popoverMenu(.{ .name = self.options.name })) try builder.build(builder.context, v, self);
+            try v.end();
+        }
+    }
+
+    /// The items of a text editor's context menu: Cut, Copy, Paste and
+    /// Select All, enabled as they act now.
+    pub fn editEntries(self: *Editor) [4]MenuEntry {
+        self.sync() catch |err| self.fail(err);
+        const sel = self.selection();
+        const selected = sel[0] != sel[1];
+        const editable = !self.options.read_only;
+        return .{
+            .{ .command = .cut, .label = "Cut", .enabled = selected and editable },
+            .{ .command = .copy, .label = "Copy", .enabled = selected },
+            .{ .command = .paste, .label = "Paste", .enabled = editable and self.options.clipboard != null },
+            .{ .command = .select_all, .label = "Select All", .enabled = self.textLen() > 0 },
+        };
+    }
+
+    /// Adds `editEntries` to the menu open in `v`, as `Options.menu`
+    /// builds it; the one chosen runs on the editor.
+    pub fn editItems(self: *Editor, v: *view.View) view.Error!void {
+        for (self.editEntries()) |entry| {
+            if (try v.menuItem(entry.label, .{}, .{ .enabled = entry.enabled })) _ = self.runCommand(entry.command);
+        }
+    }
+
+    /// Where the editor shows the caret in this frame, in DIP from the top
+    /// left of its leaf, scrolled, and whether it is in view: an
+    /// application puts a popup by it, as completions under what is typed.
+    /// It lays out what is in view as it is read, and a paint that finds
+    /// the caret elsewhere than read asks for another frame, so a popup
+    /// follows the caret as the user types, the editor scrolls or its width
+    /// changes. Null before the editor laid the text out, which asks for a
+    /// frame too. Read it as the view builds, on the main thread.
+    pub fn caretRect(self: *Editor) ?CaretBox {
+        self.caret_asked = true;
+        const box = self.caretBox() catch |err| {
+            self.fail(err);
+            return null;
+        };
+        self.caret_read = box;
+        if (box == null) self.invalidate();
+        return box;
+    }
+
+    fn caretBox(self: *Editor) !?CaretBox {
+        try self.sync();
+        if (self.laid_look == null or self.paras.items.len == 0) return null;
+        const c = try self.caretAt(self.sel_caret, self.compose_caret, self.affinity);
+        const rect: Rect = .{ .x = self.pad_x + c.x, .y = self.pad_y + @as(f32, @floatCast(c.y - self.scroll)), .width = 1, .height = c.h };
+        return .{ .rect = rect, .visible = rect.y + rect.height > 0 and rect.y < self.bounds.height and rect.x >= 0 and rect.x <= self.bounds.width };
+    }
+
+    /// Asks for another frame when the application read the caret and
+    /// this paint shows it elsewhere.
+    fn checkCaret(self: *Editor) void {
+        if (!self.caret_asked) return;
+        self.caret_asked = false;
+        const box = self.caretBox() catch |err| return self.fail(err);
+        if (!std.meta.eql(box, self.caret_read)) self.invalidate();
+    }
+
+    /// A secondary press at a point local to the leaf, before its context
+    /// menu opens: outside the selection it puts the caret there, as a text
+    /// field does, so the menu acts there. The editor takes the focus.
+    fn secondaryPress(ptr: *anyopaque, _: u64, local_point: Point) bool {
+        const self: *Editor = @ptrCast(@alignCast(ptr));
+        self.secondary(.{ .x = self.bounds.x + local_point.x, .y = self.bounds.y + local_point.y }) catch |err| self.fail(err);
+        return true;
+    }
+    fn secondary(self: *Editor, point: z.Point) !void {
+        try self.sync();
+        if (self.paras.items.len == 0 or self.overScrollbar(point)) return;
+        const c = self.contentPoint(point);
+        const at = try self.positionAt(c.x, c.y);
+        const sel = self.selection();
+        if (sel[0] == sel[1] or at.i < sel[0] or at.i > sel[1]) {
+            try self.commitCompose();
+            self.desired_x = null;
+            self.moveTo(at.i, at.affinity, false);
+            self.afterInput();
+        }
     }
 
     /// Unregisters from the Context and stops deferred work. Call before
@@ -736,7 +909,7 @@ pub const Editor = struct {
     }
 
     fn lookKey(self: *const Editor) LookKey {
-        return .{ .width = self.width, .font = self.options.font, .theme = self.window_theme, .tags = self.options.tag_styler != null };
+        return .{ .width = self.width, .font = self.options.font, .theme = self.window_theme, .tags = self.options.tag_styler != null, .spans = self.options.span_styler != null, .spans_version = self.options.spans_version };
     }
 
     // ---- Layout ------------------------------------------------------------
@@ -785,7 +958,14 @@ pub const Editor = struct {
             done += n;
         }
         if (!placed) try spans.append(self.allocator, .{ .text = self.compose.items, .style = self.spanStyle(typing, pv.style, base, room) });
-        try pv.layout.build(spans.items, .{ .measurer = self.options.measurer, .font = base, .width = room, .indent = indent, .@"align" = switch (pv.style.@"align") {
+        var styled: std.ArrayList(Span) = .empty;
+        defer styled.deinit(self.allocator);
+        var drawn = spans.items;
+        if (self.options.span_styler) |styler| {
+            try styler.spans(styler.context, self.allocator, p, pv.style, spans.items, &styled);
+            if (sameText(spans.items, styled.items)) drawn = styled.items;
+        }
+        try pv.layout.build(drawn, .{ .measurer = self.options.measurer, .font = base, .width = room, .indent = indent, .@"align" = switch (pv.style.@"align") {
             .start => .start,
             .center => .center,
             .end => .end,
@@ -1156,6 +1336,7 @@ pub const Editor = struct {
         }
         if (self.token) |token| try frame.textField(token, bounds, true);
         try frame.semantic(.{ .id = id, .role = .text_box, .name = self.options.name, .value = self.value.items, .bounds = bounds, .focused = focused, .read_only = self.options.read_only or self.token == null, .multi_line = true, .selection_start = self.valueByte(self.selection()[0]), .selection_end = self.valueByte(self.selection()[1]) });
+        defer self.checkCaret();
         if (self.paras.items.len == 0 or self.laid_look == null) return;
         defer self.checkBoxes();
         try frame.pushClip(bounds);
@@ -1231,6 +1412,7 @@ pub const Editor = struct {
         }
         // The scroll bar, as a scroll container's, while the pointer is
         // over the editor or drags the thumb.
+        self.bar_style = frame.scrollbarStyle();
         if (self.hovered or self.thumb) {
             var bar = self.scrollbar();
             bar.box = bounds;
@@ -1422,7 +1604,7 @@ pub const Editor = struct {
 
     /// The scroll bar along the editor's right edge, in window coordinates.
     fn scrollbar(self: *const Editor) ui.scroll.Bar {
-        return .{ .box = self.bounds, .view = self.view_height, .content = @floatCast(self.heights.top(self.paras.items.len)), .offset = @floatCast(self.scroll) };
+        return .{ .box = self.bounds, .view = self.view_height, .content = @floatCast(self.heights.top(self.paras.items.len)), .offset = @floatCast(self.scroll), .style = self.bar_style };
     }
 
     fn overScrollbar(self: *const Editor, point: z.Point) bool {
@@ -1533,15 +1715,21 @@ pub const Editor = struct {
         if (self.paras.items.len == 0) return false;
         switch (event) {
             .key_input => |k| {
+                if (self.options.on_key) |filter| if (filter.key(filter.context, self, k.key, k.modifiers)) return true;
                 if (try self.key(k.key, k.modifiers)) {
                     self.blink_start = self.now;
                     return true;
                 }
                 return false;
             },
-            .edit_key => |e| return self.key(switch (e.key) {
-                inline else => |k| @field(z.KeyCode, @tagName(k)),
-            }, .{ .control = e.control, .shift = e.shift }),
+            .edit_key => |e| {
+                const k: z.KeyCode = switch (e.key) {
+                    inline else => |k| @field(z.KeyCode, @tagName(k)),
+                };
+                const mods: z.KeyModifiers = .{ .control = e.control, .shift = e.shift };
+                if (self.options.on_key) |filter| if (filter.key(filter.context, self, k, mods)) return true;
+                return self.key(k, mods);
+            },
             .text_input => |t| {
                 if (self.options.read_only or t.text.len == 0) return false;
                 try self.replaceText(null, t.text);

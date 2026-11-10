@@ -128,6 +128,10 @@ pub const Overlay = struct {
         origin: Point,
         /// The anchor is a menu button, which opens its menu below it.
         button: bool,
+        /// A split button's segments, the button's id then the arrow's,
+        /// and whether they run right to left; zero ids for other anchors.
+        split: [2]u64 = .{ 0, 0 },
+        rtl: bool = false,
     };
     pub const Item = struct {
         id: u64,
@@ -240,6 +244,101 @@ pub fn popoverMenuButtonWith(self: *View, label: []const u8, options: ButtonOpti
     if (options.open) |held| shown = hold(self, node, held, shown);
     self.buffers.nodes[button_index].checked = shown;
     return shown;
+}
+
+/// What a pass of `splitButton` reports.
+pub const SplitButton = struct {
+    /// The button was activated, by a press, Enter or Space: do its action.
+    clicked: bool,
+    /// The menu shows: build its items, and close it with `end` either way.
+    shown: bool,
+};
+/// How `splitButton` names its arrow and holds its menu.
+pub const SplitButtonOptions = struct {
+    /// The arrow's accessible name; empty is "More options" in the view's
+    /// language (English, Japanese, Simplified and Traditional Chinese).
+    arrow_label: []const u8 = "",
+    /// False disables the button's action alone; the arrow still opens the
+    /// menu, as Save while there is nothing new to save beside Save As….
+    /// `Style.enabled` false disables both.
+    button_enabled: bool = true,
+    /// Where the menu goes and who holds whether it shows, as a menu
+    /// button's.
+    menu: ButtonOptions = .{},
+};
+
+/// A button joined to an arrow that opens a menu of related actions, as
+/// Save beside Save As…: one control of two segments, the button showing
+/// `label` and doing the action, and the arrow at its end (its start
+/// right to left) opening the menu below the control, as a menu button
+/// does. It is one stop of Tab, the button's, or the arrow's while the
+/// button is disabled; Left and Right move the focus between the
+/// segments, mirrored right to left. Enter and Space click the button, and
+/// open the menu from the arrow, as do Down and Up there; Alt+Down opens
+/// it from the button too. Assistive technology sees a group named by
+/// `Style.name` or `label` holding a button and a menu button, named
+/// `options.arrow_label`, expanded while the menu shows. The menu takes the
+/// items, keys and focus of `popoverMenu`. Build the items only while
+/// `shown`, and close the menu with `end` either way.
+pub fn splitButton(self: *View, label: []const u8, options: SplitButtonOptions, style: Style) Error!SplitButton {
+    const enabled = style.enabled;
+    var group = style;
+    group.gap = 0;
+    group.role = .group;
+    if (group.name.len == 0) group.name = label;
+    try self.row(group);
+    const clicked = try self.button(label, .{ .enabled = enabled and options.button_enabled });
+    const button_id = self.lastNode().id;
+    var arrow_style = opensMenu(.{ .enabled = enabled, .tab_stop = !(enabled and options.button_enabled) });
+    arrow_style.name = if (options.arrow_label.len > 0) options.arrow_label else moreOptions(self.language);
+    const arrow = try self.appendNode(.popup_button, arrow_style);
+    arrow.split_arrow = true;
+    const arrow_id = arrow.id;
+    const arrow_index: u32 = @intCast(arrow - self.buffers.nodes.ptr);
+    const pressed = self.takeEvent(arrow_id) != null and enabled;
+    self.buffers.nodes[self.stack[self.depth - 1]].split = .{ button_id, arrow_id };
+    try self.end();
+    var shown = try popoverMenu(self, .{ .name = group.name, .max_width = options.menu.max_width });
+    const node = &self.buffers.nodes[self.stack[self.depth - 1]];
+    if (options.menu.placement) |placement| {
+        node.placement = placement;
+        node.menu_placed = true;
+    }
+    if (pressed) {
+        if (shown) {
+            close(self, true);
+            shown = false;
+        } else {
+            self.menu = .{ .open = node.id, .opener = arrow_id, .first = 0 };
+            shown = !node.concealed;
+            if (!shown) self.menu = .{};
+        }
+        node.checked = shown;
+    }
+    if (options.menu.open) |held| shown = hold(self, node, held, shown);
+    self.buffers.nodes[arrow_index].checked = shown;
+    return .{ .clicked = clicked, .shown = shown };
+}
+
+/// "More options" in `language`, a BCP 47 tag, or in English.
+pub fn moreOptions(language: []const u8) []const u8 {
+    const Tag = struct {
+        fn is(tag: []const u8, prefix: []const u8) bool {
+            if (tag.len < prefix.len or !std.ascii.eqlIgnoreCase(tag[0..prefix.len], prefix)) return false;
+            return tag.len == prefix.len or tag[prefix.len] == '-' or tag[prefix.len] == '_';
+        }
+        fn has(tag: []const u8, part: []const u8) bool {
+            var parts = std.mem.tokenizeAny(u8, tag, "-_");
+            while (parts.next()) |piece| if (std.ascii.eqlIgnoreCase(piece, part)) return true;
+            return false;
+        }
+    };
+    if (Tag.is(language, "ja")) return "\u{305d}\u{306e}\u{4ed6}\u{306e}\u{30aa}\u{30d7}\u{30b7}\u{30e7}\u{30f3}";
+    if (Tag.is(language, "zh")) {
+        const traditional = Tag.has(language, "hant") or ((Tag.has(language, "tw") or Tag.has(language, "hk") or Tag.has(language, "mo")) and !Tag.has(language, "hans"));
+        return if (traditional) "\u{66f4}\u{591a}\u{9078}\u{9805}" else "\u{66f4}\u{591a}\u{9009}\u{9879}";
+    }
+    return "More options";
 }
 
 /// Keeps `held`, the application's word on whether the menu `node` shows,
@@ -719,7 +818,7 @@ pub fn record(self: *View, node: *const Node) void {
             if (node.level == 0 and overlay.anchor_count < max_anchors) {
                 const anchor = &all[node.anchor];
                 if (anchor.style.enabled) if (self.visible(anchor)) |rect| {
-                    overlay.anchors[overlay.anchor_count] = .{ .id = node.id, .index = node.anchor, .end = anchor.end, .rect = rect, .origin = .{ .x = anchor.bounds.x, .y = anchor.bounds.y }, .button = anchor.kind == .popup_button };
+                    overlay.anchors[overlay.anchor_count] = .{ .id = node.id, .index = node.anchor, .end = anchor.end, .rect = rect, .origin = .{ .x = anchor.bounds.x, .y = anchor.bounds.y }, .button = anchor.kind == .popup_button, .split = anchor.split, .rtl = anchor.rtl };
                     overlay.anchor_count += 1;
                 };
             }
@@ -834,6 +933,7 @@ pub fn routeKey(self: *View, input: z.KeyInput) ?KeyRoute {
     const plain = !mods.control and !mods.alt and !mods.super and !mods.shift;
     const state = &self.menu;
     if (state.open == null) {
+        if (splitKey(self, input)) |route| return route;
         if ((input.key == .down or input.key == .up) and plain and !input.repeat and openButtonFromFocus(self, input.key == .up)) return .handled;
         const menu_key = (input.key == .context_menu and plain) or (input.key == .f10 and mods.shift and !mods.control and !mods.alt and !mods.super);
         if (!menu_key or input.repeat) return null;
@@ -991,7 +1091,45 @@ fn openFromFocus(self: *View) bool {
     }
     const anchor = best orelse return false;
     self.menu = .{ .open = anchor.id, .opener = focused, .first = 0 };
+    // A list holding the focus for its rows opens the menu below the row
+    // the keys chose, as a secondary press on the row opens it there.
+    const node = &all[at];
+    if (node.kind == .embed) if (node.embed) |leaf| if (leaf.menu_point) |call| if (call(leaf.context)) |point| {
+        self.menu.at = .{ .x = node.bounds.x + point.x - anchor.origin.x, .y = node.bounds.y + point.y - anchor.origin.y };
+    };
     return true;
+}
+
+/// Keys on a split button's segments while its menu is closed: Left and
+/// Right move the focus between them, mirrored right to left; Down or Up
+/// on the arrow, or Alt+Down on either, open the menu.
+fn splitKey(self: *View, input: z.KeyInput) ?KeyRoute {
+    const focused = self.focus orelse return null;
+    const mods = input.modifiers;
+    const plain = !mods.control and !mods.alt and !mods.super and !mods.shift;
+    const overlay = &self.overlay.menu;
+    for (overlay.anchors[0..overlay.anchor_count]) |anchor| {
+        const ids = anchor.split;
+        if (ids[0] == 0 or (focused != ids[0] and focused != ids[1])) continue;
+        const alt_down = input.key == .down and mods.alt and !mods.control and !mods.super and !mods.shift;
+        if (alt_down or (plain and focused == ids[1] and (input.key == .down or input.key == .up))) {
+            if (input.repeat) return .handled;
+            self.menu = if (input.key == .up) .{ .open = anchor.id, .opener = ids[1], .last = 0 } else .{ .open = anchor.id, .opener = ids[1], .first = 0 };
+            return .handled;
+        }
+        if (plain and (input.key == .left or input.key == .right)) {
+            const to_arrow = (input.key == .right) != anchor.rtl;
+            const target = if (to_arrow) ids[1] else ids[0];
+            if (target != focused and focusable(self, target)) self.restore = target;
+            return .handled;
+        }
+        return null;
+    }
+    return null;
+}
+fn focusable(self: *const View, id: u64) bool {
+    for (self.buffers.nodes[0..self.len]) |*node| if (node.id == id) return node.style.enabled and !node.concealed;
+    return false;
 }
 
 /// Down on a focused menu button opens its menu on its first item, and Up

@@ -1031,6 +1031,10 @@ pub const Harness = struct {
             try self.render();
             return true;
         }
+        if (button == .secondary) if (self.view.embedSecondary(point)) |id| {
+            self.setFocus(id);
+            self.view.focus = id;
+        };
         if (button == .secondary and self.view.openMenuAt(point)) {
             try self.render();
             return true;

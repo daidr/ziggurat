@@ -269,6 +269,14 @@ pub const Style = struct {
     /// Lines a wrapping text shows at most; the last one shown ends in an
     /// ellipsis when text remains. 0 shows them all.
     max_lines: u16 = 0,
+    /// A text cut to its box puts the ellipsis in the middle of its last
+    /// line rather than at its end, as a list of long paths that keeps
+    /// their file names: the line keeps as much of its start and of its
+    /// paragraph's end as fit beside the ellipsis, about as wide on each
+    /// side. A text on one line cuts so when it is wider than its box. Where
+    /// the paragraph fits and only text after it is cut, the ellipsis ends
+    /// the line as before.
+    truncate_middle: bool = false,
     /// Hide the node and what is built inside it, and take its room away:
     /// its siblings close up with no gap left for it, and it draws
     /// nothing, takes neither the pointer nor the focus and is not exposed
@@ -354,6 +362,12 @@ pub const Style = struct {
     /// A list box, grid, tree or tree grid of the application's own whose
     /// items can be chosen together, as aria-multiselectable.
     multiselectable: bool = false,
+    /// The user cannot change the node's value, as aria-readonly: a text
+    /// box, combo box, check box, switch, slider, spin button, radio
+    /// group, list box, grid or tree grid of the application's own, or a
+    /// cell or header of a grid, locked. Other roles do not take it, and
+    /// the view's own controls behave as before.
+    read_only: bool = false,
     /// Chosen or not, as aria-selected, for a tab, option, row, cell or
     /// tree item that shows its choice its own way, without the accent a
     /// selected built-in row paints; null says nothing.
@@ -461,6 +475,9 @@ pub const Style = struct {
     /// overflows; false hides it, keeping the wheel, keys and assistive
     /// technology scrolling, for a surface that draws its own.
     scrollbars: bool = true,
+    /// A scroll container's own scroll bar style, in place of the theme's
+    /// (`Theme.scrollbar`): widths, corners, track and thumb colors.
+    scrollbar_style: ?ui.scroll.Style = null,
     /// Text a search, token field or editable combo box gives the text
     /// input inside it to show while it is empty; see
     /// `text_field.Options.placeholder`.
@@ -496,6 +513,13 @@ pub const Style = struct {
     /// fills the view. Offsets the application sets stay where it puts
     /// them.
     scroll_snap: ?SnapType = null,
+    /// On `segmented`: the control is as wide as its parent (it grows in a
+    /// row and stretches in a column) and its segments share that width
+    /// equally, a label longer than its share ending with an ellipsis,
+    /// with their look, keys and radio group unchanged. A `width` set with
+    /// it is the control's, which the segments still share. Elsewhere it
+    /// makes the node as wide as its parent the same way.
+    fill_equally: bool = false,
     /// The place a node marks in the scroll container around it with
     /// `scroll_snap`: its start, center or end lined up with the
     /// container's content box, inside its padding.
@@ -643,6 +667,16 @@ pub const AccessRole = enum {
     /// role=complementary. Name it with `Style.name` when a window has
     /// several.
     complementary,
+    /// The role's name as browsers name ARIA's roles: "tabpanel".
+    pub fn ariaName(self: AccessRole) []const u8 {
+        return switch (self) {
+            .tree_grid => "treegrid",
+            .cell => "gridcell",
+            .tab_panel => "tabpanel",
+            .content_info => "contentinfo",
+            else => @tagName(self),
+        };
+    }
     fn semantic(self: AccessRole) ui.accessibility.Role {
         return switch (self) {
             .group => .group,
@@ -735,6 +769,16 @@ pub const Transition = struct {
     exit_to: ?Away = null,
     enter: animation.Motion = .{ .tween = .{ .duration_ns = 200 * std.time.ns_per_ms, .easing = .cubic_out } },
     exit: animation.Motion = .{ .tween = .{ .duration_ns = 150 * std.time.ns_per_ms, .easing = .smoothstep } },
+    /// How long the content waits before it comes in, in nanoseconds, as
+    /// the rows of a list that come in one after another, each with a
+    /// longer delay; it waits as long before it goes, unless
+    /// `exit_delay_ns` says otherwise.
+    delay_ns: u64 = 0,
+    /// How long the exit waits before the content goes, in place of
+    /// `delay_ns`, as CSS sets transition-delay for each state: zero waits
+    /// `delay_ns`, negative does not wait, so rows that came in one after
+    /// another go all at once. An `instant` exit has nothing to delay.
+    exit_delay_ns: i64 = 0,
     /// Enter on the first pass that shows the content, rather than appear
     /// already in place.
     appear: bool = true,
@@ -747,6 +791,11 @@ pub const Transition = struct {
 
     fn away(self: Transition) Away {
         return .{ .pose = self.hidden, .opacity = self.hidden_opacity, .blur = self.hidden_blur };
+    }
+    /// How long coming in (`entering`) or going out waits.
+    fn delayOf(self: Transition, entering: bool) u64 {
+        if (entering or self.exit_delay_ns == 0) return self.delay_ns;
+        return if (self.exit_delay_ns < 0) 0 else @intCast(self.exit_delay_ns);
     }
 };
 /// Whether content shown by `View.presentColumn` is in, coming in or going out,
@@ -773,7 +822,8 @@ pub const Presence = struct {
         if (visible != self.visible) {
             self.visible = visible;
             if (!visible) self.leaving = transition.exit_to orelse transition.away();
-            try channel.retarget(now, if (visible) 1 else 0, .{ .motion = if (visible) transition.enter else transition.exit });
+            const motion = if (visible) transition.enter else transition.exit;
+            try channel.retarget(now, if (visible) 1 else 0, .{ .motion = motion, .delay_ns = if (motion == .instant) 0 else transition.delayOf(visible) });
         }
         const value = (try channel.advance(now)).value;
         // Back in place, it next leaves the way the build then says.
@@ -1343,6 +1393,12 @@ pub const Embed = struct {
     /// bounds; keys arrive while it holds focus. True consumes the input and
     /// repaints the window. Runs on the main thread outside paint.
     input: ?*const fn (*anyopaque, u64, EmbedInput) bool = null,
+    /// A secondary press at a point local to the leaf, before the context
+    /// menu of an anchor over it opens, as a text editor puts its caret
+    /// there outside the selection: true gives the leaf the focus, which
+    /// the menu then gives back as it closes. Runs on the main thread
+    /// outside paint.
+    secondary_press: ?*const fn (*anyopaque, u64, Point) bool = null,
     /// The pointer's shape at a point local to the leaf, such as a resize
     /// arrow over a column edge, or null for the shape around it. Runs on
     /// the main thread outside paint; it must not allocate or block.
@@ -1355,6 +1411,11 @@ pub const Embed = struct {
     /// innermost `dropTarget` under it that takes the payload's kind gets
     /// it when released. Runs on the main thread outside paint.
     drag: ?*const fn (*anyopaque, u64) ?EmbedDrag = null,
+    /// Where the menu key or Shift+F10 opens a menu anchored around the
+    /// focused leaf, local to the leaf, as below the chosen row of a list
+    /// that holds the focus for its rows; null opens it below the anchor.
+    /// Runs on the main thread outside paint; it must not allocate or block.
+    menu_point: ?*const fn (*anyopaque) ?Point = null,
 };
 /// What a drag from an embedded leaf carries out of it (`Embed.drag`).
 pub const EmbedDrag = struct {
@@ -1648,6 +1709,14 @@ pub const Node = struct {
     /// A control without a look: a container its application fills and
     /// draws, which keeps the control's input, focus and semantics.
     plain: bool = false,
+    /// A segment sharing its control's width equally with the others
+    /// (`Style.fill_equally`).
+    share: bool = false,
+    /// The arrow of a split button, drawn as a button's face with a
+    /// chevron.
+    split_arrow: bool = false,
+    /// Of a split button's group: its button's and its arrow's ids.
+    split: [2]u64 = .{ 0, 0 },
     /// A row of menu items the keys take as one stop (`menuGroupBase`): on
     /// the row, its own id; on an item inside it, the row's.
     menu_group: u64 = 0,
@@ -2824,6 +2893,7 @@ pub const View = struct {
     pub const popoverMenu = menu_controls.popoverMenu;
     pub const popoverMenuButton = menu_controls.popoverMenuButton;
     pub const popoverMenuButtonWith = menu_controls.popoverMenuButtonWith;
+    pub const splitButton = menu_controls.splitButton;
     pub const menuItem = menu_controls.menuItem;
     pub const menuItemState = menu_controls.menuItemState;
     pub const menuItemContent = menu_controls.menuItemContent;
@@ -3216,7 +3286,18 @@ pub const View = struct {
     /// Starts a row of joined segments bound to one value, announced as a
     /// radio group named by `Style.name`. Close it with `end`.
     pub fn segmented(self: *View, style: Style) Error!void {
-        _ = try self.open(.segmented, style);
+        _ = try self.open(.segmented, self.fillEqually(style));
+    }
+    /// The style of a node that `Style.fill_equally` makes as wide as its
+    /// parent: it grows along a row and stretches across a column.
+    fn fillEqually(self: *const View, style: Style) Style {
+        if (!style.fill_equally or style.width != null) return style;
+        var value = style;
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (options(parent).axis == .row) {
+            if (value.grow == 0) value.grow = 1;
+        } else if (value.self_align == null) value.self_align = .stretch;
+        return value;
     }
     /// Selects `option` on activation; true when the selection changed.
     pub fn segment(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
@@ -3421,9 +3502,16 @@ pub const View = struct {
         const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
         if (parent.kind != container) return error.NotContainer;
         const group = parent.id;
-        const node = try self.append(kind, style);
+        var own = style;
+        // The segments of a control filling its width share it equally.
+        if (kind == .segment and parent.style.fill_equally) {
+            own.grow = 1;
+            own.min_width = 0;
+        }
+        const node = try self.append(kind, own);
         node.text = try self.copy(label);
         node.radio_group = group;
+        node.share = kind == .segment and parent.style.fill_equally;
         var changed = false;
         if (self.take(node.id) != null and !std.meta.eql(selected.*, option)) {
             selected.* = option;
@@ -4922,6 +5010,13 @@ pub const View = struct {
         if (target) |entry| repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_move = local(entry, point.?) }) or repaint;
         return repaint;
     }
+    /// A secondary press at `point` reaches the leaf under it that asks for
+    /// one (`Embed.secondary_press`); its id when the leaf takes the focus.
+    pub fn embedSecondary(self: *View, point: Point) ?u64 {
+        const entry = self.embedAt(point) orelse return null;
+        const press = entry.embed.secondary_press orelse return null;
+        return if (press(entry.embed.context, entry.id, local(entry, point))) entry.id else null;
+    }
     /// A primary press at `point`, routed after `pointerDown`. The leaf
     /// under it sees `pointer_down`; one that takes it captures the pointer
     /// and, when focusable, takes focus. Otherwise a press on a draggable
@@ -5822,7 +5917,9 @@ pub const View = struct {
                 const side = @max(Measurer.line_height, metrics.indicator_size) + 2 * metrics.content_inset;
                 break :blk .{ .width = side, .height = side };
             },
-            .combo_box, .popup_button => .{ .width = @max(120, text_size.width + 3 * metrics.content_inset + metrics.indicator_size), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
+            // A split button's arrow is as high as a button and square.
+            .popup_button => if (node.split_arrow) .{ .width = metrics.indicator_size + 2 * metrics.content_inset, .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset } else .{ .width = @max(120, text_size.width + 3 * metrics.content_inset + metrics.indicator_size), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
+            .combo_box => .{ .width = @max(120, text_size.width + 3 * metrics.content_inset + metrics.indicator_size), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
             .tree_row => .{ .width = ui.widgets.tree_indent * @as(f32, @floatFromInt(node.level)) + metrics.indicator_size + metrics.label_gap / 2 + rowLead(node, theme) + text_size.width + metrics.content_inset + node.fraction, .height = text_size.height + metrics.content_inset },
             .column_header => .{ .width = text_size.width + metrics.indicator_size, .height = text_size.height + metrics.content_inset },
             .token => .{ .width = text_size.width + metrics.content_inset + text_size.height + 4, .height = text_size.height + 4 },
@@ -5842,6 +5939,8 @@ pub const View = struct {
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
+            // A text cut in its middle narrows to its ellipsis.
+            .text => if (node.style.truncate_middle) .{ .width = measurer.textSize(wrap_text.ellipsis, font).width, .height = size.height } else size,
             // A menu narrower than its labels ends them with an ellipsis;
             // marks, icons, shortcuts and arrows keep their room.
             .menu_item => .{ .width = size.width - text_size.width - (if (node.trailing.len > 0) measurer.textSize(node.trailing, null).width else 0) - (if (node.subtitle.len > 0) @max(0, measurer.textSize(node.subtitle, ui.widgets.menu_subtitle_font).width - text_size.width) else 0), .height = size.height },
@@ -5953,6 +6052,12 @@ pub const View = struct {
         const style = node.style;
         var preferred = node.measured.preferred;
         var minimum = node.measured.minimum;
+        // A segment sharing its control's width equally starts from none,
+        // so the room splits evenly whatever its label.
+        if (node.share) {
+            preferred.width = 0;
+            minimum.width = 0;
+        }
         var constraints: layout.Constraints = .{ .min = .{ .width = style.min_width, .height = style.min_height }, .max = .{ .width = style.max_width, .height = style.max_height } };
         if (style.width) |width| {
             preferred.width = width;
@@ -6078,7 +6183,9 @@ pub const View = struct {
         const font = node.style.font;
         const keep = self.keepOf(node);
         const full = wrap_text.measure(node.text, std.math.inf(f32), font, measurer, keep, node.style.max_lines);
-        const narrowest = @min(full.width, wrap_text.longestWord(node.text, font, measurer, keep));
+        // A text cut in its middle narrows to its ellipsis, its words
+        // broken where they are wider than its lines.
+        const narrowest = if (node.style.truncate_middle) @min(full.width, measurer.textSize(wrap_text.ellipsis, font).width) else @min(full.width, wrap_text.longestWord(node.text, font, measurer, keep));
         const width = self.wrapWidth(node) orelse return .{ .minimum = .{ .width = narrowest, .height = full.height }, .preferred = full };
         if (width + 0.5 >= full.width) return .{ .minimum = .{ .width = narrowest, .height = full.height }, .preferred = full };
         var at = @max(width, narrowest);
@@ -6783,7 +6890,15 @@ pub const View = struct {
             fn draw(lines: *const @This(), line: []const u8, index: usize, last_cut: bool) void {
                 var buffer: [512]u8 = undefined;
                 const font = lines.node.style.font;
-                const shown = if (last_cut) wrap_text.cut(line, lines.bounds.width, font, lines.view.measurer, &buffer) else line;
+                const shown = if (!last_cut) line else if (lines.node.style.truncate_middle) middle: {
+                    // The rest of the line's paragraph, cut in its middle.
+                    const whole = lines.node.text;
+                    const start = @intFromPtr(line.ptr) - @intFromPtr(whole.ptr);
+                    const stop = if (std.mem.indexOfScalarPos(u8, whole, start, '\n')) |at| at else whole.len;
+                    const paragraph = whole[start..stop];
+                    if (lines.view.measurer.textSize(paragraph, font).width <= lines.bounds.width) break :middle wrap_text.cut(line, lines.bounds.width, font, lines.view.measurer, &buffer);
+                    break :middle wrap_text.cutMiddle(paragraph, lines.bounds.width, font, lines.view.measurer, &buffer);
+                } else wrap_text.cut(line, lines.bounds.width, font, lines.view.measurer, &buffer);
                 const rect: Rect = .{ .x = lines.bounds.x, .y = lines.bounds.y + lines.height * @as(f32, @floatFromInt(index)), .width = lines.bounds.width, .height = lines.height };
                 const width = lines.view.measurer.textSize(shown, font).width;
                 lines.target.labelFont(if (lines.node.rtl) trailing(rect, width) else rect, shown, lines.color, font orelse .{});
@@ -6798,7 +6913,15 @@ pub const View = struct {
 
     /// Draw the text of a text node in `rect`, wrapped or on one line.
     fn drawTextAt(self: *const View, target: anytype, node: *const Node, rect: Rect, color: u32) void {
-        if (node.style.wrap) self.paintWrapped(target, node, rect, color) else target.labelFont(if (node.rtl) trailing(rect, node.measured.preferred.width) else rect, node.text, color, node.style.font orelse .{});
+        if (node.style.wrap) return self.paintWrapped(target, node, rect, color);
+        if (node.style.truncate_middle and node.measured.preferred.width > rect.width) {
+            var buffer: [512]u8 = undefined;
+            const font = node.style.font;
+            const shown = wrap_text.cutMiddle(node.text, rect.width, font, self.measurer, &buffer);
+            const width = self.measurer.textSize(shown, font).width;
+            return target.labelFont(if (node.rtl) trailing(rect, width) else rect, shown, color, font orelse .{});
+        }
+        target.labelFont(if (node.rtl) trailing(rect, node.measured.preferred.width) else rect, node.text, color, node.style.font orelse .{});
     }
     /// The language of the node at `index`: its own `Style.lang`, that of
     /// the nearest container around it that sets one, or the window's.
@@ -7265,7 +7388,7 @@ pub const View = struct {
         while (at < stop) {
             while (scope_depth > 0 and all[scopes[scope_depth - 1].index].end <= at) {
                 scope_depth -= 1;
-                try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme);
+                try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme, self.pointer);
             }
             const node = &all[at];
             const theme = if (node.theme) |inner| inner.* else window_theme;
@@ -7451,7 +7574,27 @@ pub const View = struct {
                     else => node.direction,
                 } else node.direction, node.text, control),
                 .image, .svg, .icon => try image_nodes.paint(self, target, node, theme),
-                .combo_box, .popup_button => if (node.plain) {
+                .popup_button => if (node.split_arrow) {
+                    // A split button's arrow: a button's face and a chevron.
+                    var arrow = control;
+                    arrow.look = false;
+                    const palette = theme.palette;
+                    const pressed = style.enabled and @TypeOf(target) == *ui.Frame and target.context.input_state.active == node.id;
+                    target.roundedRect(bounds, 0, ui.Color.rgb(if (style.enabled) palette.border else palette.disabled_border));
+                    const border = theme.metrics.border;
+                    const face: Rect = .{ .x = bounds.x + border, .y = bounds.y + border, .width = @max(0, bounds.width - 2 * border), .height = @max(0, bounds.height - 2 * border) };
+                    target.roundedRect(face, 0, ui.Color.rgb(if (pressed) palette.pressed else palette.control));
+                    paintChevron(target, bounds, theme.metrics.indicator_size, node.checked, if (style.enabled) palette.text else palette.disabled_text);
+                    try target.comboBox(node.id, bounds, "", node.checked, arrow);
+                } else if (node.plain) {
+                    var name_buffer: [max_plain_name]u8 = undefined;
+                    var plain = control;
+                    plain.look = false;
+                    if (plain.name.len == 0) plain.name = self.plainName(node, &name_buffer);
+                    paintBox(target, style, bounds);
+                    try target.comboBox(node.id, bounds, "", node.checked, plain);
+                } else try target.comboBox(node.id, bounds, node.text, node.checked, control),
+                .combo_box => if (node.plain) {
                     // A menu button without a look: the application draws
                     // it with the nodes inside.
                     var name_buffer: [max_plain_name]u8 = undefined;
@@ -7563,7 +7706,13 @@ pub const View = struct {
                     try target.tab(node.id, bounds, if (!node.plain) node.text else if (style.name.len > 0) style.name else self.plainName(node, &name_buffer), node.checked, tab_options);
                 },
                 .toggle_switch => try target.toggleSwitch(node.id, bounds, node.text, node.checked, control),
-                .progress => try target.progress(node.id, bounds, node.fraction, control),
+                .progress => {
+                    // Its own fill and track: `Style.color` and `Style.background`.
+                    var bar = control;
+                    bar.fill_color = style.color;
+                    bar.track_color = style.background;
+                    try target.progress(node.id, bounds, node.fraction, bar);
+                },
                 .loading => {
                     const indicator = node.indicator.?;
                     const color = indicator.color orelse if (style.enabled) theme.palette.text else theme.palette.disabled_text;
@@ -7573,7 +7722,11 @@ pub const View = struct {
                         try target.semantic(.{ .id = node.id, .parent = node.semantic_parent, .role = .progress, .name = style.name, .bounds = bounds, .enabled = style.enabled, .read_only = true, .range_minimum = 0, .range_maximum = 0 });
                     } else try target.indicator(node.id, bounds);
                 },
-                .meter => try target.meter(node.id, bounds, node.value, node.range, .{ .control = control, .bands = node.bands }),
+                .meter => {
+                    var gauge = control;
+                    gauge.track_color = style.background;
+                    try target.meter(node.id, bounds, node.value, node.range, .{ .control = gauge, .bands = node.bands });
+                },
                 .rating => try target.rating(node.id, bounds, node.value, @intFromFloat(node.range.maximum), control),
                 .slider => try target.slider(node.id, bounds, node.value, node.range, .{ .control = control }),
                 .stepper => try target.stepper(node.id, bounds, node.value, node.range, control),
@@ -7605,7 +7758,7 @@ pub const View = struct {
         }
         while (scope_depth > 0) {
             scope_depth -= 1;
-            try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme);
+            try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme, self.pointer);
         }
     }
     /// Paint the children of the node at `index` sorted by
@@ -7676,7 +7829,7 @@ pub const View = struct {
         const style = node.style;
         // The text input of a search field is a search box.
         const searching = style.search or (node.kind == .embed and node.parent != none and self.buffers.nodes[node.parent].kind == .search);
-        if (!searching and style.tab_stop and node.labelled_by == 0 and node.controls == 0 and node.described_by == 0 and node.error_message == 0 and !style.busy and style.current == .none and style.popup == null and style.sort == .none and style.auto_complete == .none and style.role_description.len == 0 and style.key_shortcuts.len == 0 and style.value_text.len == 0 and style.orientation == null and !style.invalid and !style.multiselectable and style.access_selected == null and style.position_in_set == 0 and style.set_size == 0 and style.row_count == 0 and style.column_count == 0 and style.row_index == 0 and style.column_index == 0) return null;
+        if (!searching and style.tab_stop and node.labelled_by == 0 and node.controls == 0 and node.described_by == 0 and node.error_message == 0 and !style.busy and style.current == .none and style.popup == null and style.sort == .none and style.auto_complete == .none and style.role_description.len == 0 and style.key_shortcuts.len == 0 and style.value_text.len == 0 and style.orientation == null and !style.invalid and !style.multiselectable and !style.read_only and style.access_selected == null and style.position_in_set == 0 and style.set_size == 0 and style.row_count == 0 and style.column_count == 0 and style.row_index == 0 and style.column_index == 0) return null;
         return .{
             .id = node.id,
             .tab_stop = style.tab_stop,
@@ -7700,6 +7853,7 @@ pub const View = struct {
                 .vertical => .vertical,
             } else null,
             .multiple = style.multiselectable,
+            .read_only = style.read_only,
             .selected = style.access_selected,
             .position = style.position_in_set,
             .set_size = style.set_size,
@@ -7733,7 +7887,7 @@ pub const View = struct {
         } else 0;
         try target.semantic(.{ .id = node.id, .parent = node.semantic_parent, .role = role.semantic(), .name = if (node.kind == .text) node.text else node.style.name, .bounds = node.bounds, .busy = node.style.busy, .vertical = role == .separator and node.axis == .column, .level = level });
     }
-    fn closeScope(node: *const Node, scope: Scope, target: anytype, window_theme: Theme) !void {
+    fn closeScope(node: *const Node, scope: Scope, target: anytype, window_theme: Theme, pointer: ?Point) !void {
         switch (scope.kind) {
             .effect => return target.endEffect(),
             .opacity => return target.popOpacity(),
@@ -7746,7 +7900,7 @@ pub const View = struct {
             .clip => {
                 paintEdges(node, target);
                 try target.popClip();
-                paintScrollIndicator(node, target, if (node.theme) |inner| inner.* else window_theme);
+                paintScrollIndicator(node, target, if (node.theme) |inner| inner.* else window_theme, pointer);
             },
         }
     }
@@ -7786,6 +7940,22 @@ pub const View = struct {
     }
     /// The background and border a style gives a box, for a control without
     /// a look that its application draws.
+    /// A chevron of bounded strips centered in `bounds`, pointing down, or
+    /// up while what it opens shows.
+    fn paintChevron(target: anytype, bounds: Rect, size: f32, up: bool, color: u32) void {
+        const width = @min(@min(bounds.width, bounds.height), size) / 2;
+        if (width <= 0) return;
+        const strips = 4;
+        const strip = width / 2 / strips;
+        const x = bounds.x + (bounds.width - width) / 2;
+        const y = bounds.y + (bounds.height - width / 2) / 2;
+        for (0..strips) |i| {
+            const step: f32 = @floatFromInt(i);
+            const shrink = strip * step;
+            const at = if (up) y + strip * (strips - 1 - step) else y + strip * step;
+            target.roundedRect(.{ .x = x + shrink, .y = at, .width = width - 2 * shrink, .height = strip }, 0, ui.Color.rgb(color));
+        }
+    }
     fn paintBox(target: anytype, style: Style, bounds: Rect) void {
         if (style.gradient) |fill| paintGradient(target, bounds, style.radius, null, fill) else if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
         if (style.border_gradient) |line| paintGradient(target, bounds, style.radius, style.border_width, line) else if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
@@ -8152,14 +8322,16 @@ pub const View = struct {
             target.backdropEffect(.{ .x = b.x, .y = b.y + b.height - height, .width = b.width, .height = height }, 0, .{ .scroll_edge = bottom });
         }
     }
-    fn paintScrollIndicator(node: *const Node, target: anytype, theme: Theme) void {
+    fn paintScrollIndicator(node: *const Node, target: anytype, theme: Theme, pointer: ?Point) void {
         const model = node.scroll orelse return;
         if (!node.style.scrollbars) return;
         const b = node.bounds;
         if (b.width < 8 or b.height < 8) return;
-        // Right to left, the indicator runs along the left edge.
-        const bar: ui.scroll.Bar = .{ .box = b, .leading = node.rtl, .view = model.viewport.height, .content = model.content.height, .offset = model.offset.y };
-        bar.paint(target, ui.Color.rgb(theme.palette.track), false);
+        // Right to left, the indicator runs along the left edge; it takes
+        // the container's own style, or the theme's.
+        const bar: ui.scroll.Bar = .{ .box = b, .leading = node.rtl, .view = model.viewport.height, .content = model.content.height, .offset = model.offset.y, .style = node.style.scrollbar_style orelse theme.scrollbar };
+        const hovered = if (pointer) |at| bar.hit(at) else false;
+        bar.paintStyled(target, ui.Color.rgb(theme.palette.track), .{ .hovered = hovered });
     }
 };
 
@@ -8996,6 +9168,14 @@ pub const Host = struct {
                         self.invalidate();
                         return true;
                     }
+                    // A leaf that asks sees a secondary press first, and
+                    // may take the focus, which a menu opened there gives
+                    // back as it closes.
+                    if (press.button == .secondary) if (self.view.embedSecondary(point)) |id| {
+                        if (self.context.input_state.focused != id) self.focus(id);
+                        self.view.focus = id;
+                        self.invalidate();
+                    };
                     // A secondary press opens the menu of the innermost
                     // menu anchor under it, over any control there.
                     if (press.button == .secondary and self.view.openMenuAt(point)) {
@@ -10009,6 +10189,49 @@ test "presentColumn enters, exits and asks for frames only while moving" {
     try std.testing.expect(try Pass.run(&view, &presence, transition, 3000, true));
     try std.testing.expectEqual(@as(f32, 1), view.nodes()[1].style.opacity);
     try std.testing.expectEqual(@as(?u64, null), view.wake);
+}
+
+test "presentColumn waits its delay to enter and its own exit delay to leave" {
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    const linear: animation.Motion = .{ .tween = .{ .duration_ns = 100, .easing = .linear } };
+    const Pass = struct {
+        fn opacity(v: *View, p: *Presence, t: Transition, now: u64, visible: bool) !?f32 {
+            v.reset(.{}, null);
+            v.now = now;
+            const shown = try v.presentColumn(p, visible, t, .{});
+            const value: ?f32 = if (shown) v.nodes()[1].style.opacity else null;
+            if (shown) try v.end();
+            try v.finish();
+            return value;
+        }
+    };
+    // The exit waits the delay too, unless told otherwise.
+    var presence: Presence = .{};
+    var transition: Transition = .{ .enter = linear, .exit = linear, .delay_ns = 50 };
+    try std.testing.expectEqual(@as(?f32, 0), try Pass.opacity(&view, &presence, transition, 1000, true));
+    try std.testing.expectEqual(@as(?f32, 0), try Pass.opacity(&view, &presence, transition, 1040, true));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), (try Pass.opacity(&view, &presence, transition, 1100, true)).?, 1e-6);
+    try std.testing.expectEqual(@as(?f32, 1), try Pass.opacity(&view, &presence, transition, 1150, true));
+    try std.testing.expectEqual(@as(?f32, 1), try Pass.opacity(&view, &presence, transition, 2000, false));
+    try std.testing.expectEqual(@as(?f32, 1), try Pass.opacity(&view, &presence, transition, 2040, false));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), (try Pass.opacity(&view, &presence, transition, 2100, false)).?, 1e-6);
+    // A negative exit delay goes at once.
+    presence = .{};
+    transition.exit_delay_ns = -1;
+    _ = try Pass.opacity(&view, &presence, transition, 3000, true);
+    _ = try Pass.opacity(&view, &presence, transition, 3200, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), (try Pass.opacity(&view, &presence, transition, 4000, false)).?, 0.6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), (try Pass.opacity(&view, &presence, transition, 4050, false)).?, 1e-6);
+    // A positive one waits its own, with no delay to come in.
+    presence = .{};
+    transition = .{ .enter = linear, .exit = linear, .exit_delay_ns = 30 };
+    _ = try Pass.opacity(&view, &presence, transition, 5000, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), (try Pass.opacity(&view, &presence, transition, 5050, true)).?, 1e-6);
+    _ = try Pass.opacity(&view, &presence, transition, 5200, true);
+    try std.testing.expectEqual(@as(?f32, 1), try Pass.opacity(&view, &presence, transition, 6000, false));
+    try std.testing.expectEqual(@as(?f32, 1), try Pass.opacity(&view, &presence, transition, 6025, false));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), (try Pass.opacity(&view, &presence, transition, 6080, false)).?, 1e-6);
 }
 
 test "explicit sizes and paint order with balanced clips" {

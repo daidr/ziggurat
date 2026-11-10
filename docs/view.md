@@ -76,6 +76,7 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 - 不进 Tab 顺序：`tab_stop = false` 让可聚焦节点不被 Tab 经过，如同 tabindex=-1，按下、组内方向键和 `Host.focusNode` 仍能聚焦它。
 - 角色：`role` 让容器或文本在辅助技术面前不只是分组或一段文字：`.region`（地标区域，用 `name` 命名）、`.navigation`、`.article`、`.group`、`.log`（聊天记录，新增的内容会被礼貌地读出）、`.timer`、`.alert`（出现或改变的内容立即打断朗读）、`.status`（状态信息，如“已选 3 行”“已保存”：其中的文字改变时整段礼貌地读出，如 aria-atomic；状态按元素 ID 与上一帧对照，前面会增删兄弟节点时给它 `key`，ID 变了视为新出现，不读；辅助技术刚接入时与状态第一次出现时不读；在 log、alert 或另一个 status 之内的只作为它们的一部分）、`.separator`、`.heading`（级别取自字体：`Font.heading1` 为 1 级，依此类推）、`.grid`（单元格接收焦点与方向键的表格，如应用自绘的电子表格）、`.tree_grid`（行可展开的网格）、`.row` 与 `.cell`（这类表格的行与单元格）、`.deletion` 与 `.insertion`（差异视图里删去与加入的行、划掉的旧价格）、`.tab_panel`（标签页的内容：用 `name` 按其标签命名，并让标签用 `controls` 指向它）、`.main`（窗口的主要内容，一个窗口一个，不必命名）、`.banner`（窗口顶栏，带应用名或窗口标题，至多一个）、`.content_info`（窗口页脚或状态区里关于内容的信息，如字数、作者，至多一个）与 `.complementary`（补充主要内容、自身也成立的侧栏或检查器；有多个时用 `name` 区分）。屏幕阅读器会列出这些地标并在其间跳转。带角色的容器里的文本节点作为文本进入可访问性树，供实时区域朗读。
 - 表格与集合的位置：`row_count`、`column_count`（aria-rowcount/aria-colcount，表头行计入，0 表示按已构建的数）放在表格或网格上，`row_index`、`column_index`（aria-rowindex/aria-colindex，从 1 起）放在行或单元格上，供只构建可见部分的表格读出“第 41 行，共 1000 行”；`position_in_set` 与 `set_size`（aria-posinset/aria-setsize，从 1 起，0 不设）放在自建的列表、列表框、树、菜单或标签列表的条目上，优先于内置集合按已构建的条目数出的位置。虚拟表格自己报出全部行数、列数和行、列头的索引。`multiselectable`（aria-multiselectable）声明自建的列表框、网格、树或树网格可以多选；`access_selected`（aria-selected）把标签、选项、行、单元格或树条目报为选中或未选中，而不画内置选中行的强调色，供用自己方式显示选择的条目使用。
+- `read_only`（aria-readonly）告诉辅助技术用户不能改它的值，只在 ARIA 允许的角色上报出：文本框、组合框、复选框、开关、滑块、数字框、单选组、列表框、网格、树网格，以及网格的单元格与行列表头（`role = .grid`/`.tree_grid` 的自建网格，或 `.cell`）；按钮、区域等其他角色不报。视图自己的控件行为不变，只改变报给辅助技术的状态。检查器与自动化插件也按 `Style.role` 报出容器与文字的角色（`tabpanel`、`main`、`banner`、`contentinfo`、`complementary`、`grid`、`gridcell` 等），自动化树把 `read_only` 报为 `readOnly` 状态。
 - 校验、方向与搜索：`invalid`（aria-invalid）把值标为不合法而不带消息，例如失焦时仍为空的必填字段；`orientation`（`.horizontal` 或 `.vertical`，aria-orientation）告诉辅助技术自建的滑块、分隔线、分栏、工具栏、标签列表或菜单朝哪个方向排列，不设时平台按形状猜；`search`（role=searchbox）让文本输入成为搜索框，`search` 区域里的输入自动如此。
 - 自绘文本框：应用自己绘制并处理按键的文本框（嵌入叶子用 `frame.semantic` 记录 `.text_box` 节点）用 `read_only` 与 `multi_line`（aria-readonly、aria-multiline）告诉辅助技术它只读、可多行；其他角色忽略 `multi_line`，只读的文本框不接受辅助技术改值。框架自带的编辑器自己决定：多行的 `TextField`（`ziggurat_document_editor.Field` 的 `multiline`）与富文本编辑器报告多行。Linux ATK 报 multi-line 而不是 single-line 状态，macOS 报 AXTextArea 角色而不是 AXTextField，Windows 在 AriaProperties 里给出 `multiline=true` 与 `readonly=true`。
 - ARIA 属性：`role_description`（aria-roledescription）、`key_shortcuts`（aria-keyshortcuts，如 "Control+S"）、`value_text`（aria-valuetext，如 "5 星中的 3 星"）、`busy`（aria-busy）、`current`（aria-current）、`popup`（aria-haspopup，给自己构建弹出内容的按钮）、`sort`（aria-sort）、`auto_complete`（aria-autocomplete）。三个平台分别映射到 ATK 的状态与对象属性、NSAccessibility 的属性（含旧 API 的 AXEnabled 等）与 UI Automation 的属性（LocalizedControlType、AriaProperties、AcceleratorKey、LiveSetting、LandmarkType、HeadingLevel）。
@@ -103,6 +104,12 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 
 自己滚动、不经滚动容器的视图（终端、富文本编辑器、虚拟表格与大纲）用 `ui.scroll.Bar` 画滚动条，外观与滚动容器一致，跟随主题：`box` 是滑块所沿的视图（右边缘，`leading` 时左边缘，横向时底边），`view`、`content`、`offset` 是可见长度、总长度与偏移，单位任意（终端用行数）。`Frame.scrollbar(bar, .{ .dragging, .color })` 画滑块：默认主题的 `track` 色，`color` 给自有配色的视图（如终端）替换；拖动时向内容一侧加宽 2 DIP；无处可滚时什么也不画。`thumb` 给出滑块矩形，`offsetAt(start)` 把拖动中滑块起点换算成偏移，`hit(point)` 判断指针是否在边缘 12 DIP 的条带上。终端与富文本编辑器只在指针位于其上或拖动滑块时显示滚动条；虚拟集合与滚动容器一样常显。
 
+`ui.scroll.Style` 是滚动条的样式：`track_width`（整条宽度，含轨道）、`thumb_width`（滑块宽度，在轨道里居中）、`radius`（滑块圆角，null 时两端全圆）、`square`（直角）、`min_length`（滑块最短长度）、`flush`（轨道与滑块延伸到两端，不留边距），以及颜色 `track`（设置时沿整条画轨道）、`thumb`、`thumb_hovered`（指针在滚动条上）与 `thumb_dragged`（拖动中），颜色为 0xAARRGGBB，alpha 为 0 视为不透明。`Theme.scrollbar` 给主题的全部滚动条一种样式，滚动容器的 `Style.scrollbar_style` 代替它；`Frame.scrollbar` 对样式为零值的 `Bar` 使用主题的，`Frame.scrollbarStyle()` 给出主题的样式，供自己滚动的视图在输入时按同样的几何判断（虚拟集合、终端与富文本编辑器都这样接入）。`Bar.paintStyled(target, rest, .{ .dragging, .hovered })` 画轨道与该状态的滑块，`trough()` 是整条的矩形，供在条上画标记的视图使用。零值样式与以往完全相同：4 DIP 宽的圆角滑块，离边缘与两端 2 DIP，主题的 `track` 色，没有轨道。像代码编辑器那样的滚动条：
+
+```zig
+theme.scrollbar = .{ .track_width = 14, .thumb_width = 10, .square = true, .flush = true, .thumb = 0x66_79797a, .thumb_hovered = 0xb3_646464, .thumb_dragged = 0x66_bfbfbf };
+```
+
 Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions` 个，按绘制顺序），滚轮事件落在其中时交给最内层的那个，作为一个携带 `Event.scroll` 的构建遍立即作用于模型并消费该事件；不在任何滚动容器内的滚轮照常交给 Context。目前没有滚动条拖动、焦点自动显露和横向滚动。
 
 滚动容器也可以用键盘滚动：控件与应用都没有处理的按键里，Up/Down 滚一行（40 DIP），PageUp/PageDown 与 Space/Shift+Space 滚一页（视口高度减一行，至少半个视口），Home/End（macOS 上还有 Cmd+Up/Down）滚到顶或底。按键交给焦点所在、在这个方向上还能滚的最内层滚动容器；焦点不在滚动容器里时交给指针下的。焦点接收文本时（`focusTakesText`）Space 不翻页，照常输入空格。
@@ -129,7 +136,7 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 
 - `link(label, style)` 画成带下划线的强调色文字，按下与 Enter 激活它（Space 不激活，如同网页的链接，留给外层滚动），返回本遍是否被激活；打开什么由应用决定，视图层不处理 URL。
 - `badge(text, style)` 是圆角背景上的短标签，背景默认强调色（`Style.background` 可改），文字默认 `on_accent`（`Style.color` 可改）。它只是静态文字，不可交互，也和普通文本一样不产生语义节点。
-- `segmented(style)` 与 `end` 配对，开始一行首尾相接的分段，`Style.name` 是可访问名称；`segment(T, &selected, option, label, style)` 的选择规则与 `radio` 相同，选中的分段以强调色填充。语义上是单选组和单选按钮。
+- `segmented(style)` 与 `end` 配对，开始一行首尾相接的分段，`Style.name` 是可访问名称；`segment(T, &selected, option, label, style)` 的选择规则与 `radio` 相同，选中的分段以强调色填充。语义上是单选组和单选按钮。`Style.fill_equally` 让分段控件与父容器同宽（在行里伸展、在列里拉伸），各分段平分宽度，比份额长的标签以省略号结尾，外观、按键与单选组语义不变；同时设了 `width` 时宽度是控件自己的，分段仍平分它。
 - `disclosure(&expanded, label, style)` 是带三角指示的展开标签，激活时翻转 `expanded`，返回是否改变；应用在它后面按 `expanded` 构建内容。
 
 启用 `-Daccessibility=true` 时，Windows UIA 把链接映射为 Hyperlink / Invoke，分段为 RadioButton / SelectionItem（分组为 Group / Selection），折叠区为 Button / ExpandCollapse（已展开时 Expand、已折叠时 Collapse 不重复产生动作）。
@@ -137,7 +144,7 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 ### 面包屑、度量条、评分与手风琴
 
 - `breadcrumbs(style)` 与 `end` 配对，开始一行通往当前页的链接，`Style.name` 是导航区域的可访问名称。相邻项之间的间隙中央画一个淡色斜杠，`Style.gap` 为 0 时间隙取 16 DIP。当前页通常是末尾的普通文本，和其他文本一样不产生语义节点。其中的控件把导航区域作为可访问父节点。
-- `meter(value, range, bands, style)` 是只读度量条，例如已用存储；`Style.name` 是可访问名称。它报告值本身，而不是完成比例。`bands` 的 `low`/`high` 是首选区间，值在区间外时用主题的 `caution` 色填充。区间超出 `range` 或 `low > high` 返回 `InvalidRange`，值被夹回 `range`。
+- `meter(value, range, bands, style)` 是只读度量条，例如已用存储；`Style.name` 是可访问名称。它报告值本身，而不是完成比例。`bands` 的 `low`/`high` 是首选区间，值在区间外时用主题的 `caution` 色填充。`bands.normal_color` 与 `bands.caution_color` 以应用自己的颜色（0xRRGGBB）代替区间内的强调色和区间外的 `caution` 色，未设的保持主题色；没有区间的度量条全程用 `normal_color`，即单色度量条。`Style.background` 是轨道颜色。`progress(fraction, style)` 是确定进度条：`Style.color` 代替强调色作为填充，`Style.background` 代替轨道色，如配额条用产品自己的颜色。区间超出 `range` 或 `low > high` 返回 `InvalidRange`，值被夹回 `range`。
 - `rating(&score, count, style)` 绑定一个 `u8` 分数，范围 0..`count`，`count` 为 1..`ui.widgets.max_rating`（10），否则返回 `InvalidRange`。按下或拖过第 k 个标记会把分数设为 k，方向键增减 1，Home 清零，End 设为满分；返回分数是否改变。标记画成圆点，已得分的用强调色填充。语义上它是步长为 1 的滑块。
 - `accordion(style)` 与 `end` 配对，开始一列分节，`Style.name` 是分组的可访问名称。`section(T, &open, option, label, style)` 绑定一个 `?T`：激活未打开的节会打开它并关闭原来打开的节，激活已打开的节会把 `open` 设为 null；返回值是否改变。分节标题与 `disclosure` 外观相同，在 `accordion` 之外调用返回 `NotContainer`。应用在每个标题后按 `open` 构建内容，这些内容也挂在分组下。
 - 手风琴的标题之间用 Up、Down 移动焦点（循环），Home、End 移到第一个与最后一个；Enter 与 Space 打开或关闭。
@@ -228,6 +235,7 @@ try v.end();
 - `ItemOptions.keep_open` 让菜单项被选中（按下、Enter 或 Space）后菜单保持打开、高亮留在该项上，例如账户菜单里切换主题的一排单选项。
 - 打开期间菜单接管按键：Up、Down、Home、End 在最深一层的可用项之间移动高亮并循环，字母移到下一个以它开头的项；Right、Enter 或 Space 打开子菜单并高亮其第一项，Left 或 Escape 关闭最深一层子菜单，顶层的 Escape 与 Tab 关闭菜单并交还焦点。从右到左时 Left 与 Right 互换。指针移到项上会高亮它并打开它的子菜单、关闭更深的子菜单；在所有面板之外按下会关闭菜单，并照常交给下面的控件；面板上的滚轮不会滚动下面的内容。
 - `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，Up 打开并高亮最后一项（WAI-ARIA 菜单按钮模式），菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。按钮读作打开菜单（`has_popup`）。`popoverMenuButtonWith(label, .{ .placement, .open, .max_width }, style)` 另外给出：`placement`（`view.Placement`）让菜单像浮层一样附着在按钮的某一边与对齐方式上，放不下时翻转并夹在窗口内，从右到左时镜像；`open`（`*bool`）由应用持有菜单是否打开，应用把它设为 true 或 false 就打开或关闭菜单，用户打开或关闭菜单时它也随之更新；`max_width` 限制面板宽度。
+- `splitButton(label, options, style)` 是拆分按钮：一个按钮与一个打开相关操作菜单的箭头连成一个控件，如“保存”旁边的“另存为…”。前段按钮显示 `label` 并执行动作，后段箭头（从右到左时在起始边）像菜单按钮那样在整个控件下方打开菜单。返回 `SplitButton{ clicked, shown }`：`clicked` 是按钮被按下、Enter 或 Space 激活；`shown` 时构建菜单项，无论如何都用 `end` 关闭菜单。它是 Tab 的一站（按钮的，按钮禁用时是箭头的），Left 与 Right 在两段之间移动焦点（从右到左时反过来）；箭头上的 Down、Up、Enter、Space 和任一段上的 Alt+Down 打开菜单。`options.button_enabled = false` 只禁用按钮的动作，箭头仍能打开菜单；`Style.enabled = false` 禁用整个控件。`options.menu` 是菜单按钮的 `placement`、`open` 与 `max_width`。辅助技术看到以 `Style.name` 或 `label` 命名的分组，里面是按钮和打开菜单的菜单按钮；箭头以 `options.arrow_label` 命名，为空时按视图的语言取“More options”（英语、日语、简体与繁体中文，`menu.moreOptions(language)`），菜单显示时读作已展开。
 - 没有外观的菜单，用于项的布局由应用决定的菜单，例如头像加名字或色块：`menuButtonBase(style)` 打开一个作为菜单按钮的容器，应用在其中构建按钮内容，`end` 后用 `popoverMenuBase(style)` 构建菜单；`popoverMenuBase` 跟在任意节点之后则是它的右键菜单，打开方式与 `popoverMenu` 相同。菜单面板只画 `style` 给出的背景、边框与圆角，没有默认的内边距和最小宽度。`menuItemBase(options, style)` 打开一个项容器（默认横排），由应用填充并在 `highlighted` 时自己画高亮，`end` 关闭；返回的 `MenuItemState` 带 `clicked`（选中，菜单随之关闭）与 `highlighted`。`options.checked` 与 `radio` 让它成为复选项或单选项，读屏报告选中与否；`shortcut` 作为描述朗读。`submenuItemBase(style)` 打开一个会展开子菜单的项，`end` 后用 `submenuBase(style)` 构建子菜单，子菜单以该项命名。项以 `Style.name` 或其中的文字命名，首字母跳转也用它。按键、焦点和语义与 `popoverMenuButton` 和 `popoverMenu` 完全相同；分隔线和小标题是应用自己放在项之间的节点。`menuGroupBase(style)` 在面板里打开一行由按键当作一站的项（`end` 关闭），例如账户菜单里“浅色、深色、跟随系统”三个 `keep_open` 单选项：Up、Down、Home 与 End 落在这一行时停在其中选中的项（没有则第一项），Left 与 Right 在行内循环移动（从右到左时反过来）；辅助技术看到一个以 `Style.name` 命名、包含这些项的分组。
 - 右键菜单的位置相对锚点的整个盒子计算，所以锚点部分滚出视野时菜单仍在指针处打开。
 - 焦点跟随高亮，辅助技术读出键盘所在的项；用指针打开时焦点在第一项上但不高亮。同一时间最多打开一个菜单；锚点不再构建或被禁用时菜单关闭。
@@ -605,7 +613,7 @@ if (side.window_double_clicked) self.newItem();
 
 ## 换行文本
 
-`Style.wrap` 让文本节点按宽度换行：在空格之后、表意文字两侧和换行符处断行，比一行还宽的词在字符之间断开。`Style.max_lines` 限制显示的行数，被截断时最后一行以省略号结尾。最小宽度是最长的不可断开片段，首选宽度是不换行时最宽的一行；排列时先按单行排列，文本得到的宽度不够时以该宽度（列中取父容器的内宽）重新测量并再排列一次。行高取测量回调对空文本给出的高度，每行作为一个单行标签录制，从右到左时靠尾端对齐。
+`Style.wrap` 让文本节点按宽度换行：在空格之后、表意文字两侧和换行符处断行，比一行还宽的词在字符之间断开。`Style.max_lines` 限制显示的行数，被截断时最后一行以省略号结尾。最小宽度是最长的不可断开片段，首选宽度是不换行时最宽的一行；排列时先按单行排列，文本得到的宽度不够时以该宽度（列中取父容器的内宽）重新测量并再排列一次。行高取测量回调对空文本给出的高度，每行作为一个单行标签录制，从右到左时靠尾端对齐。`Style.truncate_middle` 把省略号放在最后一行的中间而不是末尾，像显示长路径的文件列表保留文件名：这一行保留尽可能多的开头和所在段落的结尾，省略号两边大致一样宽，字符保持完整；单行文本比盒子宽时也这样截断，最小宽度缩到省略号（换行时比一行还宽的词照常在字符之间断开）。段落本身放得下、只是后面的文字被截掉时，省略号仍在行尾。
 
 `Style.balance` 让换行文本各行宽度接近，如 CSS 的 `text-wrap: balance`：保持按全宽换行时的行数，取仍能容下这些行的最窄宽度（按 0.25 DIP 二分），两行的标题从中间附近断开，而不是第二行只剩一个词。适合标题、说明和卡片标签这类短文本，需要 `wrap`；富文本的 `Options.balance` 相同。
 
@@ -815,7 +823,7 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 
 `Style.blur` 把节点及其后代作为一层按高斯模糊（标准差，DIP），画出的内容最多越过盒子三倍标准差。`Pose` 的 `x_percent`、`y_percent` 按节点自身宽高的百分比平移，如 CSS 的 `translate(-50%, -50%)`，随尺寸变化跟随。
 
-`Transition` 的 `hidden`、`hidden_opacity` 与 `hidden_blur` 是内容不显示时的位姿、不透明度与模糊，它在这些与自己的样式之间移动；模糊与 `Style.blur` 按高斯叠加。`exit_to`（`Away`：位姿、不透明度、模糊）是离开时去往的地方，为空时回到 `hidden`。离开的方向在内容开始离开的那一遍固定，之后的构建改变方向也不会让已在离开途中的内容转向；所在容器的 `Style.child_exit` 在那一遍代替 `exit_to`，像向导、日历或轮播后退时，离开的页按这一步的方向离开，尽管它是在前进时构建的。`after_exits` 让内容一次一个出现：同一容器里还有内容在离开时，新内容先在布局中占好位置但不绘制、不接收输入，离开的内容消失后再按 `enter` 进入；它第一次出现时也等一帧，以便得知同一遍里开始离开的兄弟；在出现之前就被移除时什么也不留下。退出期间内容不接收指针与键盘，也不进入可访问性树。
+`Transition` 的 `hidden`、`hidden_opacity` 与 `hidden_blur` 是内容不显示时的位姿、不透明度与模糊，它在这些与自己的样式之间移动；模糊与 `Style.blur` 按高斯叠加。`exit_to`（`Away`：位姿、不透明度、模糊）是离开时去往的地方，为空时回到 `hidden`。离开的方向在内容开始离开的那一遍固定，之后的构建改变方向也不会让已在离开途中的内容转向；所在容器的 `Style.child_exit` 在那一遍代替 `exit_to`，像向导、日历或轮播后退时，离开的页按这一步的方向离开，尽管它是在前进时构建的。`after_exits` 让内容一次一个出现：同一容器里还有内容在离开时，新内容先在布局中占好位置但不绘制、不接收输入，离开的内容消失后再按 `enter` 进入；它第一次出现时也等一帧，以便得知同一遍里开始离开的兄弟；在出现之前就被移除时什么也不留下。退出期间内容不接收指针与键盘，也不进入可访问性树。`delay_ns` 是进入前等待的时长（纳秒），如列表的行一个接一个进来、每行的延迟更长；离开前也等待同样的时长，除非 `exit_delay_ns` 另有规定：为 0 时等待 `delay_ns`，为负时不等待（一个接一个进来的行一起离开），为正时等待它自己的时长，如同 CSS 为每个状态设置 transition-delay。`instant` 的退出没有可延迟的过程。
 
 ```zig
 const way: f32 = if (state.back) -1 else 1;

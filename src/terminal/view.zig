@@ -346,6 +346,9 @@ pub const TerminalView = struct {
     /// The primary button drags the scroll bar, held `bar_grab` DIPs below
     /// the thumb's top; `over_bar` that the pointer is over the bar's strip.
     bar_held: bool = false,
+    /// The theme's scroll bar style as of the last paint, which input
+    /// lays the bar out with.
+    bar_style: ui.scroll.Style = .{},
     /// When the synchronized update that holds frames back began, in the
     /// Host's clock.
     held_since: ?u64 = null,
@@ -1317,10 +1320,12 @@ pub const TerminalView = struct {
     /// shows it: while the pointer is over the terminal or drags the thumb,
     /// in the terminal's text color, as faint as the theme's bars.
     fn paintScrollbar(self: *TerminalView, frame: *ui.Frame, bounds: view.Rect) void {
+        self.bar_style = frame.scrollbarStyle();
         if (!self.scrollbarShown()) return;
         var bar = self.scrollbar();
         bar.box = bounds;
-        frame.scrollbar(bar, .{ .dragging = self.bar_held, .color = ui.Color.rgb(self.terminal.foreground).withAlpha(0.35) });
+        const over = if (self.pointer) |at| bar.hit(.{ .x = at.x, .y = at.y }) else false;
+        frame.scrollbar(bar, .{ .dragging = self.bar_held, .hovered = over, .color = ui.Color.rgb(self.terminal.foreground).withAlpha(0.35) });
     }
 
     /// Whether the scroll bar shows: there is a scrollback, and the pointer
@@ -1339,7 +1344,7 @@ pub const TerminalView = struct {
         const s = &self.terminal.screen;
         const history: f32 = @floatFromInt(s.historyCount());
         const rows: f32 = @floatFromInt(s.rows);
-        return .{ .box = self.bounds, .view = rows, .content = history + rows, .offset = history - @as(f32, @floatFromInt(s.viewportOffset())) };
+        return .{ .box = self.bounds, .view = rows, .content = history + rows, .offset = history - @as(f32, @floatFromInt(s.viewportOffset())), .style = self.bar_style };
     }
 
     /// Whether the scroll bar takes the pointer at a window point: over its

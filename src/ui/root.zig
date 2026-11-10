@@ -3685,6 +3685,8 @@ pub const NodeExtras = struct {
     search: bool = false,
     orientation: ?enum { horizontal, vertical } = null,
     multiple: bool = false,
+    /// As aria-readonly, on the roles that take it.
+    read_only: bool = false,
     position: u32 = 0,
     set_size: u32 = 0,
     row_count: u32 = 0,
@@ -3715,6 +3717,12 @@ pub const NodeExtras = struct {
             node.horizontal = way == .horizontal;
         }
         node.multiple = node.multiple or self.multiple;
+        // ARIA's aria-readonly is for these roles alone; a table's cells
+        // and the rest do not take it.
+        if (self.read_only) switch (node.role) {
+            .text_box, .combo_box, .checkbox, .toggle_switch, .slider, .stepper, .radio_group, .list_box, .grid, .tree_grid, .cell, .column_header, .row_header => node.read_only = true,
+            else => {},
+        };
         // A row, option, tab or tree item says it is chosen as it is checked.
         if (self.selected) |chosen| switch (node.role) {
             .list_item, .tree_item, .table_row, .option, .tab, .radio => node.checked = chosen,
@@ -4609,10 +4617,20 @@ pub const Frame = struct {
     /// or `state.color` for a view whose colors are not the theme's, as a
     /// terminal's; wider while `state.dragging`. Nothing shows when the bar
     /// has nowhere to scroll.
+    /// A bar whose style is the zero one takes the theme's
+    /// (`Theme.scrollbar`): its widths, corners, track and thumb colors at
+    /// rest, hovered (`state.hovered`) and dragged. Lay the bar out for
+    /// input with the same style: `scrollbarStyle` gives it.
     pub fn scrollbar(self: *Frame, bar: scroll.Bar, state: ScrollbarState) void {
-        bar.paint(self, state.color orelse Color.rgb(self.currentTheme().palette.track), state.dragging);
+        var styled = bar;
+        if (styled.style.isDefault()) styled.style = self.currentTheme().scrollbar;
+        styled.paintStyled(self, state.color orelse Color.rgb(self.currentTheme().palette.track), .{ .dragging = state.dragging, .hovered = state.hovered });
     }
-    pub const ScrollbarState = struct { dragging: bool = false, color: ?Color = null };
+    /// The style of the current theme's scroll bars.
+    pub fn scrollbarStyle(self: *const Frame) scroll.Style {
+        return self.currentTheme().scrollbar;
+    }
+    pub const ScrollbarState = struct { dragging: bool = false, hovered: bool = false, color: ?Color = null };
     pub fn roundedRect(self: *Frame, bounds: Rect, radius: f32, color: Color) void {
         self.context.command_buffer.roundedRect(self.absolute(bounds), radius, color) catch |err| {
             self.failure = self.failure orelse err;

@@ -10,6 +10,7 @@
 //! caller-owned storage, so a chart redrawn every frame stays warm.
 //! `ziggurat_chart_view` draws charts in declarative views.
 const scale = @import("scale.zig");
+const log = @import("log.zig");
 const time = @import("time.zig");
 const stacking = @import("stack.zig");
 const shape = @import("shape.zig");
@@ -21,6 +22,9 @@ pub const Tick = scale.Tick;
 pub const max_label = scale.max_label;
 pub const Format = scale.Format;
 pub const Linear = scale.Linear;
+pub const Log = log.Log;
+pub const SymLog = log.SymLog;
+pub const formatSignificant = log.formatSignificant;
 pub const Band = scale.Band;
 pub const TickValues = scale.TickValues;
 pub const tickValues = scale.tickValues;
@@ -85,4 +89,5 @@ pub const rebase = plot.rebase;
 
 test {
     _ = @import("tests.zig");
+    _ = @import("log_tests.zig");
 }

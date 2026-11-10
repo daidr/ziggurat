@@ -373,7 +373,74 @@ pub fn cut(line: []const u8, width: f32, font: ?Font, measurer: Measurer, out: [
     }
 }
 
+/// `text` with its middle cut out so that its start, an ellipsis and its
+/// end fit `width`, about as wide on each side of the ellipsis, written
+/// into `out`; `text` itself when it fits. Characters are kept whole.
+pub fn cutMiddle(text: []const u8, width: f32, font: ?Font, measurer: Measurer, out: []u8) []const u8 {
+    if (measurer.textSize(text, font).width <= width) return text;
+    if (out.len < ellipsis.len) return text[0..0];
+    const room = out.len - ellipsis.len;
+    var head: usize = 0;
+    var tail: usize = text.len;
+    var head_width: f32 = 0;
+    var tail_width: f32 = 0;
+    var head_done = false;
+    var tail_done = false;
+    // Grow the narrower side by a character at a time while the whole fits.
+    while (!(head_done and tail_done)) {
+        if (!head_done and (tail_done or head_width <= tail_width)) {
+            var after = head + 1;
+            while (after < tail and text[after] & 0xc0 == 0x80) after += 1;
+            if (after > tail or after + (text.len - tail) > room or measurer.textSize(compose(text, after, tail, out), font).width > width) {
+                head_done = true;
+                continue;
+            }
+            head = after;
+            head_width = measurer.textSize(text[0..head], font).width;
+        } else {
+            if (tail <= head) {
+                tail_done = true;
+                continue;
+            }
+            var previous = tail - 1;
+            while (previous > head and text[previous] & 0xc0 == 0x80) previous -= 1;
+            if (head + (text.len - previous) > room or measurer.textSize(compose(text, head, previous, out), font).width > width) {
+                tail_done = true;
+                continue;
+            }
+            tail = previous;
+            tail_width = measurer.textSize(text[tail..], font).width;
+        }
+    }
+    return compose(text, head, tail, out);
+}
+/// The start of `text` to `head`, an ellipsis and its end from `tail`.
+fn compose(text: []const u8, head: usize, tail: usize, out: []u8) []const u8 {
+    const end_len = text.len - tail;
+    @memcpy(out[0..head], text[0..head]);
+    @memcpy(out[head .. head + ellipsis.len], ellipsis);
+    @memcpy(out[head + ellipsis.len .. head + ellipsis.len + end_len], text[tail..]);
+    return out[0 .. head + ellipsis.len + end_len];
+}
+
 const testing = std.testing;
+
+test "a middle cut keeps the start and the end, about as wide each" {
+    const m: Measurer = .{};
+    var buffer: [128]u8 = undefined;
+    // 9 DIP a character: 13 characters fit with the ellipsis between.
+    const path = "/Users/me/Documents/Reports/summary-final.pdf";
+    const shown = cutMiddle(path, 9 * 13, null, m, &buffer);
+    try testing.expect(m.textSize(shown, null).width <= 9 * 13);
+    try testing.expect(std.mem.startsWith(u8, shown, "/Users"));
+    try testing.expect(std.mem.endsWith(u8, shown, "l.pdf"));
+    try testing.expect(std.mem.indexOf(u8, shown, ellipsis) != null);
+    // Text that fits is left whole; characters are never split.
+    try testing.expectEqualStrings("short", cutMiddle("short", 100, null, m, &buffer));
+    const ideographs = cutMiddle("\u{4e00}\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{516d}\u{4e03}", 9 * 4, null, m, &buffer);
+    try testing.expect(std.unicode.utf8ValidateSlice(ideographs));
+    try testing.expect(std.mem.indexOf(u8, ideographs, ellipsis) != null);
+}
 
 test "balanced lines keep their count at about the same width" {
     const m: Measurer = .{};

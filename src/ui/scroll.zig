@@ -23,6 +23,66 @@ pub const Scrollbar = struct {
     }
 };
 
+/// How a scroll bar looks: the widths of its track and thumb, the thumb's
+/// corners and shortest length, whether it runs to the ends of its edge,
+/// and the colors of the track and of the thumb at rest, hovered and
+/// dragged, as a code editor's bar of a square thumb over a track. A
+/// theme's (`Theme.scrollbar`) styles every bar; a view's own takes its
+/// place. The zero style draws as bars always have: a rounded thumb
+/// `Bar.thickness` wide, `Bar.margin` clear of the edge and its ends, in
+/// the theme's track color, with no track.
+pub const Style = struct {
+    /// How wide the bar is across, its track included; 0 is the thumb's
+    /// width and `Bar.margin` on each side.
+    track_width: f32 = 0,
+    /// How wide the thumb is across, centered in the track; 0 is
+    /// `Bar.thickness`.
+    thumb_width: f32 = 0,
+    /// The thumb's corner radius; null rounds its ends whole.
+    radius: ?f32 = null,
+    /// Square corners, as a radius of 0.
+    square: bool = false,
+    /// The thumb's shortest length; 0 is `Bar.min_thumb`.
+    min_length: f32 = 0,
+    /// The track and thumb run to the ends of the edge, with no margin.
+    flush: bool = false,
+    /// Colors (0xAARRGGBB, an alpha of 0 is opaque): the track's, drawn
+    /// along the whole bar when set, and the thumb's at rest, while the
+    /// pointer is over the bar and while it is dragged. Null keeps the
+    /// theme's track color for the thumb, and the rest color for a state
+    /// without one.
+    track: ?u32 = null,
+    thumb: ?u32 = null,
+    thumb_hovered: ?u32 = null,
+    thumb_dragged: ?u32 = null,
+
+    /// The thumb's width across.
+    pub fn thumbWidth(self: Style) f32 {
+        return if (self.thumb_width > 0) self.thumb_width else Bar.thickness;
+    }
+    /// The bar's width across.
+    pub fn trackWidth(self: Style) f32 {
+        return if (self.track_width > 0) @max(self.track_width, self.thumbWidth()) else self.thumbWidth() + 2 * Bar.margin;
+    }
+    /// The space left clear at the bar's two ends.
+    pub fn endMargin(self: Style) f32 {
+        return if (self.flush) 0 else Bar.margin;
+    }
+    pub fn minLength(self: Style) f32 {
+        return if (self.min_length > 0) self.min_length else Bar.min_thumb;
+    }
+    /// Whether every field is its zero, as a bar that takes the theme's.
+    pub fn isDefault(self: Style) bool {
+        return std.meta.eql(self, Style{});
+    }
+    /// A color of the style as one to paint with.
+    pub fn color(value: u32) Color {
+        const alpha: u8 = @intCast(value >> 24);
+        return .{ .r = @intCast((value >> 16) & 0xff), .g = @intCast((value >> 8) & 0xff), .b = @intCast(value & 0xff), .a = if (alpha == 0) 255 else alpha };
+    }
+};
+const Color = @import("geometry.zig").Color;
+
 /// The scroll bar of a view that scrolls itself rather than through a view
 /// scroll container, as a terminal, a rich text editor or a virtual table
 /// does, laid out and painted as a container's, so that every bar of an
@@ -42,6 +102,9 @@ pub const Bar = struct {
     view: f32,
     content: f32,
     offset: f32,
+    /// Its look and geometry; the zero style is the bars' usual one, which
+    /// `Frame.scrollbar` replaces with the theme's.
+    style: Style = .{},
 
     /// How thick a thumb is, and how much thicker while dragged, toward
     /// the content.
@@ -57,11 +120,22 @@ pub const Bar = struct {
     pub fn scrolls(self: Bar) bool {
         return std.math.isFinite(self.view) and std.math.isFinite(self.content) and self.content > self.view + 0.5;
     }
-    /// The track the thumb moves along.
+    /// The track the thumb moves along, as wide as the thumb.
     pub fn track(self: Bar) Rect {
         const b = self.box;
-        if (self.axis == .horizontal) return .{ .x = b.x + margin, .y = b.y + b.height - margin - thickness, .width = @max(0, b.width - 2 * margin), .height = thickness };
-        return .{ .x = if (self.leading) b.x + margin else b.x + b.width - margin - thickness, .y = b.y + margin, .width = thickness, .height = @max(0, b.height - 2 * margin) };
+        const across = self.style.thumbWidth();
+        const inset = (self.style.trackWidth() - across) / 2;
+        const ends = self.style.endMargin();
+        if (self.axis == .horizontal) return .{ .x = b.x + ends, .y = b.y + b.height - inset - across, .width = @max(0, b.width - 2 * ends), .height = across };
+        return .{ .x = if (self.leading) b.x + inset else b.x + b.width - inset - across, .y = b.y + ends, .width = across, .height = @max(0, b.height - 2 * ends) };
+    }
+    /// The whole bar along its edge, as wide as `Style.trackWidth`, where a
+    /// style's track color paints.
+    pub fn trough(self: Bar) Rect {
+        const b = self.box;
+        const across = self.style.trackWidth();
+        if (self.axis == .horizontal) return .{ .x = b.x, .y = b.y + b.height - across, .width = b.width, .height = across };
+        return .{ .x = if (self.leading) b.x else b.x + b.width - across, .y = b.y, .width = across, .height = b.height };
     }
     /// The bar's geometry, null when it has nowhere to scroll.
     pub fn geometry(self: Bar) ?Scrollbar {
@@ -74,7 +148,7 @@ pub const Bar = struct {
         model.content = content_size;
         const at = std.math.clamp(self.offset, 0, reach);
         if (self.axis == .horizontal) model.offset.x = at else model.offset.y = at;
-        return model.scrollbar(self.axis, self.track(), min_thumb) catch null;
+        return model.scrollbar(self.axis, self.track(), self.style.minLength()) catch null;
     }
     /// The thumb's box, wider toward the content while `dragging`; null
     /// when the bar has nowhere to scroll.
@@ -105,15 +179,35 @@ pub const Bar = struct {
         if (!self.scrolls()) return false;
         const b = self.box;
         if (point.x < b.x or point.x >= b.x + b.width or point.y < b.y or point.y >= b.y + b.height) return false;
-        if (self.axis == .horizontal) return point.y >= b.y + b.height - strip;
-        return if (self.leading) point.x < b.x + strip else point.x >= b.x + b.width - strip;
+        const reach = @max(strip, self.style.trackWidth());
+        if (self.axis == .horizontal) return point.y >= b.y + b.height - reach;
+        return if (self.leading) point.x < b.x + reach else point.x >= b.x + b.width - reach;
     }
     /// Paint the thumb into `target`, anything with `roundedRect`, in
     /// `color`, if the bar has somewhere to scroll.
     pub fn paint(self: Bar, target: anytype, color: anytype, dragging: bool) void {
-        const box = self.thumb(dragging) orelse return;
+        self.paintStyled(target, color, .{ .dragging = dragging });
+    }
+    pub const State = struct { dragging: bool = false, hovered: bool = false };
+    /// Paint the track the style colors and the thumb, in the style's color
+    /// for `state` or else `rest`, if the bar has somewhere to scroll.
+    pub fn paintStyled(self: Bar, target: anytype, rest: anytype, state: State) void {
+        if (!self.scrolls()) return;
+        const style = self.style;
+        if (style.track) |value| self.paintTrack(target, Style.color(value));
+        const box = self.thumb(state.dragging) orelse return;
+        const chosen = if (state.dragging) style.thumb_dragged orelse style.thumb_hovered orelse style.thumb else if (state.hovered) style.thumb_hovered orelse style.thumb else style.thumb;
+        target.roundedRect(box, self.thumbRadius(box), if (chosen) |value| Style.color(value) else rest);
+    }
+    /// Paint the whole bar in `color`, as a style's track color does.
+    pub fn paintTrack(self: Bar, target: anytype, color: anytype) void {
+        target.roundedRect(self.trough(), 0, color);
+    }
+    /// The thumb's corner radius for its `box`.
+    pub fn thumbRadius(self: Bar, box: Rect) f32 {
+        if (self.style.square) return 0;
         const across = if (self.axis == .horizontal) box.height else box.width;
-        target.roundedRect(box, across / 2, color);
+        return if (self.style.radius) |value| @min(value, across / 2) else across / 2;
     }
 };
 
@@ -261,4 +355,54 @@ test "a self-scrolling view's bar lays out, drags and hits as a container's" {
     // Nowhere to scroll: nothing shows or hits.
     const short: Bar = .{ .box = bar.box, .view = 4, .content = 4, .offset = 0 };
     try std.testing.expect(short.thumb(false) == null and !short.hit(.{ .x = 105, .y = 50 }));
+}
+
+test "a scroll bar's style lays out its track and thumb, and the zero style keeps the usual bar" {
+    const box: Rect = .{ .x = 0, .y = 0, .width = 100, .height = 200 };
+    const plain: Bar = .{ .box = box, .view = 200, .content = 800, .offset = 0 };
+    // The usual bar: a 4 DIP thumb 2 DIP clear of the edge and the ends.
+    const track = plain.track();
+    try std.testing.expectEqual(@as(f32, 100 - Bar.margin - Bar.thickness), track.x);
+    try std.testing.expectEqual(@as(f32, Bar.margin), track.y);
+    try std.testing.expectEqual(@as(f32, Bar.thickness), track.width);
+    try std.testing.expectEqual(@as(f32, 200 - 2 * Bar.margin), track.height);
+    // A code editor's: a 14 DIP bar of a 10 DIP square thumb, to the ends.
+    var styled = plain;
+    styled.style = .{ .track_width = 14, .thumb_width = 10, .square = true, .flush = true, .min_length = 30, .track = 0x202020, .thumb = 0x606060, .thumb_hovered = 0x808080, .thumb_dragged = 0xa0a0a0 };
+    const lane = styled.track();
+    try std.testing.expectEqual(@as(f32, 100 - 2 - 10), lane.x);
+    try std.testing.expectEqual(@as(f32, 0), lane.y);
+    try std.testing.expectEqual(@as(f32, 200), lane.height);
+    try std.testing.expectEqual(@as(f32, 86), styled.trough().x);
+    try std.testing.expect(styled.hit(.{ .x = 87, .y = 50 }));
+    try std.testing.expect(!plain.hit(.{ .x = 87, .y = 50 }));
+    const thumb = styled.thumb(false).?;
+    try std.testing.expectEqual(@as(f32, 0), styled.thumbRadius(thumb));
+    try std.testing.expectEqual(@as(f32, 2), plain.thumbRadius(plain.thumb(false).?));
+    // A tiny view still has a thumb as long as the style's shortest.
+    var long = styled;
+    long.content = 100_000;
+    try std.testing.expectApproxEqAbs(@as(f32, 30), long.thumb(false).?.height, 0.01);
+
+    const Paint = struct {
+        colors: [4]Color = undefined,
+        count: usize = 0,
+        fn roundedRect(self: *@This(), _: Rect, _: f32, color: Color) void {
+            self.colors[self.count] = color;
+            self.count += 1;
+        }
+    };
+    var painted: Paint = .{};
+    styled.paintStyled(&painted, Color.rgb(0xff0000), .{ .hovered = true });
+    try std.testing.expectEqual(@as(usize, 2), painted.count);
+    try std.testing.expectEqual(@as(u32, 0x202020), painted.colors[0].hex());
+    try std.testing.expectEqual(@as(u32, 0x808080), painted.colors[1].hex());
+    painted = .{};
+    styled.paintStyled(&painted, Color.rgb(0xff0000), .{ .dragging = true });
+    try std.testing.expectEqual(@as(u32, 0xa0a0a0), painted.colors[1].hex());
+    // The zero style paints the thumb alone, in the color it is given.
+    painted = .{};
+    plain.paintStyled(&painted, Color.rgb(0xff0000), .{ .hovered = true });
+    try std.testing.expectEqual(@as(usize, 1), painted.count);
+    try std.testing.expectEqual(@as(u32, 0xff0000), painted.colors[0].hex());
 }
