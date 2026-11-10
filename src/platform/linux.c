@@ -1181,6 +1181,16 @@ void zlg_window_action(NativeWindow *s, int action) {
     if (action==1 || action==7) s->gesture=NULL;
     switch(action) {
         case 0: if (s->popup) popup_show(s); else gtk_widget_show(s->window); break;
+        case 8: {
+            /* Shown without taking the focus: the window manager does not
+               give it to a window mapped without focus-on-map. */
+            if (s->popup) { popup_show(s); break; }
+            gboolean focus=gtk_window_get_focus_on_map(GTK_WINDOW(s->window));
+            gtk_window_set_focus_on_map(GTK_WINDOW(s->window),FALSE);
+            gtk_widget_show(s->window);
+            if (!s->destroyed) gtk_window_set_focus_on_map(GTK_WINDOW(s->window),focus);
+            break;
+        }
         case 1: s->popup_regrab=FALSE; popup_ungrab(s); if(!s->destroyed)gtk_widget_hide(s->window); break;
         case 2: request_mode(s,MODE_MINIMIZED); break; case 3: request_mode(s,MODE_MAXIMIZED); break;
         case 4:

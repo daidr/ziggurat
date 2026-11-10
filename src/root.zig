@@ -34,6 +34,24 @@ pub const AppOptions = struct {
     /// quit: the last window closing calls it instead of quitting, and run
     /// does not return when it starts without windows.
     on_all_windows_closed: ?AllWindowsClosedHandler = null,
+    /// Borrowed until deinit. Told when a window's close handler canceled a
+    /// quit that `requestQuit` started, as the user's Quit from a menu, the
+    /// Dock or the keyboard starts it: an app that keeps its own state of
+    /// quitting from the `.quit` close requests clears it here, or it would
+    /// go on running with that state set.
+    on_quit_cancelled: ?QuitCancelledHandler = null,
+    /// Starts the app in the background: its windows show without the focus,
+    /// and on macOS without bringing the app to the front, until one of them
+    /// takes it, as the user clicks it. `ziggurat dev --background` asks for
+    /// it with ZIGGURAT_DEV_BACKGROUND=1 in the environment, which sets it
+    /// too, so that each rebuild leaves the focus in the editor.
+    background: bool = false,
+};
+/// Runs on the owner thread right after a quit was canceled, before
+/// `requestQuit` returns `.cancelled`. Context outlives the App.
+pub const QuitCancelledHandler = struct {
+    context: *anyopaque,
+    cancelled: *const fn (*anyopaque, *App) void,
 };
 /// Runs on the owner thread at the dispatch safe point after the last
 /// window closed. It may create windows or quit. Context outlives the App.
@@ -390,6 +408,16 @@ pub const WindowAction = enum { show, hide, minimize, maximize, restore, focus, 
 /// What a double click on a title bar does (`Window.titleBarDoubleClick`).
 pub const TitleBarAction = enum { maximize, minimize, none };
 /// What a double click on a title bar does here, as the user set it.
+/// Whether `ziggurat dev --background` started the app, with
+/// ZIGGURAT_DEV_BACKGROUND=1 in its environment (AppOptions.background).
+fn devBackground() bool {
+    if (comptime builtin.is_test or builtin.cpu.arch == .wasm32) return false else {
+        var buffer: [8]u8 = undefined;
+        var fixed: std.heap.FixedBufferAllocator = .init(&buffer);
+        const value = zio.getEnvVarOwned(fixed.allocator(), "ZIGGURAT_DEV_BACKGROUND") catch return false;
+        return std.mem.eql(u8, value, "1");
+    }
+}
 pub fn titleBarAction() TitleBarAction {
     return if (@hasDecl(backend, "titleBarAction")) backend.titleBarAction() else .maximize;
 }
@@ -678,6 +706,9 @@ pub const ResourceStats = struct {
     stop_participants: usize,
 };
 
+/// A light or dark appearance the app forces, or the system's.
+pub const ForcedAppearance = enum(u8) { system, light, dark };
+
 pub const App = struct {
     pub const Phase = enum { ready, running, stopping, stopped };
     pub const QuitResult = enum { accepted, cancelled, in_progress, already_stopped };
@@ -719,11 +750,21 @@ pub const App = struct {
     reporting_diagnostic: bool = false,
     activation: ?ActivationHandler = null,
     all_windows_closed: ?AllWindowsClosedHandler = null,
+    quit_cancelled: ?QuitCancelledHandler = null,
+    /// Windows show without the focus until one of them takes it
+    /// (AppOptions.background).
+    background_show: bool = false,
     /// A window was created since the handler last ran.
     windows_seen: bool = false,
     active: bool = false,
     activation_dirty: bool = false,
     activation_notifying: bool = false,
+    /// The appearance the app forces (the system module's theme Source),
+    /// for parts that draw with their own engine and do not follow what the
+    /// platform's own widgets take, as WebView2's pages on Windows.
+    appearance: ForcedAppearance = .system,
+    /// Told once `appearance` changed; installed by such a part.
+    appearance_hook: ?*const fn (*App) void = null,
 
     /// Call on the process main thread. App must outlive all its value handles.
     pub fn init(allocator: std.mem.Allocator) !*App {
@@ -739,12 +780,21 @@ pub const App = struct {
             return err;
         };
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .owner = std.Thread.getCurrentId(), .diagnostics_sink = options.diagnostics_sink, .icon_policy = options.icon_policy, .stop_resources = stops, .activation = options.activation, .all_windows_closed = options.on_all_windows_closed };
+        self.* = .{ .allocator = allocator, .owner = std.Thread.getCurrentId(), .diagnostics_sink = options.diagnostics_sink, .icon_policy = options.icon_policy, .stop_resources = stops, .activation = options.activation, .all_windows_closed = options.on_all_windows_closed, .quit_cancelled = options.on_quit_cancelled, .background_show = options.background or devBackground() };
         backend.init(self) catch |err| {
             self.report(self.failureDiagnostic(.app_init, err, null));
             return err;
         };
         return self;
+    }
+    /// Records the appearance the app forces and tells the part that
+    /// follows it. The system module's theme calls this; apps set the
+    /// appearance there.
+    pub fn setForcedAppearance(self: *App, value: ForcedAppearance) void {
+        self.assertOwner();
+        if (self.appearance == value) return;
+        self.appearance = value;
+        if (self.appearance_hook) |hook| hook(self);
     }
     /// Backend captures the code at the failure site, before rollback changes it.
     pub fn captureNativeFailure(self: *App, domain: diagnostics.Domain, code: u32) void {
@@ -1038,6 +1088,7 @@ pub const App = struct {
         }
         if (focused == self.active) return;
         self.active = focused;
+        if (focused) self.background_show = false;
         const handler = self.activation orelse return;
         self.activation_notifying = true;
         self.activity_depth += 1;
@@ -1078,6 +1129,11 @@ pub const App = struct {
     }
     /// Preflight handlers before accepting shutdown. No partial automatic close.
     pub fn requestQuit(self: *App) QuitResult {
+        const result = self.queryQuit();
+        if (result == .cancelled) if (self.quit_cancelled) |handler| handler.cancelled(handler.context, self);
+        return result;
+    }
+    fn queryQuit(self: *App) QuitResult {
         self.assertOwner();
         if (self.phase == .stopping and self.looping) backend.quit(self);
         if (self.phase == .stopping or self.phase == .stopped) return .already_stopped;
@@ -1454,7 +1510,10 @@ pub const Window = struct {
         const restore_focus = action == .hide and record.owner_record != null and backend.isActive(record);
         if (action == .hide or action == .minimize or action == .maximize or action == .restore) _ = record.invalidatePointer(true);
         self.app.native_failure = null;
-        backend.perform(scope.record, action) catch |err| {
+        // A development app started in the background shows its windows
+        // without the focus until it takes it (AppOptions.background).
+        const quiet = action == .show and self.app.background_show and record.options.popup == null and @hasDecl(backend, "showInactive");
+        (if (quiet) backend.showInactive(scope.record) else backend.perform(scope.record, action)) catch |err| {
             const failure = self.app.native_failure;
             if (activated) {
                 record.setModalActive(false) catch unreachable;

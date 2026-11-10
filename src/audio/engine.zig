@@ -317,7 +317,9 @@ pub const Engine = struct {
         try self.voices.ensureTotalCapacity(self.allocator, self.live + 1);
         if (self.free_slot == no_slot) try self.slots.ensureUnusedCapacity(self.allocator, 1);
         const voice = try self.allocator.create(Voice);
+        errdefer self.allocator.destroy(voice);
         voice.* = init_voice;
+        if (voice.downsamples(1)) voice.bank = try self.allocator.create(mixer.SincBank);
         const index = if (self.free_slot != no_slot) blk: {
             const index = self.free_slot;
             self.free_slot = self.slots.items[index].next_free;
@@ -355,7 +357,7 @@ pub const Engine = struct {
             // A sound starting at its start starts at once; one resuming in
             // the middle fades in, as one pausing fades out, without a click.
             // One still fading out ramps back from where it is.
-            voice.snap = voice.index + 3 <= 0;
+            voice.snap = voice.head <= 0;
             voice.fade_in = !voice.snap;
             voice.active = true;
             self.voices.appendAssumeCapacity(voice);
@@ -394,6 +396,7 @@ pub const Engine = struct {
     fn freeVoice(self: *Engine, voice: *Voice) void {
         if (voice.source == .memory) voice.source.memory.sound.release();
         if (voice.stretcher) |stretcher| stretcher.destroy();
+        if (voice.bank) |bank| self.allocator.destroy(bank);
         self.allocator.destroy(voice);
         self.live -= 1;
     }
@@ -863,7 +866,12 @@ pub const Player = struct {
     pub fn setSpeed(self: Player, speed_value: f64) void {
         const voice = self.lock() orelse return;
         defer self.unlock();
-        if (speed_value > 0 and !std.math.isInf(speed_value)) voice.speed = @min(speed_value, 16);
+        if (!(speed_value > 0) or std.math.isInf(speed_value)) return;
+        const clamped = @min(speed_value, 16);
+        // Faster than the output plays, it low-passes with a sinc, whose
+        // weights it keeps from now on; without memory for them, a spline.
+        if (voice.bank == null and voice.downsamples(clamped)) voice.bank = self.engine.allocator.create(mixer.SincBank) catch null;
+        voice.speed = clamped;
     }
 
     pub fn speed(self: Player) f64 {

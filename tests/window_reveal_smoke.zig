@@ -1,5 +1,7 @@
-//! Windows: a window stays cloaked until its first frame painted, and the
-//! session's end (WM_ENDSESSION) finishes the quit inside the notification.
+//! Windows: a window stays cloaked until its first frame painted, one whose
+//! frames show through DirectComposition until DWM composed that frame, and
+//! the session's end (WM_ENDSESSION) finishes the quit inside the
+//! notification.
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
@@ -44,10 +46,10 @@ fn dispatcher() ?c.HWND {
 
 var revealed = std.atomic.Value(bool).init(false);
 
-fn watch(hwnd: c.HWND, target: c.HWND) void {
+fn watch(hwnd: c.HWND, composed: c.HWND, target: c.HWND) void {
     // DWM's attributes read from any thread; the main thread only runs.
     for (0..500) |_| {
-        if (!cloaked(hwnd)) {
+        if (!cloaked(hwnd) and !cloaked(composed)) {
             revealed.store(true, .release);
             break;
         }
@@ -65,8 +67,19 @@ pub fn main() !void {
     const hwnd: c.HWND = @ptrCast(window.nativeHandle().?);
     if (!cloaked(hwnd)) return error.NotCloakedBeforeFirstFrame;
     try window.perform(.show);
+    // Its first WM_PAINT shows it at once: DWM shows the window's own
+    // pixels until the frame presents.
+    _ = c.UpdateWindow(hwnd);
+    if (cloaked(hwnd)) return error.CloakedAfterFirstFrame;
+    // A transparent window has no redirection bitmap: shown before DWM
+    // composed its first frame, it would show black.
+    const composed_window = try app.createWindow(.{ .title = "Composed", .transparent = true });
+    const composed: c.HWND = @ptrCast(composed_window.nativeHandle().?);
+    try composed_window.perform(.show);
+    _ = c.UpdateWindow(composed);
+    if (!cloaked(composed)) return error.ComposedShownBeforeDwm;
     const target = dispatcher() orelse return error.NoDispatcher;
-    const thread = try std.Thread.spawn(.{}, watch, .{ hwnd, target });
+    const thread = try std.Thread.spawn(.{}, watch, .{ hwnd, composed, target });
     try app.run();
     thread.join();
     if (!revealed.load(.acquire)) return error.StillCloaked;

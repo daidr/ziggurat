@@ -195,7 +195,7 @@ TextClient 解绑先撤原生入口，再通知唯一旧客户端 `unbound`。�
 | --- | --- |
 | Window.requestClose | 同步询问 on_close；原生关闭按钮传入 user 原因 |
 | Window.destroy | 绕过否决，重复关闭幂等 |
-| App.requestQuit | quit 原因预检所有窗口；出现否决不执行自动关闭 |
+| App.requestQuit | quit 原因预检所有窗口；出现否决不执行自动关闭，并在返回 cancelled 之前调用一次 `AppOptions.on_quit_cancelled`（菜单、程序坞、⌘Q 与信号发起的退出也经这里，应用借此清掉自己在 quit 关闭询问里设下的“正在退出”状态） |
 | App.quit | 绕过否决、关闭任务入口并请求结束循环；退出序列已跑完而原生循环仍在继续时（例如被吞掉退出请求的模态循环），之后每次 quit 或 requestQuit 都再次请求循环结束 |
 
 macOS 上程序坞菜单的“退出”、⌘Q 之外的系统退出请求（如注销前询问）经 `applicationShouldTerminate:` 交给 requestQuit，AppKit 收到 NSTerminateCancel，是否退出由预检与否决决定。

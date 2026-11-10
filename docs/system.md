@@ -216,7 +216,7 @@ Owner 提供四种操作，参数都是 `(options, destination, context, on_resu
 
 `system.picker.Options.extensions` 最多 16 项，每项是 `"*"` 或以点开头的扩展名。空切片对打开/目录操作采用 `"*"`，保存采用 `".txt"`；保存不接受 `"*"`。`suggested_name` 默认 `"Untitled"`，最多 256 个 UTF-16 单元。选项在启动返回前复制进原生对象。
 
-`mime_types` 按媒体类型过滤，像 HTML input 的 `accept`：`"application/pdf"`，或某一类的全部文件 `"image/*"`，由系统选择器按它认识的类型匹配，不必列出每个扩展名。只有打开文件（单个或多个）接受它，和扩展名合计最多 16 项；过滤器同时接受扩展名和类型对应的文件，只给类型时不再默认 `"*"`。GTK 直接匹配媒体类型（含通配）；macOS 转成 `UTType`，`image/*`、`audio/*`、`video/*`、`text/*`、`font/*` 分别取 `public.image`、`public.audio`、`public.movie`、`public.text`、`public.font`；Windows 暂不支持，返回 `error.UnsupportedFileFilter`。`system.picker.validMimeType` 检查单项写法。
+`mime_types` 按媒体类型过滤，像 HTML input 的 `accept`：`"application/pdf"`，或某一类的全部文件 `"image/*"`，由系统选择器按它认识的类型匹配，不必列出每个扩展名。只有打开文件（单个或多个）接受它，和扩展名合计最多 16 项；过滤器同时接受扩展名和类型对应的文件，只给类型时不再默认 `"*"`。GTK 直接匹配媒体类型（含通配）；macOS 转成 `UTType`，`image/*`、`audio/*`、`video/*`、`text/*`、`font/*` 分别取 `public.image`、`public.audio`、`public.movie`、`public.text`、`public.font`；Windows 的选择器只按扩展名过滤，于是按注册表把类型换成扩展名：`HKEY_CLASSES_ROOT` 下各扩展名的 `Content Type` 等于该类型的（`image/*` 取类型属于 image 的，以及 `PerceivedType` 为 image 的），再加上 `MIME\Database\Content Type` 为该类型记下的扩展名，在对话框打开时读取；系统一个扩展名都不认识时返回 `error.UnsupportedFileFilter`。`system.picker.validMimeType` 检查单项写法。
 
 ```zig
 try owner.saveFile(.{
@@ -266,6 +266,8 @@ Linux 与 macOS 的 `fileIcon` 按任意尺寸（1…`shell.max_icon_size`，即
 `try worker.reveal(absolute_path, .{ .timeout_ms = 5000 })` 在文件管理器中显示并选中已存在的项。Windows 用 `SHParseDisplayName` 得到 PIDL，`SHOpenFolderAndSelectItems` 后 `ILFree` 释放，`timeout_ms` 不起作用。Linux 在 worker 上为每次调用建立一条私有会话总线连接，同步调用 `org.freedesktop.FileManager1.ShowItems`（URI 数组加空 startup id），返回前关闭连接；超时取值 1..60000 ms，超时为 `RevealTimedOut`。没有会话总线、服务不存在或不可激活时返回 `FileManagerUnavailable`，不回退为打开父目录或启动其他程序。GDBus 使用 GLib 进程级内部工作线程收发消息；本模块不创建线程。
 
 `try worker.trash(absolute_path, .{})` 把一个已存在的项移入回收站，自身绝不回退为永久删除。拒绝文件系统根（`/`、`C:\`、`\\server\share`）。Windows 另拒绝 `*`/`?`（`SHFileOperationW` 会展开通配符），只接受本地固定盘（UNC 和非 `DRIVE_FIXED` 返回 `TrashUnsupported`），使用双 NUL 路径与 `FO_DELETE`、`FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT`，非零返回为 `TrashFailed`，`fAnyOperationsAborted` 为 `TrashAborted`。固定盘检查只是保守前置条件：回收站被禁用、超过容量等情况下系统如何处理仍由 Windows 回收站策略决定，本模块无法从该接口区分。Linux 使用 `g_file_trash`：`G_IO_ERROR_NOT_SUPPORTED`（例如该文件系统没有可用的 trash 目录）映射为独立的 `TrashUnsupported`，不存在为 `FileNotFound`，权限为 `AccessDenied`。
+
+`system.shell.previewItem(app, absolute_path)` 在 Quick Look 面板里预览一个文件，就是 Finder 里按空格键打开的那个预览。它在主线程上调用，面板不是模态的：应用照常运行，面板一直开着直到用户关闭，再次调用会替换它显示的项。Quartz 框架在第一次调用时才载入。只有 macOS 支持，其他平台返回 `UnsupportedCapability`；相对路径返回 `AbsolutePathRequired`，不存在的文件返回 `FileNotFound`。
 
 S02 当前仍为部分实现：Windows/Linux/macOS 已提供 `launchExecutable`、`openUrl`、`openPath`、`reveal`、`trash`、`fileIcon` 与 `typeIcon`（Windows 仅 16/32 像素）；带透明度的图标尚未提供。`launchExecutable` 是明确二进制程序启动，不代替安装应用枚举。
 

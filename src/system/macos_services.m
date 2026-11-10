@@ -8,6 +8,7 @@
    and hop to the main queue for NSDocumentController. Everything else runs on
    the main thread that owns the App. */
 #import <AppKit/AppKit.h>
+#import <objc/message.h>
 #import <Security/Security.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import <CoreServices/CoreServices.h>
@@ -271,6 +272,63 @@ int zsh_trash(const char *path, ZshFailure *failure) {
         NSError *error = nil;
         if ([[NSFileManager defaultManager] trashItemAtURL:[NSURL fileURLWithPath:value] resultingItemURL:nil error:&error]) return ZSH_OK;
         return shell_error(error, failure);
+    }
+}
+
+/* ---- Quick Look ----
+   QLPreviewPanel, the panel Finder opens with the space bar. The app does
+   not link Quartz, so the framework loads on first use. The panel keeps its
+   data source unretained: this one lives as long as the process and holds
+   the one item, which the next preview replaces. Main thread. */
+@interface ZshPreviewSource : NSObject
+@property(nonatomic, strong) NSURL *item;
+@end
+@implementation ZshPreviewSource
+- (NSInteger)numberOfPreviewItemsInPreviewPanel:(id)panel { (void)panel; return self.item ? 1 : 0; }
+- (id)previewPanel:(id)panel previewItemAtIndex:(NSInteger)index { (void)panel; (void)index; return self.item; }
+@end
+static ZshPreviewSource *preview_source;
+int zsh_preview(const char *path) {
+    @autoreleasepool {
+        NSString *value = ztext(path);
+        if (!value) return ZSH_INVALID;
+        if (![[NSFileManager defaultManager] fileExistsAtPath:value]) return ZSH_NOT_FOUND;
+        Class panel_class = NSClassFromString(@"QLPreviewPanel");
+        if (!panel_class) {
+            [[NSBundle bundleWithPath:@"/System/Library/Frameworks/Quartz.framework"] load];
+            panel_class = NSClassFromString(@"QLPreviewPanel");
+        }
+        if (!panel_class) return ZSH_NOT_SUPPORTED;
+        if (!preview_source) preview_source = [[ZshPreviewSource alloc] init];
+        preview_source.item = [NSURL fileURLWithPath:value];
+        id panel = ((id (*)(id, SEL))objc_msgSend)(panel_class, NSSelectorFromString(@"sharedPreviewPanel"));
+        if (!panel) return ZSH_FAILED;
+        ((void (*)(id, SEL, id))objc_msgSend)(panel, NSSelectorFromString(@"setDataSource:"), preview_source);
+        ((void (*)(id, SEL))objc_msgSend)(panel, NSSelectorFromString(@"reloadData"));
+        [NSApp activateIgnoringOtherApps:YES];
+        [panel makeKeyAndOrderFront:nil];
+        return ZSH_OK;
+    }
+}
+/* The panel shows an item, for tests: 1 when it is open on the file at path. */
+int zsh_test_preview_shows(const char *path) {
+    @autoreleasepool {
+        Class panel_class = NSClassFromString(@"QLPreviewPanel");
+        if (!panel_class || !preview_source) return 0;
+        BOOL exists = ((BOOL (*)(id, SEL))objc_msgSend)(panel_class, NSSelectorFromString(@"sharedPreviewPanelExists"));
+        if (!exists) return 0;
+        id panel = ((id (*)(id, SEL))objc_msgSend)(panel_class, NSSelectorFromString(@"sharedPreviewPanel"));
+        return [panel isVisible] && [preview_source.item.path isEqualToString:ztext(path)] ? 1 : 0;
+    }
+}
+/* Closes the panel, for tests. */
+void zsh_test_preview_close(void) {
+    @autoreleasepool {
+        Class panel_class = NSClassFromString(@"QLPreviewPanel");
+        if (!panel_class) return;
+        if (!((BOOL (*)(id, SEL))objc_msgSend)(panel_class, NSSelectorFromString(@"sharedPreviewPanelExists"))) return;
+        id panel = ((id (*)(id, SEL))objc_msgSend)(panel_class, NSSelectorFromString(@"sharedPreviewPanel"));
+        [panel orderOut:nil];
     }
 }
 

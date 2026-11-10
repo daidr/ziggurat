@@ -604,6 +604,29 @@ test "quit veto keeps every window alive until all handlers agree" {
     try std.testing.expectError(error.Closed, app.createWindow(.{}));
 }
 
+test "a canceled quit tells the app once, an accepted one does not" {
+    const Told = struct {
+        count: usize = 0,
+        fn cancelled(ptr: *anyopaque, _: *z.App) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.count += 1;
+        }
+    };
+    var told: Told = .{};
+    const app = try z.App.initWithOptions(std.testing.allocator, .{ .on_quit_cancelled = .{ .context = &told, .cancelled = Told.cancelled } });
+    defer app.deinit();
+    var veto: Probe = .{ .cancel = true };
+    veto.window = try app.createWindow(.{ .on_close = veto.handler() });
+    try veto.window.setContent(veto.content());
+    try equal(z.App.QuitResult.cancelled, app.requestQuit());
+    try equal(1, told.count);
+    try equal(z.App.QuitResult.cancelled, app.requestQuit());
+    try equal(2, told.count);
+    veto.cancel = false;
+    try equal(z.App.QuitResult.accepted, app.requestQuit());
+    try equal(2, told.count);
+}
+
 test "shutdown drains accepted tasks and handles cascaded detach destruction" {
     const TaskProbe = struct {
         app: *z.App,

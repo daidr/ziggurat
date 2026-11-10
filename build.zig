@@ -1261,6 +1261,7 @@ pub fn build(b: *std.Build) void {
             .view_tests = &view_tests,
             .ui = ui,
             .declarative_view = declarative_view,
+            .system = system,
         });
     }
     if (web and target.result.os.tag == .windows) {
@@ -1290,6 +1291,7 @@ pub fn build(b: *std.Build) void {
             .plugin_sqlite = plugin_sqlite,
             .plugin_websocket = plugin_websocket,
             .declarative_view = declarative_view,
+            .system = system,
         });
     }
     if (web and target.result.os.tag == .linux) {
@@ -1318,6 +1320,7 @@ pub fn build(b: *std.Build) void {
             .https_resources_enabled = https_resources_enabled,
             .https_resources = https_resources,
             .native_stream = native_stream,
+            .system = system,
         });
     }
     const tests = addTest(b, .{ .root_module = core });

@@ -61,9 +61,9 @@ pub const Stretcher = struct {
     analysis: f64 = 0,
 
     /// The source frames, counted on past its loop's end, that the frames
-    /// of the voice's history are at; those of what it read last, from
+    /// of the voice's ring are at, as it holds them; those of what it read last, from
     /// `tag0` by `tag_step`; and where the frames after them are.
-    tags: [4]f64 = @splat(0),
+    tags: [@import("resample.zig").ring_frames]f64 = @splat(0),
     tag0: f64 = 0,
     tag_step: f64 = 1,
     next: f64 = 0,
@@ -120,17 +120,14 @@ pub const Stretcher = struct {
         self.done = false;
         self.analysis = @floatFromInt(frame);
         self.next = @floatFromInt(frame);
-        // The voice's second frame of history is at its index: frame - 3
-        // after a reset.
-        for (&self.tags, 0..) |*tag, k| tag.* = @floatFromInt(frame - 4 + @as(i64, @intCast(k)));
+        // The voice is at `frame`, until frames come in.
+        self.tags[@intCast(frame & (self.tags.len - 1))] = @floatFromInt(frame);
+        self.tags[@intCast((frame + 1) & (self.tags.len - 1))] = @floatFromInt(frame + 1);
     }
 
-    /// Notes the frame that comes into the voice's history at `tag`.
-    pub fn push(self: *Stretcher, tag: f64) void {
-        self.tags[0] = self.tags[1];
-        self.tags[1] = self.tags[2];
-        self.tags[2] = self.tags[3];
-        self.tags[3] = tag;
+    /// Notes that frame `frame`, coming into the voice's ring, is at `tag`.
+    pub fn push(self: *Stretcher, frame: i64, tag: f64) void {
+        self.tags[@intCast(frame & (self.tags.len - 1))] = tag;
     }
 
     /// Forgets the frames before `to`; those not read yet are skipped.

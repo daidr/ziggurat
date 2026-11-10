@@ -877,6 +877,19 @@ fn fileResponseError(hr: i32) anyerror {
 fn appStopping(window: anytype) bool {
     return window.app.phase == .stopping or window.app.phase == .stopped;
 }
+extern fn zwv_set_color_scheme(c_int) void;
+/// Gives WebView2's pages the app's forced appearance (theme Source), now
+/// and whenever it changes: WebView2 follows the system's otherwise.
+fn followForcedAppearance(app: *z.App) void {
+    if (comptime is_webkit or @import("builtin").is_test) return;
+    if (app.appearance_hook == null) app.appearance_hook = forcedAppearanceChanged;
+    if (app.appearance != .system or color_scheme_synced) forcedAppearanceChanged(app);
+}
+var color_scheme_synced = false;
+fn forcedAppearanceChanged(app: *z.App) void {
+    color_scheme_synced = true;
+    zwv_set_color_scheme(@backingInt(app.appearance));
+}
 fn nativeClose(native: *anyopaque) void {
     if (is_webkit) webkit.zwk_close(native) else zwv_close(native);
 }
@@ -1804,6 +1817,8 @@ pub const View = struct {
         const facts = try self.factsScript(.windows);
         defer if (facts) |value| self.allocator.free(value);
         const settings: NativeSettings = .{ .context_menu = @backingInt(config.options.context_menu), .context_offer = if (config.options.context_menu == .handler) View.windowsContextMenu else null, .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = browserArguments(config.options), .gestures = gestureFlags(config.options), .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null, .composition = self.region != null };
+        // Pages take the app's forced appearance from their first document.
+        followForcedAppearance(window.app);
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
         errdefer {
             nativeClose(self.native.?);

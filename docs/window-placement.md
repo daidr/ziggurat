@@ -87,6 +87,8 @@ var bytes: [placement.codec.max_bytes]u8 = undefined;
 const encoded = try placement.codec.encode(&store, &bytes);
 ```
 
+模块不自动存盘，保存时机由宿主决定。常见做法是窗口关闭时把 `Tracker` 记下的状态 `put` 进 Store 并在 worker 上保存，退出时在所有关闭回调同意之后再保存一次，所以在退出询问里自己删掉文件的“重置设置”会被之后的保存重新写回。`Store.clear()` 才是真正的重置：清空所有状态，并让本次运行之后的 `put` 不再记录，宿主照常把这个空 Store 编码保存即可；已打开的窗口保持当前位置，之后新建的窗口（包括下次启动）使用自己的选项。
+
 Store 借用调用者 Entry 数组，最多 256 项。业务 key 为非空 UTF-8，最长 96 字节，不能包含 NUL。get/put/remove 线性有界；它不是全局窗口数据库。调用者负责串行访问。正常更新、查询、放置和编解码不使用 allocator，因此没有隐藏 OOM 路径。
 
 二进制版本 1 使用固定小端 header/record，记录长度和条数均明确，并以 CRC32 检测意外损坏。未知版本、错误长度、额外尾字节、无效 UTF-8、未知 flags、非有限比例、非法几何、重复 key 与 checksum 错误均明确拒绝。它不是签名或不可信来源的认证机制。解码先完整验证至有界栈候选，最后一次替换 Store；容量或损坏失败保留旧内容。编码在容量和语义检查通过前不改输出。最大文件为 61,456 字节。

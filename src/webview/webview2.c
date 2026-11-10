@@ -163,14 +163,30 @@ struct State {
        (webview2_embed.h). */
     BOOL composition;
     struct Embed *embed;
+    /* The live views the app's forced appearance reaches (scheme_views). */
+    State *scheme_next, *scheme_prev;
+    BOOL scheme_listed;
 };
 static void file_controls_close(State *);
 static void state_cleanup(State *);
 static void owned_initialization_failed(State *,HRESULT);
 static void initializers_fail_before_submit(State *);
 static void retain(State *s) { InterlockedIncrement(&s->refs); }
+/* The app's forced appearance, as COREWEBVIEW2_PREFERRED_COLOR_SCHEME:
+   0 follows the system, 1 is light, 2 dark. scheme_forced tells that the
+   app ever forced one, before which views keep WebView2's own default. */
+static int preferred_scheme;
+static BOOL scheme_forced;
+static State *scheme_views;
+static void scheme_unlist(State *s) {
+    if (!s->scheme_listed) return;
+    if (s->scheme_prev) s->scheme_prev->scheme_next=s->scheme_next; else scheme_views=s->scheme_next;
+    if (s->scheme_next) s->scheme_next->scheme_prev=s->scheme_prev;
+    s->scheme_next=s->scheme_prev=NULL;s->scheme_listed=FALSE;
+}
 static void release(State *s) {
     if (InterlockedDecrement(&s->refs) == 0) {
+        scheme_unlist(s);
         remote_deinit(&s->remote);
         initializers_free(s->initializers);
         action_policy_free(s->actions);
@@ -325,6 +341,56 @@ VTABLE(FactsHandler, ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHa
 
 
 static void next_permission(State *s);
+/* Gives the view's pages the app's forced appearance. The profile's
+   PreferredColorScheme (WebView2 1.0.1245+) holds from a document's start,
+   so a page never sees the system's prefers-color-scheme first, and themes
+   WebView2's own menus and dialogs too; older runtimes take DevTools'
+   emulation, which reaches a new document a moment after it started. */
+static HRESULT scheme_apply(State *s) {
+    if (!scheme_forced) return S_OK;
+    if (s->closed||!s->webview) return E_ABORT;
+    ICoreWebView2_13 *view13=NULL;ICoreWebView2Profile *profile=NULL;
+    HRESULT hr=ICoreWebView2_QueryInterface(s->webview,&IID_ICoreWebView2_13,(void **)&view13);
+    if (SUCCEEDED(hr)&&view13) hr=ICoreWebView2_13_get_Profile(view13,&profile);
+    if (view13) ICoreWebView2_13_Release(view13);
+    if (SUCCEEDED(hr)&&profile) {
+        hr=ICoreWebView2Profile_put_PreferredColorScheme(profile,(COREWEBVIEW2_PREFERRED_COLOR_SCHEME)preferred_scheme);
+        ICoreWebView2Profile_Release(profile);
+        if (SUCCEEDED(hr)) return hr;
+    }
+    const WCHAR *params=preferred_scheme==1?L"{\"features\":[{\"name\":\"prefers-color-scheme\",\"value\":\"light\"}]}":
+        preferred_scheme==2?L"{\"features\":[{\"name\":\"prefers-color-scheme\",\"value\":\"dark\"}]}":
+        L"{\"features\":[{\"name\":\"prefers-color-scheme\",\"value\":\"\"}]}";
+    DevToolsCallHandler *handler=DevToolsCallHandler_new(s);
+    if (!handler) return E_OUTOFMEMORY;
+    hr=ICoreWebView2_CallDevToolsProtocolMethod(s->webview,L"Emulation.setEmulatedMedia",params,&handler->iface);
+    DevToolsCallHandler_release(&handler->iface);
+    return hr;
+}
+/* Forces the appearance of every page, open and to come (theme Source):
+   0 the system's, 1 light, 2 dark. */
+void zwv_set_color_scheme(int scheme) {
+    if (scheme<0||scheme>2||(scheme==preferred_scheme&&scheme_forced)) return;
+    preferred_scheme=scheme;scheme_forced=TRUE;
+    for (State *s=scheme_views;s;) {
+        retain(s);
+        if (!s->closed&&s->webview) (void)scheme_apply(s);
+        State *next=s->scheme_next;
+        release(s);
+        s=next;
+    }
+}
+/* The appearance pages take, for tests: what the profile reads back. */
+int zwv_test_color_scheme(State *s) {
+    if (s->closed||!s->webview) return -1;
+    ICoreWebView2_13 *view13=NULL;ICoreWebView2Profile *profile=NULL;
+    COREWEBVIEW2_PREFERRED_COLOR_SCHEME value=COREWEBVIEW2_PREFERRED_COLOR_SCHEME_AUTO;
+    HRESULT hr=ICoreWebView2_QueryInterface(s->webview,&IID_ICoreWebView2_13,(void **)&view13);
+    if (SUCCEEDED(hr)&&view13) hr=ICoreWebView2_13_get_Profile(view13,&profile);
+    if (view13) ICoreWebView2_13_Release(view13);
+    if (SUCCEEDED(hr)&&profile) { hr=ICoreWebView2Profile_get_PreferredColorScheme(profile,&value);ICoreWebView2Profile_Release(profile); }
+    return SUCCEEDED(hr)&&profile?(int)value:-1;
+}
 static HRESULT start_document(State *s) {
     if (s->closed) return E_ABORT;
     if (s->owned_context) {
@@ -332,6 +398,7 @@ static HRESULT start_document(State *s) {
         if (result!=ZWPW_PROFILE_OK||s->closed) return E_ABORT;
     }
     s->initial_navigation = TRUE;
+    (void)scheme_apply(s);
     HRESULT hr = s->initial_url ? ICoreWebView2_Navigate(s->webview, s->initial_url) : ICoreWebView2_NavigateToString(s->webview, s->html);
     if (SUCCEEDED(hr)) {
         free(s->html); s->html = NULL;
@@ -1405,6 +1472,7 @@ State *zwv_create(HWND hwnd, const WCHAR *html, const WCHAR *profile, const WCHA
     if (!s) { *out = E_OUTOFMEMORY;if (owned) zwpw_context_unref(owned);return NULL; }
     s->owned_context=owned;
     InterlockedIncrement(&live_states);
+    s->scheme_next=scheme_views;if (scheme_views) scheme_views->scheme_prev=s;scheme_views=s;s->scheme_listed=TRUE;
     s->refs = 1; s->hwnd = hwnd; s->notify = callback; s->resource = resource; s->context = context; s->policy = policy; s->permission_limit = permission_limit;
     s->script_limit=script_limit; s->script_notify=script_callback;
     if (!script_limit || script_limit>16) { release(s); *out=E_INVALIDARG; return NULL; }
@@ -1642,7 +1710,7 @@ void zwv_close(State *s) {
         if (s->closed==2) { s->closed=TRUE;release(s); }
         return;
     }
-    s->closed=TRUE;state_cleanup(s);release(s);
+    s->closed=TRUE;scheme_unlist(s);state_cleanup(s);release(s);
 }
 static void state_cleanup(State *s) {
     s->context = NULL;
