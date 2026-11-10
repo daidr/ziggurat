@@ -153,6 +153,9 @@ jobs:
           # depend on the platform run on Linux and macOS. Every compile
           # step costs a cache check on this runner even when nothing
           # changed. The formatting check runs beside the build.
+          Write-Output "TIMING start $(Get-Date -Format HH:mm:ss.fff)"
+          zig build -Dsmoke-timeout=300 -Daccessibility=true -Dcache-smokes=true -Dexample-tests=false -Dportable-tests=false -Doptimize=${{ matrix.optimize }} --help > $null
+          Write-Output "TIMING configured $(Get-Date -Format HH:mm:ss.fff)"
           zig build -Dsmoke-timeout=300 "-j$env:NUMBER_OF_PROCESSORS" fmt-check test smoke smoke-lifecycle smoke-composition smoke-key-input smoke-pointer-clicks smoke-text-layout smoke-drawing smoke-images smoke-widgets smoke-view smoke-window-hidden smoke-document-editor smoke-system smoke-clipboard -Daccessibility=true -Dcache-smokes=true -Dexample-tests=false -Dportable-tests=false -Doptimize=${{ matrix.optimize }} --summary new
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Format, compile, unit and native integration checks
