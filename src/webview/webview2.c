@@ -42,6 +42,12 @@ typedef void (*AuthOffer)(void *,const WCHAR *,const WCHAR *,void *);
 /* A certificate error: URI, COREWEBVIEW2_WEB_ERROR_STATUS and the PEM
    certificate. Nonzero allows it for the host until the browser ends. */
 typedef int (*CertificateOffer)(void *,const WCHAR *,int32_t,const WCHAR *);
+/* A client certificate challenge: host (UTF-8), port, whether a proxy asks,
+   and the mutually trusted certificates as DER with UTF-8 subject and
+   issuer and their validity in unix seconds. The index of the one to give,
+   or -1 to refuse. */
+typedef struct ClientCertificateInput { const uint8_t *der; size_t der_length; const char *subject,*issuer; int64_t valid_from,valid_to; } ClientCertificateInput;
+typedef int32_t (*ClientCertificateOffer)(void *,const char *,uint32_t,int,const ClientCertificateInput *,uint32_t);
 /* A page's context menu: what was clicked, the engine's top-level items
    (flags 1 enabled, 2 checked) and keep, one per item, which the app clears
    to leave one out. zwv_context_menu_append adds the app's items during the
@@ -52,7 +58,7 @@ typedef int (*ContextMenuOffer)(void *,const ContextTargetInput *,const ContextI
 /* What a page's content rules do to a load: bit 0 blocks it, bit 1 sends it
    without cookies, bit 2 makes it secure. top is NULL for the page itself. */
 typedef uint32_t (*ContentVerdict)(void *,const WCHAR *uri,const WCHAR *top,int resource_context);
-typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; _Bool audio_muted; ContentVerdict content_verdict; const WCHAR *content_style; AuthOffer auth; CertificateOffer certificate_offer; uint32_t context_menu; ContextMenuOffer context_offer; uint32_t gestures; _Bool composition; } ViewSettings;
+typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; _Bool audio_muted; ContentVerdict content_verdict; const WCHAR *content_style; AuthOffer auth; CertificateOffer certificate_offer; ClientCertificateOffer client_certificate; uint32_t context_menu; ContextMenuOffer context_offer; uint32_t gestures; _Bool composition; } ViewSettings;
 typedef void (*Resource)(void *, const WCHAR *, const WCHAR *, const NativeHeader *, uint32_t, void *);
 typedef struct PageEvent {
     int kind;
@@ -126,6 +132,7 @@ struct State {
     BOOL facts_added;
     AuthOffer auth;
     CertificateOffer certificate_offer;
+    ClientCertificateOffer client_certificate;
     /* The app answered a sign-in to a remote page: WebView2 sends the
        credentials as a new navigation to the same document, which the next
        NavigationStarting lets through once. */
@@ -1315,10 +1322,12 @@ HRESULT zwv_auth_answer(void *call_pointer,const WCHAR *user,const WCHAR *passwo
     if (SUCCEEDED(hr)) call->answered=TRUE;
     return hr;
 }
-/* Every sign-in is answered: WebView2's own dialog never shows. Without the
-   app's credentials the challenge is cancelled and the load ends failed on a blank page (WebView2 does not render the 401 body). */
+/* Without the app's handler a sign-in is WebView2's: its own dialog. With
+   it, a sign-in without the app's credentials is cancelled and the load ends
+   failed on a blank page (WebView2 does not render the 401 body). */
 static HRESULT STDMETHODCALLTYPE authentication_invoke(ICoreWebView2BasicAuthenticationRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2BasicAuthenticationRequestedEventArgs *args) {
     (void)sender; State *s=((AuthenticationHandler *)p)->state; retain(s);
+    if (!s->closed&&!s->auth) { release(s); return S_OK; }
     AuthCall call={args,FALSE};
     BOOL document=FALSE;
     if (!s->closed&&s->auth) {
@@ -1334,10 +1343,94 @@ static HRESULT STDMETHODCALLTYPE authentication_invoke(ICoreWebView2BasicAuthent
     else if (document) s->auth_retry=TRUE;
     release(s); return S_OK;
 }
+/* UTF-8 of a WebView2 string, which the caller frees; NULL on failure. */
+static char *client_utf8(const WCHAR *text) {
+    if (!text) return NULL;
+    int bytes=WideCharToMultiByte(CP_UTF8,0,text,-1,NULL,0,NULL,NULL);
+    if (bytes<=0) return NULL;
+    char *out=malloc((size_t)bytes);
+    if (out&&WideCharToMultiByte(CP_UTF8,0,text,-1,out,bytes,NULL,NULL)!=bytes) { free(out);out=NULL; }
+    return out;
+}
+/* The DER of the first certificate of PEM text, which the caller frees. */
+static uint8_t *client_pem_der(const WCHAR *pem,size_t *length) {
+    static const WCHAR begin[]=L"-----BEGIN CERTIFICATE-----";
+    *length=0;
+    const WCHAR *start=pem?wcsstr(pem,begin):NULL;
+    if (!start) return NULL;
+    start+=(sizeof begin/sizeof begin[0])-1;
+    const WCHAR *stop=wcsstr(start,L"-----END");
+    if (!stop) return NULL;
+    uint8_t *out=malloc((size_t)(stop-start)/4*3+3);
+    if (!out) return NULL;
+    uint32_t bits=0;int count=0;size_t n=0;
+    for (const WCHAR *c=start;c<stop;c++) {
+        int v;
+        if (*c>=L'A'&&*c<=L'Z') v=*c-L'A'; else if (*c>=L'a'&&*c<=L'z') v=*c-L'a'+26; else if (*c>=L'0'&&*c<=L'9') v=*c-L'0'+52;
+        else if (*c==L'+') v=62; else if (*c==L'/') v=63; else if (*c==L'='||*c==L'\r'||*c==L'\n'||*c==L' '||*c==L'\t') continue; else { free(out);return NULL; }
+        bits=bits<<6|(uint32_t)v;count+=6;
+        if (count>=8) { count-=8;out[n++]=(uint8_t)(bits>>count); }
+    }
+    if (!n) { free(out);return NULL; }
+    *length=n;return out;
+}
+/* Without the app's handler a client certificate challenge is WebView2's:
+   its certificate dialog. With it, the app chooses one of the mutually
+   trusted certificates, or refuses as a user's dismissal of the dialog
+   does; a challenge with none to choose is refused too. The
+   certificates the collection holds are alive until it is released, which
+   is after the answer. */
 static HRESULT STDMETHODCALLTYPE certificate_invoke(ICoreWebView2ClientCertificateRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2ClientCertificateRequestedEventArgs *args) {
-    (void)p; (void)sender;
-    ICoreWebView2ClientCertificateRequestedEventArgs_put_Cancel(args,TRUE);
-    ICoreWebView2ClientCertificateRequestedEventArgs_put_Handled(args,TRUE); return S_OK;
+    (void)sender; State *s=((CertificateHandler *)p)->state; retain(s);
+    if (!s->closed&&!s->client_certificate) { release(s); return S_OK; }
+    BOOL chosen=FALSE;
+    if (!s->closed&&s->client_certificate) {
+        enum { offer_limit=32 };
+        WCHAR *host_wide=NULL;int port=0;BOOL proxy=FALSE;
+        ICoreWebView2ClientCertificateCollection *certificates=NULL;
+        ICoreWebView2ClientCertificate *native[offer_limit];
+        ClientCertificateInput offered[offer_limit];
+        uint32_t count=0;
+        (void)ICoreWebView2ClientCertificateRequestedEventArgs_get_Host(args,&host_wide);
+        (void)ICoreWebView2ClientCertificateRequestedEventArgs_get_Port(args,&port);
+        (void)ICoreWebView2ClientCertificateRequestedEventArgs_get_IsProxy(args,&proxy);
+        char *host=client_utf8(host_wide);
+        UINT total=0;
+        if (SUCCEEDED(ICoreWebView2ClientCertificateRequestedEventArgs_get_MutuallyTrustedCertificates(args,&certificates))&&certificates&&
+            FAILED(ICoreWebView2ClientCertificateCollection_get_Count(certificates,&total))) total=0;
+        for (UINT i=0;i<total&&count<offer_limit&&!s->closed;i++) {
+            ICoreWebView2ClientCertificate *certificate=NULL;
+            if (FAILED(ICoreWebView2ClientCertificateCollection_GetValueAtIndex(certificates,i,&certificate))||!certificate) continue;
+            WCHAR *pem=NULL,*subject=NULL,*issuer=NULL;double from=0,to=0;
+            size_t der_length=0;uint8_t *der=NULL;
+            if (SUCCEEDED(ICoreWebView2ClientCertificate_ToPemEncoding(certificate,&pem))) der=client_pem_der(pem,&der_length);
+            (void)ICoreWebView2ClientCertificate_get_Subject(certificate,&subject);
+            (void)ICoreWebView2ClientCertificate_get_Issuer(certificate,&issuer);
+            (void)ICoreWebView2ClientCertificate_get_ValidFrom(certificate,&from);
+            (void)ICoreWebView2ClientCertificate_get_ValidTo(certificate,&to);
+            if (der) {
+                char *subject_text=client_utf8(subject),*issuer_text=client_utf8(issuer);
+                offered[count]=(ClientCertificateInput){der,der_length,subject_text?subject_text:_strdup(""),issuer_text?issuer_text:_strdup(""),(int64_t)from,(int64_t)to};
+                native[count++]=certificate;certificate=NULL;
+            }
+            CoTaskMemFree(pem);CoTaskMemFree(subject);CoTaskMemFree(issuer);
+            if (certificate) ICoreWebView2ClientCertificate_Release(certificate);
+        }
+        if (!s->closed&&host) {
+            int32_t index=s->client_certificate(s->context,host,port>0?(uint32_t)port:0u,proxy?1:0,count?offered:NULL,count);
+            if (index>=0&&(uint32_t)index<count&&!s->closed&&
+                SUCCEEDED(ICoreWebView2ClientCertificateRequestedEventArgs_put_SelectedCertificate(args,native[index]))&&
+                SUCCEEDED(ICoreWebView2ClientCertificateRequestedEventArgs_put_Handled(args,TRUE))) chosen=TRUE;
+        }
+        for (uint32_t i=0;i<count;i++) {
+            free((void *)offered[i].der);free((void *)offered[i].subject);free((void *)offered[i].issuer);
+            ICoreWebView2ClientCertificate_Release(native[i]);
+        }
+        if (certificates) ICoreWebView2ClientCertificateCollection_Release(certificates);
+        free(host);CoTaskMemFree(host_wide);
+    }
+    if (!chosen) ICoreWebView2ClientCertificateRequestedEventArgs_put_Cancel(args,TRUE);
+    release(s); return S_OK;
 }
 
 typedef struct ResourceCall { State *state; ICoreWebView2WebResourceRequestedEventArgs *args; BOOL responded, head; } ResourceCall;
@@ -1495,7 +1588,7 @@ State *zwv_create(HWND hwnd, const WCHAR *html, const WCHAR *profile, const WCHA
     if (s->zoom!=s->zoom || s->zoom<0.25 || s->zoom>5.0) { release(s); *out=E_INVALIDARG; return NULL; }
     if (settings && settings->user_agent) { s->user_agent=_wcsdup(settings->user_agent); if (!s->user_agent) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
     if (settings) s->composition=settings->composition;
-    if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; s->context_menu=settings->context_menu; s->context_offer=settings->context_offer; s->gestures=settings->gestures; s->muted=settings->audio_muted; s->content_verdict=settings->content_verdict; }
+    if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; s->client_certificate=settings->client_certificate; s->context_menu=settings->context_menu; s->context_offer=settings->context_offer; s->gestures=settings->gestures; s->muted=settings->audio_muted; s->content_verdict=settings->content_verdict; }
     if (settings && settings->content_style) { s->content_style=_wcsdup(settings->content_style); if (!s->content_style) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
     if (settings && settings->facts) { s->facts_script=_wcsdup(settings->facts); if (!s->facts_script) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
     *out=remote_init(&s->remote,remote);

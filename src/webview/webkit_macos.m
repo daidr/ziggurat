@@ -238,6 +238,7 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     NSMutableArray *permissions;
     ZwkAuth auth_fn;
     ZwkCertificate certificate_fn;
+    ZwkClientCertificateOffer client_certificate_fn;
     /* host + DER of each certificate the app allowed, for the page's life. */
     NSMutableSet *allowed_certificates;
     /* Certificates the app refused during the document being loaded: the
@@ -366,6 +367,67 @@ int zwk_auth_answer(void *call_pointer,const char *user,const char *password) {
 
 static BOOL live(ZwkPage *s) { return !s->closed && !s->recovering && s->owner; }
 static ZwkPage *page_of(ZwkState *s) { return (__bridge ZwkPage *)(void *)s; }
+/* The identities of the keychain, every one, for a client certificate
+ * challenge: the server's acceptable issuers (distinguishedNames) are the
+ * app's to filter by. The returned array owns the identities and must live
+ * as long as an answer uses one; NULL when the keychain holds none. */
+static CFArrayRef keychain_identities(void) {
+    NSDictionary *query=@{(__bridge id)kSecClass:(__bridge id)kSecClassIdentity,(__bridge id)kSecReturnRef:@YES,(__bridge id)kSecMatchLimit:(__bridge id)kSecMatchLimitAll};
+    CFTypeRef result=NULL;
+    /* errSecItemNotFound among the others: no identities, result stays NULL. */
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)query,&result)!=errSecSuccess || !result) return NULL;
+    if (CFGetTypeID(result)!=CFArrayGetTypeID()) { CFRelease(result); return NULL; }
+    return (CFArrayRef)result;
+}
+/* The certificate of an identity, which the caller releases, or NULL:
+ * SecIdentityCopyCertificate returns a status and writes its out argument. */
+static SecCertificateRef identity_certificate(SecIdentityRef identity) {
+    SecCertificateRef certificate=NULL;
+    if (SecIdentityCopyCertificate(identity,&certificate)!=errSecSuccess) return NULL;
+    return certificate;
+}
+/* Asks the app which keychain identity to give a server that asks for a
+ * client certificate; anything but an offered one refuses the challenge.
+ * The keychain is listed only while the app has a handler: it may ask the
+ * user. Subjects are the identities' common names; the Zig side reads the
+ * issuer and validity from the DER. */
+static void client_certificate_challenge(ZwkPage *s,NSURLProtectionSpace *space,ZwkClientCertificateOffer offer,void *owner,void (^completion)(NSURLSessionAuthChallengeDisposition,NSURLCredential *)) {
+    CFArrayRef identities=keychain_identities();
+    const CFIndex available=identities?CFArrayGetCount(identities):0;
+    const uint32_t limit=32;
+    ZwkClientCertificate offered[32];
+    SecIdentityRef offered_identity[32];
+    NSMutableArray *keep=[NSMutableArray arrayWithCapacity:(NSUInteger)MIN(available,(CFIndex)limit)*2];
+    uint32_t count=0;
+    for (CFIndex i=0;i<available && count<limit;i++) {
+        SecIdentityRef identity=(SecIdentityRef)CFArrayGetValueAtIndex(identities,i);
+        SecCertificateRef certificate=identity?identity_certificate(identity):NULL;
+        if (!certificate) continue;
+        NSData *der=(__bridge_transfer NSData *)SecCertificateCopyData(certificate);
+        CFStringRef common=NULL;
+        NSString *subject=SecCertificateCopyCommonName(certificate,&common)==errSecSuccess&&common?(__bridge_transfer NSString *)common:@"";
+        CFRelease(certificate);
+        if (!der.length) continue;
+        [keep addObject:der]; [keep addObject:subject];
+        offered[count]=(ZwkClientCertificate){(const uint8_t *)der.bytes,der.length,subject.UTF8String?subject.UTF8String:"",NULL,0,0};
+        offered_identity[count]=identity;
+        count++;
+    }
+    const char *host=space.host.UTF8String;
+    const int32_t chosen=offer(owner,host?host:"",(uint32_t)MAX(space.port,0),space.isProxy?1:0,count?offered:NULL,count);
+    NSURLCredential *credential=nil;
+    if (chosen>=0 && (uint32_t)chosen<count && live(s)) {
+        SecIdentityRef identity=offered_identity[chosen];
+        NSMutableArray *chain=[NSMutableArray array];
+        SecCertificateRef certificate=identity_certificate(identity);
+        if (certificate) { [chain addObject:(__bridge id)certificate]; CFRelease(certificate); }
+        credential=[NSURLCredential credentialWithIdentity:identity certificates:chain persistence:NSURLCredentialPersistenceForSession];
+    }
+    if (credential) completion(NSURLSessionAuthChallengeUseCredential,credential);
+    else completion(NSURLSessionAuthChallengeRejectProtectionSpace,nil);
+    /* The identities lived until the answer took the one it gives. */
+    if (identities) CFRelease(identities);
+}
 
 /* Remote origins, as the Linux backend and the Zig validation name them:
  * http only on loopback hosts, and loopback only by the page's opt-in. */
@@ -968,9 +1030,10 @@ static void capture_changed(ZwkPage *s,uint32_t device);
     resources_cancel_all(self);
     notify(self,8,nil,0,NULL);
 }
-/* Sign-ins and server certificates, as on Linux. Without the app's
- * handler a sign-in is canceled, and its load with it; the handler's no is
- * a sign-in without credentials, which gets the server's refusal. A
+/* Sign-ins, client and server certificates. Without the app's handler a
+ * challenge is WebKit's: no sign-in prompt (the server's refusal), no client
+ * certificate. The handler's no is a sign-in without credentials, which
+ * gets the server's refusal. A
  * certificate that does not verify fails its load unless the app's handler
  * allows it for a remote page; then it is the page's for its host. */
 - (void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition,NSURLCredential *))completion {
@@ -985,6 +1048,8 @@ static void capture_changed(ZwkPage *s,uint32_t device);
         if (error) CFRelease(error);
         NSData *der=certificate_der(trust);
         NSString *host=space.host.lowercaseString;
+        /* Without the app's handler the certificate is WebKit's, which fails the load. */
+        if (!certificate_fn && live(self)) { completion(NSURLSessionAuthChallengePerformDefaultHandling,nil); return; }
         if (!der.length || !host.length || !live(self) || !remote || !certificate_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
         NSArray *key=@[host,der];
         BOOL allowed=[allowed_certificates containsObject:key];
@@ -1004,8 +1069,19 @@ static void capture_changed(ZwkPage *s,uint32_t device);
         completion(allowed?NSURLSessionAuthChallengeUseCredential:NSURLSessionAuthChallengeCancelAuthenticationChallenge,allowed?[NSURLCredential credentialForTrust:trust]:nil);
         return;
     }
+    if ([method isEqualToString:NSURLAuthenticationMethodClientCertificate]) {
+        /* Without the app's handler the challenge is WebKit's, which never
+         * asks, and the keychain is left alone. */
+        if (live(self) && !client_certificate_fn) { completion(NSURLSessionAuthChallengePerformDefaultHandling,nil); return; }
+        if (!live(self) || !remote) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+        client_certificate_challenge(self,space,client_certificate_fn,owner,completion);
+        return;
+    }
     const uint32_t scheme=auth_scheme(method);
-    if (!scheme || !live(self) || !auth_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+    if (!live(self)) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+    /* Without the app's handler, or for a method that is no sign-in, the
+     * challenge is WebKit's: no prompt, the page gets the server's refusal. */
+    if (!scheme || !auth_fn) { completion(NSURLSessionAuthChallengePerformDefaultHandling,nil); return; }
     ZwkAuthCall call={NULL,NO};
     const char *host=space.host.UTF8String, *realm=space.realm.UTF8String;
     auth_fn(owner,host?host:"",(uint32_t)MAX(space.port,0),realm?realm:"",scheme,space.isProxy?1:0,&call);
@@ -2812,7 +2888,7 @@ static int page_create(void *window,BOOL session,uint32_t width,uint32_t height,
             }
             s->download_origins=origins; s->download_offer=options->download_offer; s->download_notify=options->download_notify;
             s->download_unknown=options->download_unknown!=0; s->download_known_limit=options->download_known_limit; s->download_received_limit=options->download_received_limit;
-        } s->auth_fn=options->auth; s->certificate_fn=options->certificate;
+        } s->auth_fn=options->auth; s->certificate_fn=options->certificate; s->client_certificate_fn=options->client_certificate;
         NSMutableArray<WKContentRuleList *> *filters=[NSMutableArray arrayWithCapacity:options->content_filter_count];
         for (uint32_t i=0;i<options->content_filter_count;i++) [filters addObject:(__bridge WKContentRuleList *)options->content_filters[i]];
         s->filters=filters;

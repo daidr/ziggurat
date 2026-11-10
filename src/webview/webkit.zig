@@ -26,6 +26,7 @@ pub const Options = extern struct {
     throttling: u32 = 1,
     auth: ?*const fn (*anyopaque, [*:0]const u8, u32, [*:0]const u8, u32, c_int, *anyopaque) callconv(.c) void = null,
     certificate: ?*const fn (*anyopaque, [*:0]const u8, u32, [*]const u8, usize) callconv(.c) c_int = null,
+    client_certificate: ?@import("http_auth.zig").ClientCertificateOffer = null,
     context_menu: u32 = 0,
     context_offer: ?*const fn (*anyopaque, *const ContextTarget, [*]const ContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null,
     scroll_to_container: u32 = 0,
