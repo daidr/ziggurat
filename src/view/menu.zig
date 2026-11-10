@@ -235,12 +235,17 @@ pub const Panel = struct {
     radius: ?f32 = null,
     /// Room around the items; null is the menu's 4 DIP on each side.
     padding: ?Insets = null,
+    /// Shadows the panel casts, as `Style.shadows`, borrowed until the
+    /// frame paints; the theme's menus cast none.
+    shadows: []const view.BoxShadow = &.{},
 
     fn valid(self: Panel) bool {
         if (self.background) |color| if (color > 0xffffff) return false;
         if (self.border) |color| if (color > 0xffffff) return false;
         if (self.border_width) |width| if (!std.math.isFinite(width) or width < 0) return false;
         if (self.radius) |radius| if (!std.math.isFinite(radius) or radius < 0) return false;
+        if (self.shadows.len > view.max_shadows) return false;
+        for (self.shadows) |shadow| if (!shadow.valid()) return false;
         return true;
     }
     /// Wear the look on the panel `node`.
@@ -251,6 +256,7 @@ pub const Panel = struct {
         node.style.border_width = self.border_width orelse -1;
         node.style.radius = self.radius orelse -1;
         if (self.padding) |padding| node.style.padding = padding;
+        node.style.shadows = self.shadows;
     }
 };
 
@@ -529,6 +535,7 @@ pub fn submenu(self: *View, label: []const u8, style: Style) Error!bool {
         inner.style.border_width = look.style.border_width;
         inner.style.radius = look.style.radius;
         inner.style.padding = look.style.padding;
+        inner.style.shadows = look.style.shadows;
     }
     inner.anchor = index;
     inner.level = level + 1;

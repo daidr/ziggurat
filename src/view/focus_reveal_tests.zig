@@ -235,3 +235,70 @@ test "a node runs its function once, the last one given, as it goes" {
     h.close();
     try testing.expectEqual(@as(usize, 2), app.a.runs);
 }
+
+/// Two buttons in a scroll view 200 DIP high with room between them, so
+/// that one is out of sight while the other shows, then rows past them.
+const Apart = struct {
+    model: view.ScrollModel = .{},
+    fn build(self: *Apart, v: *View) anyerror!void {
+        _ = try v.button("Before", .{});
+        try v.scroll(&self.model, .{ .height = 200, .self_align = .stretch });
+        try v.column(.{});
+        _ = try v.button("Top", .{ .height = 30 });
+        try v.spacer(.{ .height = 400 });
+        _ = try v.button("Bottom", .{ .height = 30 });
+        for (0..8) |i| {
+            var buffer: [16]u8 = undefined;
+            _ = try v.button(try std.fmt.bufPrint(&buffer, "Row {d}", .{i}), .{ .key = i + 10, .height = 30 });
+        }
+        try v.end();
+        try v.end();
+        _ = try v.button("After", .{});
+    }
+};
+
+fn shows(h: *Harness, text: []const u8) !bool {
+    const node = try h.find(.{ .text = text });
+    const scroll = try h.find(.{ .kind = .scroll });
+    return node.bounds.y >= scroll.bounds.y - 0.5 and node.bounds.y + node.bounds.height <= scroll.bounds.y + scroll.bounds.height + 0.5;
+}
+
+test "Tab reaches a control scrolled out of sight and scrolls it into view" {
+    var storage: Storage = .{};
+    var app: Apart = .{};
+    var h = Harness.init(&app, Apart.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 400, .height = 400 } });
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.render();
+    try h.focus(.{ .text = "Top" });
+    try testing.expect(!try shows(&h, "Bottom"));
+    _ = try h.key(.{ .key = .tab });
+    try testing.expectEqualStrings("Bottom", h.focused().?.text);
+    try testing.expect(try shows(&h, "Bottom"));
+    // Each Tab after it scrolls on to the control it reaches.
+    for (0..8) |i| {
+        _ = try h.key(.{ .key = .tab });
+        var buffer: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buffer, "Row {d}", .{i});
+        try testing.expectEqualStrings(name, h.focused().?.text);
+        try testing.expect(try shows(&h, name));
+    }
+    _ = try h.key(.{ .key = .tab });
+    try testing.expectEqualStrings("After", h.focused().?.text);
+    // Back, Shift+Tab reaches the rows and the control above them again.
+    for (0..8) |i| {
+        _ = try h.key(.{ .key = .tab, .modifiers = .{ .shift = true } });
+        var buffer: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buffer, "Row {d}", .{7 - i});
+        try testing.expectEqualStrings(name, h.focused().?.text);
+        try testing.expect(try shows(&h, name));
+    }
+    _ = try h.key(.{ .key = .tab, .modifiers = .{ .shift = true } });
+    try testing.expectEqualStrings("Bottom", h.focused().?.text);
+    _ = try h.key(.{ .key = .tab, .modifiers = .{ .shift = true } });
+    try testing.expectEqualStrings("Top", h.focused().?.text);
+    try testing.expect(try shows(&h, "Top"));
+    _ = try h.key(.{ .key = .tab, .modifiers = .{ .shift = true } });
+    try testing.expectEqualStrings("Before", h.focused().?.text);
+}

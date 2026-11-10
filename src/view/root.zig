@@ -467,6 +467,14 @@ pub const Style = struct {
     /// `Host.prepareShaderEffects`, like `blur`; without it the shadow is
     /// sharp. See `TextShadow`.
     text_shadow: ?TextShadow = null,
+    /// Cast shadows of the box, as CSS's `box-shadow`: its rounded
+    /// rectangle offset, grown and blurred, the first on top, painted
+    /// under its background and only outside it, so that a translucent box
+    /// does not show them through. They take no room and do not clip. The
+    /// blur needs `Host.prepareShaderEffects`, like `blur`; without it the
+    /// shadow is sharp. At most `max_shadows`, borrowed until the frame
+    /// paints; see `BoxShadow`.
+    shadows: []const BoxShadow = &.{},
     /// Stroke the outlines of a text's glyphs under their fill, as CSS's
     /// `-webkit-text-stroke` with `paint-order: stroke fill`: half the
     /// stroke shows around each glyph, a halo that keeps a label readable
@@ -567,6 +575,29 @@ pub const TextShadow = struct {
 
     fn valid(self: TextShadow) bool {
         return std.math.isFinite(self.x) and std.math.isFinite(self.y) and std.math.isFinite(self.blur) and self.blur >= 0;
+    }
+};
+/// Shadows `Style.shadows` takes at most.
+pub const max_shadows = 4;
+/// A shadow a box casts (`Style.shadows`), as one of CSS's `box-shadow`:
+/// the box's rounded rectangle offset by `x` and `y` DIP, grown by
+/// `spread` (shrunk where negative) and blurred by `blur`, in `color`.
+pub const BoxShadow = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    /// The blur's radius in DIP, as CSS's: twice the deviation of the
+    /// Gaussian it blurs by.
+    blur: f32 = 0,
+    spread: f32 = 0,
+    color: ui.Color = .{ .r = 0, .g = 0, .b = 0, .a = 64 },
+
+    pub fn valid(self: BoxShadow) bool {
+        return std.math.isFinite(self.x) and std.math.isFinite(self.y) and std.math.isFinite(self.blur) and self.blur >= 0 and std.math.isFinite(self.spread) and @abs(self.x) <= 4096 and @abs(self.y) <= 4096 and self.blur <= 1024 and @abs(self.spread) <= 1024;
+    }
+    /// How far past the box the shadow reaches on each side, blur and all.
+    fn reach(self: BoxShadow) struct { left: f32, top: f32, right: f32, bottom: f32 } {
+        const grow = @max(0, self.spread + self.blur * 1.5);
+        return .{ .left = @max(0, grow - self.x), .top = @max(0, grow - self.y), .right = @max(0, grow + self.x), .bottom = @max(0, grow + self.y) };
     }
 };
 /// A stroke of a text's glyph outlines (`Style.text_stroke`), `width` DIP
@@ -1711,6 +1742,8 @@ pub const Node = struct {
     /// The node or one around it is `Style.hidden`, or it floats from an
     /// anchor that is: it takes no room, paints nothing and takes no input.
     concealed: bool = false,
+    /// `style.font` is the theme's, filled in as the node was measured.
+    theme_font: bool = false,
     /// The node or one around it is `Style.ignore_input`.
     passthrough: bool = false,
     /// A control without a look: a container its application fills and
@@ -2460,6 +2493,8 @@ pub const View = struct {
     pointer_held: bool = false,
     /// The node the focus last moved to as the build asked.
     focus_revealed: ?u64 = null,
+    /// Tab moved the focus: the next frame scrolls it into view.
+    tab_moved: bool = false,
 
     pub fn init(buffers: Buffers) View {
         return .{ .buffers = buffers };
@@ -2674,6 +2709,8 @@ pub const View = struct {
         if (!std.math.isFinite(style.opacity) or style.opacity < 0 or style.opacity > 1) return error.InvalidValue;
         if (!std.math.isFinite(style.blur) or style.blur < 0) return error.InvalidValue;
         if (style.text_shadow) |shadow| if (!shadow.valid()) return error.InvalidValue;
+        if (style.shadows.len > max_shadows) return error.InvalidValue;
+        for (style.shadows) |shadow| if (!shadow.valid()) return error.InvalidValue;
         if (style.text_stroke) |stroke| if (!stroke.valid()) return error.InvalidValue;
         if (style.pose) |pose| if (!pose.valid()) return error.InvalidValue;
         if (style.clip_inset) |clip| if (!clip.valid()) return error.InvalidValue;
@@ -2836,6 +2873,56 @@ pub const View = struct {
         self.reveal = id;
         self.reveal_options = .{};
         return true;
+    }
+    /// Scroll the node with `id` that the keyboard focus moves to into
+    /// view, as little as shows it, as a browser does when Tab moves on.
+    pub fn revealTabbed(self: *View, id: u64) void {
+        self.reveal = id;
+        self.reveal_options = .{};
+        self.focus_revealed = id;
+    }
+    /// The control Tab (`backward`: Shift+Tab) moves on to from `focused`
+    /// when it lies scrolled out of sight, so that the controls, which
+    /// hold only those in sight (`input.available`), do not skip it; null
+    /// when the next one in build order is in sight or there is none, and
+    /// the controls move on themselves. Lists, trees, tabs, segments and
+    /// radio groups, which take one Tab stop and arrows within, are left
+    /// to the controls.
+    pub fn tabBeyond(self: *const View, focused: ?u64, backward: bool, input: anytype) ?u64 {
+        const id = focused orelse return null;
+        const all = self.buffers.nodes[0..self.len];
+        const from = for (all, 0..) |*node, at| {
+            if (node.id == id) break at;
+        } else return null;
+        var at = from;
+        while (true) {
+            if (backward) {
+                if (at == 0) return null;
+                at -= 1;
+            } else {
+                at += 1;
+                if (at >= all.len) return null;
+            }
+            const node = &all[at];
+            if (!tabStop(node) or self.inert(node)) continue;
+            if (input.available(node.id)) return null;
+            // Only what a scroll view holds out of sight.
+            var parent = node.parent;
+            const scrolled = while (parent < all.len) : (parent = all[parent].parent) {
+                if (all[parent].kind == .scroll) break true;
+            } else false;
+            if (scrolled) return node.id;
+        }
+    }
+    /// Whether Tab stops at `node` on its own: an enabled control that
+    /// takes the keyboard, shown and taking input.
+    fn tabStop(node: *const Node) bool {
+        if (!node.style.enabled or !node.style.tab_stop or node.concealed or node.passthrough or node.unseen or node.leaving) return false;
+        return switch (node.kind) {
+            .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .disclosure, .toggle_switch, .slider, .stepper, .rating, .token, .editable_text => true,
+            .embed => node.embed.?.focusable,
+            else => false,
+        };
     }
     /// Scroll the containers around the node with `id` to show it, lined
     /// up as `options` say, as the web's `scrollIntoView` options: at once,
@@ -5983,11 +6070,18 @@ pub const View = struct {
         self.settleTooltip();
     }
 
+    /// The font of text that sets none under `theme`, null for the label
+    /// font the measurer knows as its own.
+    fn themeFont(theme: Theme) ?Font {
+        return if (theme.font_size == Theme.default_font_size) null else theme.font();
+    }
     fn intrinsic(node: *const Node, theme: Theme, measurer: Measurer) layout.Measurement {
         if (node.embed) |content| return content.measure(content.context, theme);
         if (node.graphic != null) return image_nodes.measure(node);
         const metrics = theme.metrics;
-        const font = if (node.kind == .text or node.kind == .link) node.style.font else null;
+        // Labels are in the theme's font, as the controls draw them.
+        const label = themeFont(theme);
+        const font = if (node.kind == .text or node.kind == .link) node.style.font orelse label else label;
         // A text's ending spaces take no room unless it keeps them.
         const shown = if (node.kind == .text and !node.style.preserve_spaces) std.mem.trimEnd(u8, node.text, " \t") else node.text;
         const text_size = if (node.kind == .text and shown.len == 0 and node.text.len > 0) Size{ .width = 0, .height = measurer.textSize("", font).height } else if (node.text.len > 0) measurer.textSize(shown, font) else if (font) |value| measurer.textSize("", value) else Size{ .width = 0, .height = Measurer.line_height };
@@ -5998,8 +6092,8 @@ pub const View = struct {
             .menu_item => blk: {
                 // Room for the mark, the label, the shortcut and the arrow.
                 const mark = ui.widgets.menu_mark_width;
-                const shortcut = if (node.badge.len > 0) measurer.textSize(node.badge, null).width + metrics.label_gap else 0;
-                const trailing_room = if (node.trailing.len > 0) measurer.textSize(node.trailing, null).width + metrics.label_gap else 0;
+                const shortcut = if (node.badge.len > 0) measurer.textSize(node.badge, label).width + metrics.label_gap else 0;
+                const trailing_room = if (node.trailing.len > 0) measurer.textSize(node.trailing, label).width + metrics.label_gap else 0;
                 const lead: f32 = if (node.menu_icons) menu_controls.icon_column else 0;
                 const subtitle = if (node.subtitle.len > 0) measurer.textSize(node.subtitle, ui.widgets.menu_subtitle_font) else Size{};
                 const label_width = @max(text_size.width, subtitle.width);
@@ -6038,7 +6132,7 @@ pub const View = struct {
             .text => if (node.style.truncate_middle) .{ .width = measurer.textSize(wrap_text.ellipsis, font).width, .height = size.height } else size,
             // A menu narrower than its labels ends them with an ellipsis;
             // marks, icons, shortcuts and arrows keep their room.
-            .menu_item => .{ .width = size.width - text_size.width - (if (node.trailing.len > 0) measurer.textSize(node.trailing, null).width else 0) - (if (node.subtitle.len > 0) @max(0, measurer.textSize(node.subtitle, ui.widgets.menu_subtitle_font).width - text_size.width) else 0), .height = size.height },
+            .menu_item => .{ .width = size.width - text_size.width - (if (node.trailing.len > 0) measurer.textSize(node.trailing, label).width else 0) - (if (node.subtitle.len > 0) @max(0, measurer.textSize(node.subtitle, ui.widgets.menu_subtitle_font).width - text_size.width) else 0), .height = size.height },
             else => size,
         };
         return .{ .minimum = minimum, .preferred = size };
@@ -6236,8 +6330,13 @@ pub const View = struct {
             const node = &all[index];
             const theme = if (node.theme) |inner| inner.* else window_theme;
             if (!node.isContainer()) {
+                // Text that sets no font takes the theme's, in paint too.
+                if (node.kind == .text or node.kind == .link) if (node.theme_font or node.style.font == null) {
+                    node.style.font = themeFont(theme);
+                    node.theme_font = node.style.font != null;
+                };
                 // A tree row's badge keeps its width for paint.
-                if (node.kind == .tree_row) node.fraction = if (node.badge.len > 0) measurer.textSize(node.badge, null).width + 2 * (theme.metrics.content_inset / 2 + 4) + theme.metrics.content_inset / 2 else 0;
+                if (node.kind == .tree_row) node.fraction = if (node.badge.len > 0) measurer.textSize(node.badge, themeFont(theme)).width + 2 * (theme.metrics.content_inset / 2 + 4) + theme.metrics.content_inset / 2 else 0;
                 node.measured = if (node.kind == .text and node.style.wrap) self.measureWrap(node, measurer) else intrinsic(node, theme, measurer);
                 if (node.narrow) node.measured.preferred.width = node.measured.minimum.width;
                 continue;
@@ -7055,6 +7154,75 @@ pub const View = struct {
         };
         return .{ .shadow = shadow, .stroke = stroke };
     }
+    /// Paint the shadows of the box `bounds` with corners of `radius`, the
+    /// last first (`Style.shadows`). Unless the box is `solid`, painted
+    /// over them opaque, a clip leaves the box itself out.
+    fn paintShadows(self: *const View, target: anytype, shadows: []const BoxShadow, bounds: Rect, radius: f32, solid: bool) !void {
+        if (bounds.width <= 0 or bounds.height <= 0) return;
+        const frame = @TypeOf(target) == *ui.Frame;
+        const corner = std.math.clamp(radius, 0, @min(bounds.width, bounds.height) / 2);
+        var reach: [4]f32 = .{ 0, 0, 0, 0 };
+        for (shadows) |shadow| {
+            const r = shadow.reach();
+            reach = .{ @max(reach[0], r.left), @max(reach[1], r.top), @max(reach[2], r.right), @max(reach[3], r.bottom) };
+        }
+        const area: Rect = .{ .x = bounds.x - reach[0] - 1, .y = bounds.y - reach[1] - 1, .width = bounds.width + reach[0] + reach[2] + 2, .height = bounds.height + reach[1] + reach[3] + 2 };
+        // Outside the box: its rounded rectangle cut from the area around
+        // it, even-odd.
+        var commands: [14]ui.vectors.Command = undefined;
+        var path: ui.vectors.Path = .{ .allocator = undefined, .owner = std.Thread.getCurrentId(), .commands = &commands };
+        var cut = false;
+        if (frame) if (!solid) {
+            const x0: f64 = area.x;
+            const y0: f64 = area.y;
+            const x1: f64 = area.x + area.width;
+            const y1: f64 = area.y + area.height;
+            const bx0: f64 = bounds.x;
+            const by0: f64 = bounds.y;
+            const bx1: f64 = bounds.x + bounds.width;
+            const by1: f64 = bounds.y + bounds.height;
+            const c: f64 = corner;
+            const round: ui.vectors.Point = .{ .x = c, .y = c };
+            commands = .{
+                .{ .move = .{ .x = x0, .y = y0 } },       .{ .line = .{ .x = x1, .y = y0 } },
+                .{ .line = .{ .x = x1, .y = y1 } },       .{ .line = .{ .x = x0, .y = y1 } },
+                .close,                                   .{ .move = .{ .x = bx0 + c, .y = by0 } },
+                .{ .line = .{ .x = bx1 - c, .y = by0 } }, .{ .arc = .{ .radius = round, .sweep = true, .end = .{ .x = bx1, .y = by0 + c } } },
+                .{ .line = .{ .x = bx1, .y = by1 - c } }, .{ .arc = .{ .radius = round, .sweep = true, .end = .{ .x = bx1 - c, .y = by1 } } },
+                .{ .line = .{ .x = bx0 + c, .y = by1 } }, .{ .arc = .{ .radius = round, .sweep = true, .end = .{ .x = bx0, .y = by1 - c } } },
+                .{ .line = .{ .x = bx0, .y = by0 + c } }, .{ .arc = .{ .radius = round, .sweep = true, .end = .{ .x = bx0 + c, .y = by0 } } },
+            };
+            if (c == 0) {
+                commands[7] = .{ .line = .{ .x = bx1, .y = by0 } };
+                commands[9] = .{ .line = .{ .x = bx1, .y = by1 } };
+                commands[11] = .{ .line = .{ .x = bx0, .y = by1 } };
+                commands[13] = .close;
+            }
+            try target.pushPathClipRule(&path, .{}, .even_odd);
+            cut = true;
+        };
+        defer if (frame) if (cut) target.popClip() catch {};
+        var at = shadows.len;
+        while (at > 0) {
+            at -= 1;
+            const shadow = shadows[at];
+            if (shadow.color.a == 0) continue;
+            const grown: Rect = .{ .x = bounds.x + shadow.x - shadow.spread, .y = bounds.y + shadow.y - shadow.spread, .width = bounds.width + 2 * shadow.spread, .height = bounds.height + 2 * shadow.spread };
+            if (grown.width <= 0 or grown.height <= 0) continue;
+            // The corners grow with the spread, as CSS's do.
+            const rounded = if (corner > 0) @max(0, corner + shadow.spread) else 0;
+            var blurred = false;
+            if (frame) if (self.effects) |library| if (shadow.blur > 0) {
+                var values: ui.shader.Values = undefined;
+                if (try library.blur(&values, shadow.blur / 2)) |effect| {
+                    try target.beginEffect(grown, effect, .{});
+                    blurred = true;
+                }
+            };
+            target.roundedRect(grown, rounded, shadow.color);
+            if (blurred) try target.endEffect();
+        }
+    }
     /// Paint what lies under a text's glyphs: their shadow, then their
     /// stroke (`Style.text_shadow`, `Style.text_stroke`). The shadow is the
     /// text drawn again where it falls, blurred as `Style.blur` blurs; the
@@ -7198,6 +7366,20 @@ pub const View = struct {
         const hide = frame and node.access_hidden and !target.accessHidden();
         if (hide) target.beginAccessHidden();
         defer if (hide) target.endAccessHidden();
+        if (node.style.shadows.len > 0) {
+            const radius: f32 = switch (node.kind) {
+                .popover, .dialog => if (node.style.radius > 0) node.style.radius else if (node.kind == .dialog) 8 else 6,
+                .menu => if (node.plain) node.style.radius else if (node.menu_styled and node.style.radius >= 0) node.style.radius else 6,
+                .popup => if (all[node.anchor].plain) node.style.radius else 4,
+                else => node.style.radius,
+            };
+            const plain = node.plain or (node.kind == .popup and all[node.anchor].plain);
+            const solid = if (plain) node.style.background != null and node.style.gradient == null else switch (node.kind) {
+                .popover, .dialog, .menu, .popup => true,
+                else => node.style.background != null and node.style.gradient == null,
+            };
+            try self.paintShadows(target, node.style.shadows, bounds, radius, solid);
+        }
         if (node.kind == .popover or node.kind == .dialog) {
             const radius: f32 = if (node.style.radius > 0) node.style.radius else if (node.kind == .dialog) 8 else 6;
             target.roundedRect(bounds, radius, ui.Color.rgb(node.style.border orelse theme.palette.border));
@@ -7564,6 +7746,7 @@ pub const View = struct {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .cache };
                 scope_depth += 1;
             };
+            if (style.shadows.len > 0) try self.paintShadows(target, style.shadows, bounds, style.radius, style.background != null and style.material == null and style.gradient == null);
             const shaped_hits = @TypeOf(target) == *ui.Frame and style.hit_test != null;
             const outer_hit_test = if (shaped_hits) target.setHitTest(style.hit_test) else null;
             var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent, .focus_ring_offset = style.focus_ring_offset, .focus_ring_color = style.focus_ring_color };
@@ -8133,12 +8316,27 @@ pub const View = struct {
     /// boxes, and how far the shadows and strokes of their text reach past
     /// them; a blur's layer spans it, so that what reaches out of the box
     /// is not cut at the layer's edge.
+    /// `box` grown by how far `shadows` reach past it.
+    fn shadowed(shadows: []const BoxShadow, box: Rect) Rect {
+        if (shadows.len == 0 or box.width <= 0 or box.height <= 0) return box;
+        var out = box;
+        for (shadows) |shadow| {
+            const r = shadow.reach();
+            const x0 = @min(out.x, box.x - r.left);
+            const y0 = @min(out.y, box.y - r.top);
+            const x1 = @max(out.x + out.width, box.x + box.width + r.right);
+            const y1 = @max(out.y + out.height, box.y + box.height + r.bottom);
+            out = .{ .x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0 };
+        }
+        return out;
+    }
     fn inkBounds(all: []const Node, index: usize) Rect {
         const node = &all[index];
-        var x0 = node.bounds.x;
-        var y0 = node.bounds.y;
-        var x1 = node.bounds.x + node.bounds.width;
-        var y1 = node.bounds.y + node.bounds.height;
+        const own = shadowed(node.style.shadows, node.bounds);
+        var x0 = own.x;
+        var y0 = own.y;
+        var x1 = own.x + own.width;
+        var y1 = own.y + own.height;
         var at = index + 1;
         while (at < node.end) {
             const inner = &all[at];
@@ -8147,6 +8345,7 @@ pub const View = struct {
                 continue;
             }
             var box = inner.bounds;
+            box = shadowed(inner.style.shadows, box);
             if (inner.kind == .text) {
                 const decorations = textDecorations(all, at);
                 var reach: f32 = 0;
@@ -9131,6 +9330,8 @@ pub const Host = struct {
         self.view.restore = null;
         if (self.context.input_state.focused == id) return;
         if (self.context.window != null and !self.context.input_state.available(id)) {
+            // One scrolled out of sight scrolls into view to take it.
+            _ = self.view.revealFocus(id, self.context.input_state.focused);
             self.pending_focus = id;
             self.invalidate();
             return;
@@ -9408,9 +9609,26 @@ pub const Host = struct {
                     // Keys nothing else routes go to a focused embedded leaf;
                     // the controls see the rest, then the application.
                     .ignored => {
-                        if (!self.view.embedKey(input)) return false;
-                        self.settleEmbed(null);
-                        return true;
+                        if (self.view.embedKey(input)) {
+                            self.settleEmbed(null);
+                            return true;
+                        }
+                        const mods = input.modifiers;
+                        if (input.key == .tab and !mods.control and !mods.alt and !mods.super) {
+                            // A control scrolled out of sight is not among
+                            // the controls Tab goes through: it scrolls into
+                            // view first, and takes the focus once a frame
+                            // holds it.
+                            if (self.view.tabBeyond(self.context.input_state.focused, mods.shift, &self.context.input_state)) |id| {
+                                self.view.revealTabbed(id);
+                                self.pending_focus = id;
+                                self.focus_retried = false;
+                                self.invalidate();
+                                return true;
+                            }
+                            self.view.tab_moved = true;
+                        }
+                        return false;
                     },
                     // A consumed key bypasses the Context, so repaint here
                     // for the moved highlight or closed list.
@@ -9739,6 +9957,11 @@ pub const Host = struct {
         };
         const whole = frame.sourceBounds();
         const content = if (self.options.tools()) |tools| tools.contentBounds(whole) else whole;
+        // The control Tab moved to scrolls into view.
+        if (self.view.tab_moved) {
+            self.view.tab_moved = false;
+            if (self.context.input_state.focused) |id| if (!self.view.pointer_held) self.view.revealTabbed(id);
+        }
         try self.view.arrange(content, theme, self.options.measurer);
         // What the pointer rests on may have changed as the pass built:
         // a popover closing over a button leaves the button under it, and
@@ -9774,6 +9997,9 @@ pub const Host = struct {
             if (self.context.input_state.focused != id) {
                 self.pending_focus = id;
                 self.focus_retried = false;
+                // A control scrolled out of sight is not registered: it
+                // scrolls into view in the next frame, then takes it.
+                if (!self.context.input_state.available(id) and self.view.revealFocus(id, self.context.input_state.focused)) self.invalidate();
             }
         }
         // A pass asked for from outside passes came with this one.
@@ -9783,7 +10009,10 @@ pub const Host = struct {
         self.requestWake();
         if (self.view.focus_request) |id| {
             self.view.focus_request = null;
-            if (self.context.input_state.focused != id) self.pending_focus = id;
+            if (self.context.input_state.focused != id) {
+                self.pending_focus = id;
+                if (!self.context.input_state.available(id) and self.view.revealFocus(id, self.context.input_state.focused)) self.invalidate();
+            }
         }
         if (self.pending_focus != null and !self.focus_queued) if (self.context.window) |window| {
             if (window.app.post(.{ .context = self, .call = focusTask })) |_| {
@@ -10466,6 +10695,7 @@ test {
     _ = @import("pointer_tests.zig");
     _ = @import("input_tests.zig");
     _ = @import("focus_reveal_tests.zig");
+    _ = @import("shadow_tests.zig");
     _ = @import("bases_tests.zig");
     _ = @import("inspector_tests.zig");
     _ = @import("inspector_editor.zig");

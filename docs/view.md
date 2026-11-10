@@ -59,6 +59,7 @@ try v.embed(self.notes.embed(), .{});
 try v.end();
 ```
 
+- 盒阴影：`shadows`（`[]const BoxShadow`，至多 `max_shadows` 个）如 CSS 的 `box-shadow`：节点的圆角矩形按 `x`、`y` 偏移，按 `spread` 外扩（负值内缩，圆角随之增减），按 `blur`（CSS 的模糊半径，即高斯标准差的两倍）模糊，以 `color` 画在背景之下，第一个在最上。阴影不占空间、不裁剪，只画在盒子之外：没有不透明背景的盒子用偶奇路径裁剪把盒子本身挖掉，半透明的盒子不会透出阴影。模糊需要 `Host.prepareShaderEffects`，与 `blur` 相同，没有时阴影是锐利的。切片在帧绘制前借用。
 - 渐变：`gradient` 以渐变代替 `background` 填充容器（按 `radius` 圆角），`border_gradient` 以渐变代替 `border` 的颜色描边 `border_width` 宽的边框；材质与折射仍优先。`Gradient` 有三种，位置都按节点盒子的比例给出，盒子变化时跟着走，色标 `GradientStop{ color, at }` 按 0 到 1 的位置排列（乱序的色标上移到前一个的位置，与 CSS 相同），最多 16 个，`oklab = true` 时在 Oklab 色彩空间混色：
   - `linear{ angle, stops }`：沿穿过盒子中心的直线，`angle` 是从正上方顺时针的角度（180 自上而下，90 自左向右），直线长度等于盒子在该方向上的跨度，同 CSS 的 `linear-gradient()`。
   - `conic{ center, angle, stops }`：绕 `center` 从 `angle`（从正上方顺时针）转一整圈，同 CSS 的 `conic-gradient()`。
@@ -234,10 +235,11 @@ try v.end();
 - 项还可以带 `ItemOptions.subtitle`（标签下方的第二行小字）、`trailing`（快捷键之前的尾部值，如“125%”）、`danger`（危险操作：文字与图标用主题的 `danger` 色，高亮时与强调色对比不足 3:1 就改用强调色上的文字色）与 `icon_color`（图标颜色）；副标题、尾部值与提示或快捷键依次作为描述朗读。`Style.key` 给项一个稳定的身份。`menuItemState(label, options, style)` 与 `menuItem` 相同，但返回 `MenuItemState`，`highlighted` 让应用在键盘或指针停在某项时预览它（例如字号菜单在高亮时就预览字号）。`menuItemContent(label, options, style)` 打开一个画法与普通项相同的项容器（默认竖排，带普通项的内边距），里面的内容由应用构建并 `end`，`label` 用于命名与首字母跳转，返回 `MenuItemState`。菜单面板的 `Style.max_width` 限制面板宽度，过长的标签以省略号截断，子菜单沿用它。
 - `ItemOptions.keep_open` 让菜单项被选中（按下、Enter 或 Space）后菜单保持打开、高亮留在该项上，例如账户菜单里切换主题的一排单选项。
 - 打开期间菜单接管按键：Up、Down、Home、End 在最深一层的可用项之间移动高亮并循环，字母移到下一个以它开头的项；Right、Enter 或 Space 打开子菜单并高亮其第一项，Left 或 Escape 关闭最深一层子菜单，顶层的 Escape 与 Tab 关闭菜单并交还焦点。从右到左时 Left 与 Right 互换。指针移到项上会高亮它并打开它的子菜单、关闭更深的子菜单；在所有面板之外按下会关闭菜单，并照常交给下面的控件；面板上的滚轮不会滚动下面的内容。
-- `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，Up 打开并高亮最后一项（WAI-ARIA 菜单按钮模式），菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。按钮读作打开菜单（`has_popup`）。`popoverMenuButtonWith(label, .{ .placement, .open, .max_width }, style)` 另外给出：`placement`（`view.Placement`）让菜单像浮层一样附着在按钮的某一边与对齐方式上，放不下时翻转并夹在窗口内，从右到左时镜像；`open`（`*bool`）由应用持有菜单是否打开，应用把它设为 true 或 false 就打开或关闭菜单，用户打开或关闭菜单时它也随之更新；`max_width` 限制面板宽度；`panel`（`view.MenuPanel`）让菜单面板及其子菜单的面板换上应用自己的外观：`background`、`border`、`border_width`（0 为无边框）、`radius` 与 `padding`，设了的字段取代主题的，菜单的位置、与按钮的间距和菜单项的画法不变。视图没有盒阴影，面板不画阴影：
+- `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，Up 打开并高亮最后一项（WAI-ARIA 菜单按钮模式），菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。按钮读作打开菜单（`has_popup`）。`popoverMenuButtonWith(label, .{ .placement, .open, .max_width }, style)` 另外给出：`placement`（`view.Placement`）让菜单像浮层一样附着在按钮的某一边与对齐方式上，放不下时翻转并夹在窗口内，从右到左时镜像；`open`（`*bool`）由应用持有菜单是否打开，应用把它设为 true 或 false 就打开或关闭菜单，用户打开或关闭菜单时它也随之更新；`max_width` 限制面板宽度；`panel`（`view.MenuPanel`）让菜单面板及其子菜单的面板换上应用自己的外观：`background`、`border`、`border_width`（0 为无边框）、`radius`、`padding` 与 `shadows`（同 `Style.shadows`；主题的菜单不画阴影），设了的字段取代主题的，菜单的位置、与按钮的间距和菜单项的画法不变：
 
 ```zig
-if (try v.popoverMenuButtonWith("更多", .{ .panel = .{ .background = 0x1e1e2e, .border = 0x45475a, .border_width = 1, .radius = 12 } }, .{})) {
+const shadow = [_]view.BoxShadow{.{ .y = 18, .blur = 50, .color = .{ .r = 0, .g = 0, .b = 0, .a = 115 } }};
+if (try v.popoverMenuButtonWith("更多", .{ .panel = .{ .background = 0x1e1e2e, .border = 0x45475a, .border_width = 1, .radius = 12, .shadows = &shadow } }, .{})) {
     _ = try v.menuItem("重命名", .{}, .{});
 }
 try v.end();
@@ -629,7 +631,8 @@ if (side.window_double_clicked) self.newItem();
 - `v.focusWithin(id)` 告诉焦点是否在节点 `id` 本身或它里面（`:focus-within`），浮层、菜单和列表按它们锚定的节点算在里面；`v.focusLeft(id)` 在焦点刚从节点里离开（到了外面或窗口失去键盘）后构建的那一遍报告一次，例如表单在离开字段组时校验。焦点链来自上一遍的树，读过它们的帧在焦点移动后多构建一遍，使按焦点画出的样子随即更新。
 - `v.focusTakesText()` 告诉焦点是否接收文本输入：嵌入叶子用 `Embed.takes_text` 回答，文本字段在可编辑时、富文本编辑器在非只读时、终端总是为真。单键快捷键用它让位，命令面板里字段在打字时不抢字母键。
 - `observeInput(style)` 与 `end` 配对，开始一个观察其中输入但不拿走输入的列：焦点在它本身或里面时按下与松开的键（含按住重复）、输入的文本与输入法组合、编辑命令（`edit`：编辑菜单发出的复制、粘贴、撤销等，以对应的按键表示；键入的快捷键会先作为 `key_down` 出现），以及在它上面按下与松开的指针键，各自以 `Observed` 在单独的一遍先于正常路由送达（外层的先），之后输入照常交给持有焦点的控件、快捷键与 Tab；其他遍返回 null。演示在第一次按键时停下，面板在其中的字段被输入后隐去提示。移动焦点的键（如 Tab）的松开在焦点到达处观察到。`v.observing()` 告诉上一遍是否有这样的列。
-- 构建或应用把焦点移到另一个节点时（`v.restore`、`initialFocus`、`focusLeaf`、`Host.focusNode`、`TextField.focus`），外层滚动容器在下一帧以最小位移把它滚入视野，如同网页的 `element.focus()`。只在焦点移动时滚一次：每一遍都给同一节点焦点不会打断用户的滚动，节点滚出视野失去焦点后再给它也不滚。按住指针键期间不滚（按下得到的焦点就在指针下，例如按住分隔条把手聚焦的那一行），过渡把焦点交还给延后出现的内容时也不滚。要换一种对齐方式，在给焦点的那一遍调用 `scrollIntoViewWith`，它优先。
+- 构建或应用把焦点移到另一个节点时（`v.restore`、`initialFocus`、`focusLeaf`、`Host.focusNode`、`TextField.focus`），外层滚动容器在下一帧以最小位移把它滚入视野，如同网页的 `element.focus()`。只在焦点移动时滚一次：每一遍都给同一节点焦点不会打断用户的滚动，节点滚出视野失去焦点后再给它也不滚。按住指针键期间不滚（按下得到的焦点就在指针下，例如按住分隔条把手聚焦的那一行），过渡把焦点交还给延后出现的内容时也不滚。要换一种对齐方式，在给焦点的那一遍调用 `scrollIntoViewWith`，它优先。不在视野里的节点没有注册控件，这时它先滚入视野，下一帧注册后再拿到焦点。
+- Tab 与 Shift+Tab 把焦点移到的控件同样以最小位移滚入视野。滚动视图里完全滚出视野的控件不在控件表里，Tab 也不会跳过它：按构建顺序下一个可以停留的控件（按钮、链接、复选框、开关、滑块、文本框、可聚焦的嵌入叶子等）在滚动视图里且看不见时，视图先把它滚入视野、再给它焦点（`View.tabBeyond`）；列表、树、标签、分段与单选组这类只占一站、站内用方向键的控件仍交给控件表。
 - 延后出现的内容（`presentColumn` 的 `unseen` 阶段）里请求的焦点等内容出现后再给出，除非焦点期间已移到别处。打开列表或菜单并用方向键高亮条目时，提示跟随高亮项（aria-activedescendant），而不是持有焦点的输入框。
 
 ## 换行文本

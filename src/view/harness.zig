@@ -213,6 +213,10 @@ pub const Harness = struct {
         try self.run(null);
         if (self.config.strict) try self.checkKeys();
         const bounds = if (tools) |value| value.contentBounds(self.config.bounds) else self.config.bounds;
+        if (self.view.tab_moved) {
+            self.view.tab_moved = false;
+            if (self.focusId()) |id| if (!self.view.pointer_held) self.view.revealTabbed(id);
+        }
         try self.view.arrange(bounds, self.config.theme, self.config.options.measurer);
         if (tools) |value| value.capture(&self.view, self.focusId(), self.config.options.measurer, self.config.theme);
         if (self.input) |context| try self.record(context);
@@ -555,7 +559,16 @@ pub const Harness = struct {
             if (state.get(id).?.options.range == null) return self.deliverKey(.{ .action = id });
             state.setFocused(id);
         } else if (input.key == .tab and plain) {
-            state.tabDirection(mods.shift);
+            // As Host does: a control scrolled out of sight scrolls into
+            // view and then takes the focus; one Tab reaches scrolls too.
+            if (self.view.tabBeyond(state.focused, mods.shift, state)) |id| {
+                self.view.revealTabbed(id);
+                try self.render();
+                self.setFocus(id);
+            } else {
+                state.tabDirection(mods.shift);
+                self.view.tab_moved = true;
+            }
         } else if (state.rangeKey(input)) |action| {
             return self.deliverKey(.{ .value = .{ .id = action.id, .change = action.change } });
         } else if (if (editKey(input)) |edit| state.navigate(edit) else null) |id| {
