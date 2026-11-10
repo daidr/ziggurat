@@ -105,6 +105,16 @@ const Probe = struct {
             },
             .completed => |info| {
                 if (self.step == .welcome) std.debug.print("http auth load while signing in: success {} status {d}\n", .{ info.success, info.native_status });
+                if (self.step == .denied) {
+                    std.debug.print("http auth load after declining: success {} status {d}\n", .{ info.success, info.native_status });
+                    // WebView2 stops a declined challenge without rendering the
+                    // server's 401 body, so the refused load is the signal there.
+                    if (!webkit and self.challenges == 2) {
+                        self.step = .refused;
+                        view.navigateRemote(self.at(self.secure, "/tls")) catch |err| self.fail(err);
+                    }
+                    return;
+                }
                 if (self.step != .refused or info.success) return;
                 if (self.certificates != 1) {
                     std.debug.print("refused load: status {d}, asked {d} times\n", .{ info.native_status, self.certificates });

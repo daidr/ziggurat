@@ -1249,7 +1249,7 @@ HRESULT zwv_auth_answer(void *call_pointer,const WCHAR *user,const WCHAR *passwo
     return hr;
 }
 /* Every sign-in is answered: WebView2's own dialog never shows. Without the
-   app's credentials the request goes without, to the server's refusal. */
+   app's credentials the challenge is cancelled and the load ends failed on a blank page (WebView2 does not render the 401 body). */
 static HRESULT STDMETHODCALLTYPE authentication_invoke(ICoreWebView2BasicAuthenticationRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2BasicAuthenticationRequestedEventArgs *args) {
     (void)sender; State *s=((AuthenticationHandler *)p)->state; retain(s);
     AuthCall call={args,FALSE};
