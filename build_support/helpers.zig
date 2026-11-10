@@ -541,10 +541,29 @@ pub fn addHttpAuthSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimiz
 }
 
 pub fn runInstalled(b: *std.Build, executable: std.Build.LazyPath) *std.Build.Step.Run {
-    if (b.graph.host.result.os.tag == .windows) return b.addRunFile(executable);
-    const run = b.addSystemCommand(&.{ "/bin/sh", "-c", "n=0; while :; do \"$0\" \"$@\"; s=$?; if [ $s -ne 126 ] || [ $n -ge 20 ]; then exit $s; fi; n=$((n + 1)); sleep 0.1; done" });
-    run.addFileArg(executable);
+    const run = if (b.graph.host.result.os.tag == .windows) b.addRunFile(executable) else blk: {
+        const shell = b.addSystemCommand(&.{ "/bin/sh", "-c", "n=0; while :; do \"$0\" \"$@\"; s=$?; if [ $s -ne 126 ] || [ $n -ge 20 ]; then exit $s; fi; n=$((n + 1)); sleep 0.1; done" });
+        shell.addFileArg(executable);
+        break :blk shell;
+    };
+    installed_runs.append(b.allocator, run) catch @panic("OOM");
     return run;
+}
+
+/// Every runInstalled run, for limitSmokeRuns.
+var installed_runs: std.ArrayList(*std.Build.Step.Run) = .empty;
+
+/// With `seconds` other than 0, every smoke and other installed executable
+/// runs through tools/run_timeout.zig, which ends it once it ran that long:
+/// a smoke that hangs fails by name instead of holding the build.
+pub fn limitSmokeRuns(b: *std.Build, seconds: u32) void {
+    if (seconds == 0) return;
+    const tool = b.addExecutable(.{ .name = "ziggurat-run-timeout", .root_module = b.createModule(.{ .root_source_file = b.path("tools/run_timeout.zig"), .target = b.graph.host, .optimize = .Debug }) });
+    const limit = b.fmt("{d}", .{seconds});
+    for (installed_runs.items) |run| {
+        run.argv.insertSlice(b.allocator, 0, &.{ .{ .artifact = .{ .prefix = "", .suffix = "", .artifact = tool, .make_absolute = false } }, .{ .bytes = limit } }) catch @panic("OOM");
+        tool.getEmittedBin().addStepDependencies(&run.step);
+    }
 }
 
 /// A browser build of an application: its WebAssembly, the page's script and
