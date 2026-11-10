@@ -72,3 +72,41 @@ test "a window out of sight builds the frame a press or a change waits for once 
     try testing.expect(!host.settle());
     try testing.expect(window.framePending() and !Counter.shows(&host, "Count: 6"));
 }
+
+const Hiding = struct {
+    window: z.Window = undefined,
+    hidden_builds: usize = 0,
+    fn build(self: *Hiding, v: *view.View) anyerror!void {
+        if (v.windowHidden()) self.hidden_builds += 1;
+        if (try v.button("Minimize", .{})) try self.window.perform(.minimize);
+    }
+    fn button(host: *const view.Host) u64 {
+        for (host.view.nodes()) |*node| if (node.kind == .button) return node.id;
+        return 0;
+    }
+};
+
+test "a view that asks windowHidden builds hidden after the pass that minimized its window" {
+    const app = try z.App.init(testing.allocator);
+    defer app.deinit();
+    const window = try app.createWindow(.{ .width = 200, .height = 100 });
+    defer _ = window.destroy() catch unreachable;
+    var state: Hiding = .{ .window = window };
+    var storage: view.Storage(8, 64) = .{};
+    var host = view.Host.init(&state, Hiding.build, storage.buffers(), .{});
+    host.context.semantics_enabled = false;
+    try host.attach(window);
+    try testing.expect(host.settle());
+    window.show();
+    try testing.expect(!window.outOfSight());
+    // The pass that minimizes the window read it shown. No frame draws in
+    // a minimized window, so the build that sees it hidden comes from the
+    // queue once the pass is over, and only once.
+    try host.perform(Hiding.button(&host), .press);
+    try testing.expect(window.outOfSight());
+    try testing.expectEqual(@as(usize, 0), state.hidden_builds);
+    try app.dispatch();
+    try testing.expectEqual(@as(usize, 1), state.hidden_builds);
+    try app.dispatch();
+    try testing.expectEqual(@as(usize, 1), state.hidden_builds);
+}

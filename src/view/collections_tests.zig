@@ -1014,3 +1014,101 @@ test "a table cannot both drag its rows out and reorder them" {
     var h = Harness.init(&app, Files.build, storage.buffers(), .{});
     try testing.expectError(error.InvalidValue, h.render());
 }
+
+/// A grid whose items are known by keys, of which the app takes the last
+/// ones out; `key` records any ask for an item past those left.
+const Album = struct {
+    count: usize = 9,
+    keyed: bool = true,
+    asked_past: bool = false,
+    state: collections.GridState = .{},
+    selection: Selection = undefined,
+    storage: [16]u64 = undefined,
+
+    fn key(context: ?*const anyopaque, index: usize) u64 {
+        const self: *Album = @ptrCast(@alignCast(@constCast(context.?)));
+        if (index >= self.count) self.asked_past = true;
+        return @as(u64, index) * 10 + 3;
+    }
+    fn item(_: ?*const anyopaque, index: usize, buffer: []u8) collections.GridItem {
+        return .{ .text = std.fmt.bufPrint(buffer, "photo {d}", .{index}) catch "" };
+    }
+    fn build(self: *Album, v: *View) anyerror!void {
+        self.state.selection = &self.selection;
+        _ = try collections.gridView(v, &self.state, .{ .context = self, .count = self.count, .key = if (self.keyed) key else null }, .{ .call = item }, .{ .min_item_width = 140, .item_height = 100, .style = .{ .grow = 1, .self_align = .stretch } });
+    }
+    fn keyOf(self: *const Album, index: usize) u64 {
+        return if (self.keyed) @as(u64, index) * 10 + 3 else @as(u64, index) + 1;
+    }
+    /// The app deletes the chosen items at the end, as a Delete command.
+    fn deleteChosenEnd(self: *Album, from: usize) void {
+        for (from..self.count) |index| _ = self.selection.remove(self.keyOf(index));
+        self.count = from;
+    }
+};
+
+fn cellAt(index: usize) [2]f32 {
+    // Three columns about 195 wide and rows 100 high and more, from an
+    // inset of 8: a point near the top left corner of each item.
+    return .{ 8 + 10 + @as(f32, @floatFromInt(index % 3)) * 200, 8 + 10 + @as(f32, @floatFromInt(index / 3)) * 108 };
+}
+
+test "Shift choices in a grid whose chosen last items were taken out start from the new item" {
+    for ([_]bool{ true, false }) |keyed| {
+        for ([_]bool{ true, false }) |by_key| {
+            var app: Album = .{ .keyed = keyed };
+            app.selection = Selection.init(.multiple, &app.storage);
+            var f: Fixture = .{};
+            try f.start(&app);
+            try testing.expectEqual(@as(usize, 3), app.state.columns());
+            // Items 6 to 8 chosen, from 6: the pivot is the first of them.
+            var at = cellAt(6);
+            try f.click(at[0], at[1], .{});
+            try testing.expect(try f.h.key(with(.right, .{ .shift = true })));
+            try testing.expect(try f.h.key(with(.right, .{ .shift = true })));
+            try testing.expectEqualSlices(u64, &.{ app.keyOf(6), app.keyOf(7), app.keyOf(8) }, app.selection.items());
+            app.deleteChosenEnd(6);
+            try f.h.render();
+            try testing.expect(!app.asked_past);
+            if (by_key) {
+                try testing.expect(try f.h.key(with(.left, .{ .shift = true })));
+                try testing.expect(!app.asked_past);
+                try testing.expectEqual(@as(usize, 1), app.selection.len);
+                try testing.expect(app.selection.items()[0] < app.keyOf(6));
+            } else {
+                at = cellAt(4);
+                try f.click(at[0], at[1], .{ .shift = true });
+                try testing.expect(!app.asked_past);
+                try testing.expectEqualSlices(u64, &.{app.keyOf(4)}, app.selection.items());
+            }
+        }
+    }
+}
+
+test "Shift choices in a table whose chosen last rows were taken out start from the new row" {
+    var ids: [6]u64 = .{ 11, 12, 13, 14, 15, 16 };
+    for ([_]bool{ true, false }) |by_key| {
+        var app: Files = .{};
+        app.init(.multiple);
+        app.ids = ids[0..6];
+        app.count = 6;
+        var f: Fixture = .{};
+        try f.start(&app);
+        try f.click(50, Fixture.rowY(4), .{});
+        try f.click(50, Fixture.rowY(5), .{ .shift = true });
+        try testing.expectEqualSlices(u64, &.{ 15, 16 }, app.selection.items());
+        // The rows chosen go; asking a key past them would index past `ids`.
+        _ = app.selection.remove(15);
+        _ = app.selection.remove(16);
+        app.ids = ids[0..4];
+        app.count = 4;
+        try f.h.render();
+        if (by_key) {
+            try testing.expect(try f.h.key(with(.up, .{ .shift = true })));
+            try testing.expectEqual(@as(usize, 1), app.selection.len);
+        } else {
+            try f.click(50, Fixture.rowY(1), .{ .shift = true });
+            try testing.expectEqualSlices(u64, &.{12}, app.selection.items());
+        }
+    }
+}

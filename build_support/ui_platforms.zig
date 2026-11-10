@@ -366,6 +366,12 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        // ZIGGURAT_UNCAPPED frames present paced while the swap chain
+        // changes size, then uncapped again once it settles.
+        addSmoke(b, "smoke-gpu-uncapped", "tests/gpu_uncapped_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
         addSmoke(b, "smoke-gpu-domain", "tests/gpu_domain_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },

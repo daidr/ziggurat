@@ -245,6 +245,24 @@ fn wrongThread(allocator: std.mem.Allocator, engine: *text.Engine) !void {
     worker.join();
     try std.testing.expectEqualStrings("a", editor.buffer.text());
 }
+/// The application replaces the text with one of fewer lines while the
+/// pointer is down: the edit ends the drag, so the moves and the release
+/// that follow look for no position in the layout of the old text.
+fn textShrinksUnderDrag(allocator: std.mem.Allocator, engine: *text.Engine) !void {
+    var editor = try ui.editor.Editor.init(allocator, .{ .multiline = true, .autofocus = true }, "one\ntwo\nthree\nfour\nfive\nsix");
+    defer editor.deinit();
+    var adapter = try shaped.Adapter.init(allocator, &editor, engine, .{});
+    defer adapter.deinit() catch unreachable;
+    _ = try adapter.prepare(bounds, parameters);
+    try expect(try adapter.handleEvent(.{ .pointer_down = .{ .position = .{ .x = bounds.x + 4, .y = bounds.y + 60 } } }, bounds));
+    try expect(try adapter.handleEvent(.{ .pointer_move = .{ .x = bounds.x + 20, .y = bounds.y + 70 } }, bounds));
+    _ = try editor.replaceText(.{ .start = 0, .end = editor.buffer.text().len }, "a");
+    try expect(!try adapter.handleEvent(.{ .pointer_move = .{ .x = bounds.x + 30, .y = bounds.y + 75 } }, bounds));
+    try expect(!try adapter.handleEvent(.{ .pointer_up = .{ .position = .{ .x = bounds.x + 40, .y = bounds.y + 78 } } }, bounds));
+    _ = try adapter.prepare(bounds, parameters);
+    const selected = editor.buffer.selection();
+    try expect(selected.anchor <= 1 and selected.caret <= 1);
+}
 pub fn main() !void {
     _ = builtin;
     var debug: std.heap.DebugAllocator(.{}) = .init;
@@ -260,7 +278,8 @@ pub fn main() !void {
         try failureAndCost(allocator, engine);
         try visiblePlane(allocator, engine);
         try wrongThread(allocator, engine);
+        try textShrinksUnderDrag(allocator, engine);
     }
     try equal(before, text.resourceCounts());
-    std.debug.print("shaped editor passed: grapheme edits, bidi visual navigation, wrap/scroll, virtual IME and undo, prepared cache transactions, allocation-free draw, resources=0\n", .{});
+    std.debug.print("shaped editor passed: grapheme edits, bidi visual navigation, wrap/scroll, virtual IME and undo, prepared cache transactions, a drag over text that shrank, allocation-free draw, resources=0\n", .{});
 }

@@ -838,3 +838,29 @@ test "the caret's rectangle follows what is typed, and the edit items follow the
     entries = shown.editEntries();
     try testing.expect(!entries[0].enabled and entries[1].enabled);
 }
+
+test "a drag goes on in the text the application put in its place with fewer paragraphs" {
+    var names: [12][16]u8 = undefined;
+    var runs: [12][1]rt.Run = undefined;
+    var paragraphs: [12]rt.Paragraph = undefined;
+    for (&paragraphs, &runs, &names, 0..) |*p, *run, *name, i| {
+        run[0] = .{ .text = try std.fmt.bufPrint(name, "paragraph {d}", .{i}) };
+        p.* = .{ .runs = run };
+    }
+    var doc = Document.init(gpa, try Text.of(gpa, &paragraphs));
+    defer doc.deinit();
+    var e = try tester(&doc, .{});
+    defer e.deinit();
+    try testing.expectEqual(@as(usize, 12), e.paras.items.len);
+    // The pointer goes down near the end, and drags on.
+    _ = e.handle(.{ .pointer_down = .{ .position = .{ .x = 30, .y = 200 } } });
+    _ = e.handle(.{ .pointer_move = .{ .x = 40, .y = 220 } });
+    // The application replaces the text, as a chat input cleared on send,
+    // before the editor lays it out again.
+    doc.setText(try Text.of(gpa, &.{.{ .runs = &.{.{ .text = "short" }} }}));
+    _ = e.handle(.{ .pointer_move = .{ .x = 50, .y = 240 } });
+    _ = e.handle(.{ .pointer_up = .{ .position = .{ .x = 60, .y = 260 } } });
+    const sel = doc.selection();
+    try testing.expect(sel.anchor <= doc.text.len() and sel.caret <= doc.text.len());
+    try testing.expectEqual(@as(usize, 1), e.paras.items.len);
+}

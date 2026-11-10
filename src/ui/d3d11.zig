@@ -100,6 +100,7 @@ extern fn zgpu_test_surface(*anyopaque) ?*anyopaque;
 extern fn zgpu_test_unscaled(*anyopaque) c_int;
 extern fn zgpu_test_swapchain_window(*anyopaque) ?*anyopaque;
 extern fn zgpu_frame_ready(*anyopaque) ?*anyopaque;
+extern fn zgpu_paced(*anyopaque) c_int;
 extern fn zgpu_prepare_image(*anyopaque, [*]const drawing.ImageLevel, u32) i32;
 extern fn zgpu_takes_video(*const drawing.VideoPicture) c_int;
 extern fn zgpu_prepare_video(*anyopaque, *const drawing.VideoPicture) i32;
@@ -1658,6 +1659,11 @@ pub const Renderer = struct {
     /// content's background beyond them.
     pub fn unscaledForTest(self: *const Renderer) bool {
         return if (self.native) |native| zgpu_test_unscaled(native) != 0 else false;
+    }
+    /// Whether frames present paced while the swap chain changes size,
+    /// with `ZIGGURAT_UNCAPPED` set.
+    pub fn pacedForTest(self: *const Renderer) bool {
+        return if (self.native) |native| zgpu_paced(native) != 0 else false;
     }
     pub fn swapchainWindowForTest(self: *const Renderer) ?*anyopaque {
         return if (self.native) |native| zgpu_test_swapchain_window(native) else null;

@@ -8690,6 +8690,8 @@ pub const Host = struct {
     /// after the next frame.
     pending_focus: ?u64 = null,
     focus_queued: bool = false,
+    /// `hiddenTask` is posted.
+    hidden_queued: bool = false,
     /// The pending focus waited one more frame, for a text field that
     /// registers itself with the Context after the frame that placed it.
     focus_retried: bool = false,
@@ -9114,6 +9116,13 @@ pub const Host = struct {
     }
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
+        // The window hiding or showing again counts during a pass too, as
+        // when the build hides it: the pass in progress may have read the
+        // old state, so the hidden build follows it (`hiddenTask`).
+        if (event == .window_state) {
+            self.windowShown(!event.window_state.visible or event.window_state.minimized);
+            return false;
+        }
         if (self.building) return false;
         // What points, and how hard, as the window tells it.
         switch (event) {
@@ -9131,10 +9140,6 @@ pub const Host = struct {
         if (event == .key_input and !event.key_input.from_page and self.view.holdKey(event.key_input)) self.invalidate();
         if (self.options.tools()) |tools| if (self.inspectorInput(tools, event)) return true;
         switch (event) {
-            .window_state => |state| {
-                self.windowShown(!state.visible or state.minimized);
-                return false;
-            },
             .pointer_move => |point| {
                 const at: Point = .{ .x = point.x, .y = point.y };
                 const moved = self.pointerTo(at);
@@ -9527,7 +9532,28 @@ pub const Host = struct {
         if (self.view.window_hidden == hidden) return;
         self.view.window_hidden = hidden;
         if (!self.view.hidden_asked) return;
-        if (!hidden or self.building) return self.invalidate();
+        if (!hidden) return self.invalidate();
+        // No frame comes to a window out of sight: macOS draws none for a
+        // window hidden or minimized, nor Windows for one minimized. A
+        // pass in progress builds the hidden view from the queue after it.
+        if (self.building) return self.queueHidden();
+        if (!self.layOutNow()) return;
+        self.invalidate();
+    }
+    fn queueHidden(self: *Host) void {
+        if (self.hidden_queued) return;
+        const window = self.context.window orelse return;
+        if (window.app.post(.{ .context = self, .call = hiddenTask })) |_| {
+            self.hidden_queued = true;
+        } else |err| self.last_error = self.last_error orelse err;
+    }
+    /// Build the view a window hidden during a pass shows, once the pass
+    /// is over, if the window is still out of sight.
+    fn hiddenTask(ptr: *anyopaque) void {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        self.hidden_queued = false;
+        if (self.context.window == null or !self.view.window_hidden) return;
+        if (self.building) return self.queueHidden();
         if (!self.layOutNow()) return;
         self.invalidate();
     }
