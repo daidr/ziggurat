@@ -103,6 +103,19 @@ pub const TextField = struct {
         self.host.focusNode(self.id);
     }
 
+    /// Put `replacement` in place of the field's text from `start` to `end`, in
+    /// UTF-16 code units, as an edit that is a step of undo of its own, so
+    /// Undo brings back what the user wrote: 0 to `std.math.maxInt(usize)`
+    /// replaces all of it, as a command that writes a message, and the
+    /// word before the caret takes a completion. The caret goes after it;
+    /// a CRLF is one line break, a single-line field has spaces for line
+    /// breaks, and `Options.max_length` does not cut it. True when the
+    /// text changed; text the field holds already changes nothing. See
+    /// `Field.replaceText`.
+    pub fn replaceText(self: *TextField, start: usize, end: usize, replacement: []const u8) !bool {
+        return (try self.field.replaceText(start, end, replacement)).text_committed;
+    }
+
     /// Shows or hides the text as a password, as an eye button beside the
     /// field does; the field is shaped again after the next paint.
     pub fn setPassword(self: *TextField, password: bool) !void {

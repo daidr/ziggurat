@@ -1,5 +1,32 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
+const ScrollbarStyle = @import("scroll.zig").Style;
+
+/// The color `t` of the way from `a` to `b` (0xRRGGBB), rounded.
+fn mix(a: u32, b: u32, t: f32) u32 {
+    var out: u32 = 0;
+    inline for (.{ @as(u5, 16), @as(u5, 8), @as(u5, 0) }) |shift| {
+        const x: f32 = @floatFromInt(a >> shift & 0xff);
+        const y: f32 = @floatFromInt(b >> shift & 0xff);
+        const value: u32 = @intFromFloat(@round(x * (1 - t) + y * t));
+        out |= @as(u32, @min(value, 255)) << shift;
+    }
+    return out;
+}
+/// The luminance of 0xRRGGBB, from 0 to 255.
+fn gray(color: u32) u32 {
+    const r: f32 = @floatFromInt(color >> 16 & 0xff);
+    const g: f32 = @floatFromInt(color >> 8 & 0xff);
+    const b: f32 = @floatFromInt(color & 0xff);
+    return @intFromFloat(0.2126 * r + 0.7152 * g + 0.0722 * b + 0.5);
+}
+/// 0xAARRGGBB with its alpha 1.6 times stronger; an alpha of 0 is opaque.
+fn stronger(color: u32) u32 {
+    const alpha = color >> 24;
+    if (alpha == 0) return color;
+    const value: u32 = @intFromFloat(@min(255, @round(@as(f32, @floatFromInt(alpha)) * 1.6)));
+    return value << 24 | (color & 0xffffff);
+}
 
 /// Opaque RGB colors. Alpha drawing remains an explicit drawing operation.
 pub const Palette = struct {
@@ -61,7 +88,107 @@ pub const Theme = struct {
     /// How every scroll bar of the theme looks, as a code editor's square
     /// thumb over a track; a view's own style takes its place. The zero
     /// style is the usual rounded thumb in the palette's `track`.
-    scrollbar: @import("scroll.zig").Style = .{},
+    scrollbar: ScrollbarStyle = .{},
+    /// What `withPreferences` changed, null where it has not.
+    followed: ?Followed = null,
+
+    /// A theme before and after following the desktop's settings.
+    pub const Followed = struct {
+        from: Palette,
+        to: Palette,
+        scrollbar_from: ScrollbarStyle,
+        scrollbar_to: ScrollbarStyle,
+    };
+
+    /// Whether the theme is dark, by its background's luminance.
+    pub fn isDark(self: Theme) bool {
+        return gray(self.palette.background) < 128;
+    }
+
+    /// A copy of the theme in the accent `accent` (0xRRGGBB), with the
+    /// shades the default looks give it, for the theme's appearance:
+    /// `pressed`, the tint of what is selected or pressed, and `focus`,
+    /// the ring, are the accent laid over the background (25% and 55%,
+    /// or 40% and 60% of a lighter accent in the dark),
+    /// `focused_thumb_border` a darker accent (a lighter one in the dark),
+    /// and `on_accent` white, or near black on an accent as light as
+    /// yellow. Null keeps the theme's accent, as where the desktop has
+    /// none. A theme of the application's takes the desktop's accent so:
+    ///
+    ///     const theme = ui.Theme.dark().withAccent(preferences.accent);
+    pub fn withAccent(self: Theme, accent: ?u32) Theme {
+        var copy = self;
+        if (accent) |value| copy.setAccent(value & 0xffffff);
+        return copy;
+    }
+    fn setAccent(self: *Theme, accent: u32) void {
+        const background = self.palette.background;
+        self.palette.accent = accent;
+        if (self.isDark()) {
+            const lighter = mix(accent, 0xffffff, 0.2);
+            self.palette.pressed = mix(background, accent, 0.4);
+            self.palette.focus = mix(background, lighter, 0.6);
+            self.palette.focused_thumb_border = lighter;
+        } else {
+            self.palette.pressed = mix(background, accent, 0.25);
+            self.palette.focus = mix(background, accent, 0.55);
+            self.palette.focused_thumb_border = mix(accent, 0x000000, 0.25);
+        }
+        // Text on the accent is near black where white would not stand
+        // out, as on yellow.
+        self.palette.on_accent = if (gray(accent) > 165) 0x18181b else 0xffffff;
+    }
+
+    /// What `withPreferences` follows of the desktop's settings, as
+    /// `system.desktop.Preferences` gives them.
+    pub const Preferences = struct {
+        /// 0xRRGGBB, null where the desktop has none.
+        accent: ?u32 = null,
+        high_contrast: bool = false,
+    };
+
+    /// A copy of the theme that follows the desktop's settings: in their
+    /// accent (`withAccent`), and under high contrast with borders and
+    /// disabled text closer to the text, the focus ring in the accent at
+    /// full strength and the colors of `scrollbar` that are translucent
+    /// stronger. A theme that already follows them, as one this returns,
+    /// follows `preferences` in their place: what following changed goes
+    /// back first, so high contrast is not made stronger twice and a
+    /// setting turned off goes, while the colors set since stay.
+    ///
+    ///     var theme = ui.Theme.dark();
+    ///     theme.palette.background = 0x18181b;
+    ///     _ = try context.setTheme(theme.withPreferences(.{ .accent = desktop.accent, .high_contrast = desktop.high_contrast }));
+    pub fn withPreferences(self: Theme, preferences: Preferences) Theme {
+        var copy = self;
+        if (copy.followed) |followed| copy.unfollow(followed);
+        copy.followed = null;
+        const from = copy;
+        copy.follow(preferences);
+        copy.followed = .{ .from = from.palette, .to = copy.palette, .scrollbar_from = from.scrollbar, .scrollbar_to = copy.scrollbar };
+        return copy;
+    }
+    fn follow(self: *Theme, preferences: Preferences) void {
+        if (preferences.accent) |accent| self.setAccent(accent & 0xffffff);
+        if (!preferences.high_contrast) return;
+        const text = self.palette.text;
+        self.palette.border = mix(self.palette.border, text, 0.45);
+        self.palette.disabled_text = mix(self.palette.disabled_text, text, 0.4);
+        self.palette.focus = if (self.isDark()) mix(self.palette.accent, 0xffffff, 0.2) else self.palette.accent;
+        // Translucent scroll bar colors are made stronger; an alpha of 0
+        // is opaque already.
+        inline for (.{ "track", "thumb", "thumb_hovered", "thumb_dragged" }) |name| {
+            if (@field(self.scrollbar, name)) |color| @field(self.scrollbar, name) = stronger(color);
+        }
+    }
+    /// Put back what following changed, keeping what was set since.
+    fn unfollow(self: *Theme, followed: Followed) void {
+        inline for (zio.fields(Palette)) |field| {
+            if (@field(self.palette, field.name) == @field(followed.to, field.name)) @field(self.palette, field.name) = @field(followed.from, field.name);
+        }
+        if (std.meta.eql(self.scrollbar, followed.scrollbar_to)) self.scrollbar = followed.scrollbar_from;
+    }
+
     pub fn light() Theme {
         return .{};
     }
@@ -146,4 +273,49 @@ test "themes own copied values and validate every color and metric" {
             try std.testing.expectError(error.InvalidThemeMetric, invalid.validate());
         }
     }
+}
+
+test "an accent with its shades, for the theme's appearance" {
+    const light = Theme.light().withAccent(0x7c3aed);
+    try std.testing.expectEqual(@as(u32, 0x7c3aed), light.palette.accent);
+    try std.testing.expectEqual(mix(0xffffff, 0x7c3aed, 0.25), light.palette.pressed);
+    try std.testing.expectEqual(mix(0xffffff, 0x7c3aed, 0.55), light.palette.focus);
+    try std.testing.expectEqual(mix(0x7c3aed, 0, 0.25), light.palette.focused_thumb_border);
+    try std.testing.expectEqual(@as(u32, 0xffffff), light.palette.on_accent);
+    try light.validate();
+    // Lighter in the dark, and near black text on yellow.
+    const dark = Theme.dark().withAccent(0xffd60a);
+    try std.testing.expectEqual(mix(0x181c22, mix(0xffd60a, 0xffffff, 0.2), 0.6), dark.palette.focus);
+    try std.testing.expectEqual(mix(0x181c22, 0xffd60a, 0.4), dark.palette.pressed);
+    try std.testing.expectEqual(@as(u32, 0x18181b), dark.palette.on_accent);
+    // None keeps the theme's own.
+    try std.testing.expectEqualDeep(Theme.light(), Theme.light().withAccent(null));
+    // The default accent's shades are close to the default look.
+    const default = Theme.light().withAccent(Theme.light().palette.accent);
+    try std.testing.expect(gray(default.palette.pressed) + 4 >= gray(Theme.light().palette.pressed) and gray(default.palette.pressed) <= gray(Theme.light().palette.pressed) + 4);
+}
+
+test "a theme follows the desktop again from what it was" {
+    var base = Theme.light();
+    base.scrollbar.thumb = 0x40000000;
+    const followed = base.withPreferences(.{ .accent = 0x7c3aed, .high_contrast = true });
+    try std.testing.expectEqual(@as(u32, 0x7c3aed), followed.palette.accent);
+    try std.testing.expectEqual(@as(u32, 0x7c3aed), followed.palette.focus);
+    try std.testing.expectEqual(mix(base.palette.border, base.palette.text, 0.45), followed.palette.border);
+    try std.testing.expectEqual(@as(?u32, 0x66000000), followed.scrollbar.thumb);
+    // Following again does not make it stronger twice.
+    const again = followed.withPreferences(.{ .accent = 0x7c3aed, .high_contrast = true });
+    try std.testing.expectEqual(followed.palette.border, again.palette.border);
+    try std.testing.expectEqual(followed.scrollbar.thumb, again.scrollbar.thumb);
+    // A setting turned off goes; a color set since stays.
+    var changed = followed;
+    changed.palette.background = 0xfafafa;
+    const plain = changed.withPreferences(.{});
+    try std.testing.expectEqual(base.palette.border, plain.palette.border);
+    try std.testing.expectEqual(base.palette.accent, plain.palette.accent);
+    try std.testing.expectEqual(base.palette.focus, plain.palette.focus);
+    try std.testing.expectEqual(base.scrollbar.thumb, plain.scrollbar.thumb);
+    try std.testing.expectEqual(@as(u32, 0xfafafa), plain.palette.background);
+    // Without settings it is the theme as it was.
+    try std.testing.expectEqualDeep(base.palette, base.withPreferences(.{}).palette);
 }

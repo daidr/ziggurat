@@ -59,6 +59,7 @@ pub const MenuItemOptions = menu_controls.ItemOptions;
 pub const MenuState = menu_controls.State;
 pub const MenuItemState = menu_controls.ItemState;
 pub const MenuButtonOptions = menu_controls.ButtonOptions;
+pub const MenuPanel = menu_controls.Panel;
 const wrap_text = @import("wrap.zig");
 const inspector_panel = @import("inspector.zig");
 const view_options = @import("ziggurat_view_options");
@@ -123,6 +124,8 @@ pub const max_cursor_regions = 160;
 pub const split_divider: f32 = 6;
 /// Key bindings input can reach in one frame; see `View.bindKey`.
 pub const max_key_bindings = 32;
+/// Nodes that can hold a function to run as they go; see `View.onUnmount`.
+pub const max_unmounts = 64;
 /// Least space between a dialog and the window's edges, in DIP.
 pub const dialog_margin: f32 = 24;
 /// Narrowest a dialog is laid out while the window has room, in DIP.
@@ -1676,6 +1679,10 @@ pub const Node = struct {
     danger: bool = false,
     /// A menu button's menu goes where `placement` says.
     menu_placed: bool = false,
+    /// A drawn menu's panel wears `ButtonOptions.panel` in its style:
+    /// background, border, border width (negative for the theme's), radius
+    /// and padding.
+    menu_styled: bool = false,
     /// A menu item holding content of the application's own in place of
     /// its label (`menuItemContent`).
     menu_content: bool = false,
@@ -2445,6 +2452,14 @@ pub const View = struct {
     /// The key a binding (`bindKey`) took for this pass's action came as
     /// the auto-repeat of a key held down; see `shortcutRepeated`.
     shortcut_repeat: bool = false,
+    /// The functions `onUnmount` gave, by node, kept across passes.
+    unmounts: [max_unmounts]struct { id: u64, unmount: Unmount } = undefined,
+    unmounts_len: usize = 0,
+    /// A pointer button is held: what it focuses is under the pointer, so
+    /// focus that follows it scrolls nothing.
+    pointer_held: bool = false,
+    /// The node the focus last moved to as the build asked.
+    focus_revealed: ?u64 = null,
 
     pub fn init(buffers: Buffers) View {
         return .{ .buffers = buffers };
@@ -2734,6 +2749,66 @@ pub const View = struct {
     pub fn lastNode(self: *View) *Node {
         return &self.buffers.nodes[self.len - 1];
     }
+    /// Run `unmount` once, on the main thread, as the node just added goes:
+    /// after the first frame that no longer builds it, once the exit of a
+    /// `presentColumn` around it ended, and as the window closes. A view
+    /// stops there the work it started for the node, as a request, a timer
+    /// or a subscription, without keeping a record of what it built:
+    ///
+    ///     try v.column(.{ .key = view.key(url) });
+    ///     try v.onUnmount(.{ .context = feed, .run = Feed.stop });
+    ///     ... children ...
+    ///     try v.end();
+    ///
+    /// Each call replaces the function, and the last one given runs; a pass
+    /// that does not call it keeps the one given before, and null takes it
+    /// away without running it. The node's id says which node it is, so a
+    /// node whose siblings change needs its `Style.key`. A frame that fails
+    /// runs nothing. `unmount` may change the application's state; it asks
+    /// for the frame that shows it, as `Window.invalidate`. At most
+    /// `max_unmounts` nodes hold one at a time: more return `TooManyItems`.
+    pub fn onUnmount(self: *View, unmount: ?Unmount) Error!void {
+        const id = self.lastNode().id;
+        for (self.unmounts[0..self.unmounts_len], 0..) |*entry, at| if (entry.id == id) {
+            if (unmount) |value| entry.unmount = value else {
+                self.unmounts[at] = self.unmounts[self.unmounts_len - 1];
+                self.unmounts_len -= 1;
+            }
+            return;
+        };
+        const value = unmount orelse return;
+        if (self.unmounts_len == self.unmounts.len) return error.TooManyItems;
+        self.unmounts[self.unmounts_len] = .{ .id = id, .unmount = value };
+        self.unmounts_len += 1;
+    }
+    /// After a frame: run once the functions of the nodes it no longer
+    /// built, and forget them.
+    pub fn runUnmounts(self: *View) void {
+        var gone: [max_unmounts]Unmount = undefined;
+        var count: usize = 0;
+        var at: usize = 0;
+        while (at < self.unmounts_len) {
+            const entry = self.unmounts[at];
+            if (self.nodeById(entry.id) != null) {
+                at += 1;
+                continue;
+            }
+            gone[count] = entry.unmount;
+            count += 1;
+            self.unmounts[at] = self.unmounts[self.unmounts_len - 1];
+            self.unmounts_len -= 1;
+        }
+        // Forgotten first: a function that builds again finds none of it.
+        for (gone[0..count]) |unmount| unmount.run(unmount.context);
+    }
+    /// As the window closes: run every function `onUnmount` gave, once.
+    pub fn runAllUnmounts(self: *View) void {
+        var gone: [max_unmounts]Unmount = undefined;
+        const count = self.unmounts_len;
+        for (self.unmounts[0..count], 0..) |entry, at| gone[at] = entry.unmount;
+        self.unmounts_len = 0;
+        for (gone[0..count]) |unmount| unmount.run(unmount.context);
+    }
     /// Scroll the containers around the node with `id` as little as shows
     /// it, once this pass is arranged: a node added in this pass comes into
     /// view with it. Ask in the pass it should come into view; asking in
@@ -2741,6 +2816,26 @@ pub const View = struct {
     pub fn scrollIntoView(self: *View, id: u64) void {
         self.reveal = id;
         self.reveal_options = .{};
+    }
+    /// The focus moves to the node `id`, as the build asked (`restore`,
+    /// `initialFocus`, `focusLeaf`, `Host.focusNode`): scroll the containers
+    /// around it as little as shows it in the next frame, as Tab does and
+    /// the web's `focus()` does, unless the pass already asked to scroll to
+    /// something (`scrollIntoViewWith`, to line it up otherwise). While a
+    /// pointer button is held it scrolls nothing: what a press focuses is
+    /// under the pointer. Given again to the node that had it, it scrolls
+    /// nothing, so a build that focuses a node in every pass leaves the
+    /// reader's scrolling alone, even once the node, scrolled out of view,
+    /// let the focus go. True when it asked; `focused` is where the focus
+    /// is now.
+    pub fn revealFocus(self: *View, id: u64, focused: ?u64) bool {
+        if (focused == id) return false;
+        const again = focused == null and self.focus_revealed == id;
+        self.focus_revealed = id;
+        if (again or self.pointer_held or self.reveal != null) return false;
+        self.reveal = id;
+        self.reveal_options = .{};
+        return true;
     }
     /// Scroll the containers around the node with `id` to show it, lined
     /// up as `options` say, as the web's `scrollIntoView` options: at once,
@@ -7113,8 +7208,14 @@ pub const View = struct {
         }
         if (node.kind == .menu) {
             if (node.plain) paintBox(target, node.style, bounds) else {
-                target.roundedRect(bounds, 6, ui.Color.rgb(node.style.border orelse theme.palette.border));
-                target.roundedRect(inset(bounds, theme.metrics.border / 2), @max(0, 6 - theme.metrics.border / 2), ui.Color.rgb(node.style.background orelse theme.palette.background));
+                const styled = node.menu_styled;
+                const radius: f32 = if (styled and node.style.radius >= 0) node.style.radius else 6;
+                const line: f32 = if (styled and node.style.border_width >= 0) node.style.border_width else theme.metrics.border / 2;
+                const fill = ui.Color.rgb(node.style.background orelse theme.palette.background);
+                if (line > 0) {
+                    target.roundedRect(bounds, radius, ui.Color.rgb(node.style.border orelse theme.palette.border));
+                    target.roundedRect(inset(bounds, line), @max(0, radius - line), fill);
+                } else target.roundedRect(bounds, radius, fill);
             }
             // A submenu belongs to the menu it opens from; the top menu
             // stays at the root, like a popover.
@@ -8664,6 +8765,12 @@ pub const FrameHook = struct {
     run: *const fn (*anyopaque) void,
 };
 
+/// A function `View.onUnmount` runs once as its node goes.
+pub const Unmount = struct {
+    context: ?*anyopaque = null,
+    run: *const fn (?*anyopaque) void,
+};
+
 /// Owns the ui.Context for one window. Keep Host at a stable address from
 /// attach through the Context's detach, like any Context.
 pub const Host = struct {
@@ -8970,6 +9077,7 @@ pub const Host = struct {
         self.context.on_key_release = onKeyRelease;
         self.context.on_unhandled_key = onUnhandledKey;
         self.context.on_command_enabled = onCommandEnabled;
+        self.context.on_detach = onDetach;
         try self.context.attach(window);
     }
     /// Attach as the full-window backdrop of a composition Owner, under the
@@ -8982,6 +9090,7 @@ pub const Host = struct {
         self.context.on_key_release = onKeyRelease;
         self.context.on_unhandled_key = onUnhandledKey;
         self.context.on_command_enabled = onCommandEnabled;
+        self.context.on_detach = onDetach;
         return self.context.attachBackdrop(owner);
     }
 
@@ -9028,7 +9137,14 @@ pub const Host = struct {
         }
         self.focus(id);
     }
+    /// Give `id` the keyboard focus, scrolling it into view as it moves
+    /// there (`View.revealFocus`).
     fn focus(self: *Host, id: u64) void {
+        if (self.view.revealFocus(id, self.context.input_state.focused)) self.invalidate();
+        self.focusQuietly(id);
+    }
+    /// Give `id` the keyboard focus where it is.
+    fn focusQuietly(self: *Host, id: u64) void {
         self.context.focusControl(id) catch |err| switch (err) {
             error.NotAttached => self.context.input_state.setFocused(id),
             // The system kept another window in front, as Windows does for
@@ -9065,8 +9181,11 @@ pub const Host = struct {
         if (self.context.window == null or self.context.input_state.focused == id) return;
         if (self.context.input_state.available(id)) {
             self.focus_retried = false;
+            // Content held back takes, as it shows, the focus given to
+            // it where it is.
+            const held = self.held_focus != null;
             self.held_focus = null;
-            self.focus(id);
+            if (held) self.focusQuietly(id) else self.focus(id);
         } else if (self.view.heldBack(id)) {
             // Content `Transition.after_exits` holds back keeps the focus
             // given to it, and takes it as it shows, unless the focus went
@@ -9131,6 +9250,17 @@ pub const Host = struct {
             },
             else => {},
         }
+        // Whether a button is held, for focus that follows a press.
+        switch (event) {
+            .pointer_down => |press| if (press.button != .back and press.button != .forward) {
+                self.view.pointer_held = true;
+            },
+            .pointer_up, .cancel_input => self.view.pointer_held = false,
+            .focus => |focused| if (!focused) {
+                self.view.pointer_held = false;
+            },
+            else => {},
+        }
         // The containers observing the input see it before anything else.
         if (self.view.observing()) if (observedOf(event)) |seen| {
             self.deliver(.{ .observe = seen });
@@ -9177,7 +9307,7 @@ pub const Host = struct {
                     // may take the focus, which a menu opened there gives
                     // back as it closes.
                     if (press.button == .secondary) if (self.view.embedSecondary(point)) |id| {
-                        if (self.context.input_state.focused != id) self.focus(id);
+                        if (self.context.input_state.focused != id) self.focusQuietly(id);
                         self.view.focus = id;
                         self.invalidate();
                     };
@@ -9586,6 +9716,13 @@ pub const Host = struct {
             return;
         };
         self.frames += 1;
+        // What this frame no longer built goes.
+        self.view.runUnmounts();
+    }
+    /// The window closed or the content went: every node goes.
+    fn onDetach(ptr: *anyopaque) void {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        self.view.runAllUnmounts();
     }
     fn render(self: *Host, frame: *ui.Frame, theme: Theme) anyerror!void {
         var lap: ?zio.Timer = if (self.options.tools()) |tools| if (tools.open) zio.Timer.start() catch null else null else null;
@@ -10328,6 +10465,7 @@ test {
     _ = @import("navigation_tests.zig");
     _ = @import("pointer_tests.zig");
     _ = @import("input_tests.zig");
+    _ = @import("focus_reveal_tests.zig");
     _ = @import("bases_tests.zig");
     _ = @import("inspector_tests.zig");
     _ = @import("inspector_editor.zig");

@@ -49,7 +49,9 @@ enabled/readonly 语义在下一次成功前台发布。
 同步原生 caret，然后请求重绘。展示或 caret 同步失败不撤回已经改变的视口，
 不能将错误当作重复施加滚动量的许可。
 
-Field 的 `setValue`、`select`、`undo`、`redo` 返回 `TextFieldResult`。
+`replaceText(start, end, text)` 用应用的文字替换用户的一部分或全部文字，作为单独的一步撤销：撤销恢复用户写的内容，重做再换回应用的文字。`start` 与 `end` 按 UTF-16 码元计（与 `select` 相同），会被限制在文本范围内，顺序不限，因此 `0, std.math.maxInt(usize)` 替换全部，例如“生成回复”的命令；补全则替换光标前的词。像粘贴一样，光标落在新文字之后，CRLF 视为一个换行，单行字段把换行换成空格；`max_length` 不截断它，正如它不截断应用放进文档的其他文字。按字段的方式规范化后与原有内容相同时不算编辑：什么都不变，`text_committed` 为 false，也不通知 changed。正在进行的输入法组合先被取消。视图的 `TextField.replaceText` 转调它并在文字改变时返回 true。
+
+Field 的 `setValue`、`select`、`replaceText`、`undo`、`redo` 返回 `TextFieldResult`。
 `text_committed` 与 `presentation_error` 可同时成立：展示失败不撤回已提交的
 Document 改动，不允许重放。changed 使用 Document 的 committed-text version
 去重，在调用业务回调前先记录版本；单独的选区和组合预览不会通知 changed。
