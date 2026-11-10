@@ -607,7 +607,7 @@ pub fn addTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Co
     // Named after the root file, so the build summary says which tests ran.
     if (std.mem.eql(u8, with.name, "test")) if (with.root_module.root_source_file) |root| switch (root) {
         .src_path => |source| {
-            const path = b.dupe(source.sub_path);
+            const path = @constCast(b.dupe(source.sub_path));
             std.mem.replaceScalar(u8, path, '\\', '/');
             var name = std.mem.trimEnd(u8, path, ".zig");
             if (std.mem.startsWith(u8, name, "src/")) name = name["src/".len..];
