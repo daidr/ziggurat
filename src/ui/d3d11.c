@@ -59,6 +59,13 @@ typedef struct State {
        which only a swap chain of a window's own does. */
     UINT buffers, swap_flags;
     int tearing;
+    /* Uncapped, a live resize presents paced, as without ZIGGURAT_UNCAPPED:
+       from the first change of size until settle_ms after the last, frames
+       show untorn and one frame waits for the swap chain, not two. Frames
+       queued for DWM faster than it composes, while it resizes the window,
+       hold back the frame of the next size behind them. */
+    int paced;
+    ULONGLONG resized_at;
     ID2D1Bitmap1 *target;
     /* The window's kept frame: a frame drawn while keep_plane is set draws
        into it, only where it changed when plane_valid says it holds the
@@ -583,6 +590,7 @@ static HRESULT create_swapchain(State *s, UINT width, UINT height) {
     }
     hr=IDXGISwapChain1_QueryInterface(s->swapchain,&IID_IDXGISwapChain2,(void **)&s->swapchain2); OWN(s->swapchain2);
     if (FAILED(hr)) goto done;
+    s->paced=0;
     hr=IDXGISwapChain2_SetMaximumFrameLatency(s->swapchain2,zpacing_uncapped()?2:1);
     if (FAILED(hr)) goto done;
     s->frame_ready=IDXGISwapChain2_GetFrameLatencyWaitableObject(s->swapchain2);
@@ -622,6 +630,10 @@ HRESULT zgpu_begin_composed(State *s, HWND hwnd, UINT width, UINT height, FLOAT 
         hr = IDXGISwapChain1_ResizeBuffers(s->swapchain, s->buffers ? s->buffers : 2, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, s->swap_flags ? s->swap_flags : DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
         if (FAILED(hr)) return failure(s, hr);
         s->width = width; s->height = height; s->resizes++;
+        if (zpacing_uncapped()) {
+            s->resized_at = GetTickCount64();
+            if (!s->paced && s->swapchain2 && SUCCEEDED(IDXGISwapChain2_SetMaximumFrameLatency(s->swapchain2, 1))) s->paced = 1;
+        }
     }
     if (s->dpi != dpi) release_target(s);
     if (!s->target) {
@@ -1056,6 +1068,15 @@ void zgpu_discard(State *s) {if(s)finish_draw(s);}
 int zgpu_suspend_surface(State *s){int shown=s&&s->surface&&(GetWindowLongW(s->surface,GWL_STYLE)&WS_VISIBLE)!=0;if(shown)hide_surface(s);return shown;}
 void zgpu_restore_surface(State *s){if(s&&s->surface&&s->target&&s->swapchain)ShowWindow(s->surface,SW_SHOWNOACTIVATE);}
 
+/* The swap chain settles once its size held settle_ms: frames present
+   uncapped again, two of them waiting for it. */
+enum { settle_ms = 500 };
+static void settle_pacing(State *s) {
+    if (!s->paced || GetTickCount64() - s->resized_at < settle_ms) return;
+    if (s->swapchain2 && SUCCEEDED(IDXGISwapChain2_SetMaximumFrameLatency(s->swapchain2, 2))) s->paced = 0;
+}
+int zgpu_paced(State *s) { return s ? s->paced : 0; }
+
 static HRESULT end_frame(State *s,int offscreen) {
     if (!s || !s->drawing || s->offscreen!=offscreen) return E_UNEXPECTED;
     if(s->layers&&s->layers->depth){finish_draw(s);return E_UNEXPECTED;}
@@ -1076,7 +1097,8 @@ static HRESULT end_frame(State *s,int offscreen) {
     if(from_plane){hr=plane_copy_window(s);if(FAILED(hr))return failure(s,hr);}
     BOOL was_visible=(GetWindowLongW(s->surface,GWL_STYLE)&WS_VISIBLE)!=0;
     if (!was_visible) ShowWindow(s->surface, SW_SHOWNOACTIVATE);
-    hr = IDXGISwapChain1_Present(s->swapchain, 0, DXGI_PRESENT_DO_NOT_WAIT | (s->tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
+    hr = IDXGISwapChain1_Present(s->swapchain, 0, DXGI_PRESENT_DO_NOT_WAIT | (s->tearing && !s->paced ? DXGI_PRESENT_ALLOW_TEARING : 0));
+    settle_pacing(s);
     if (FAILED(hr)) {
         gpu_layer_abort_metadata(s);
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {

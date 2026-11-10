@@ -155,7 +155,7 @@ Linux 渲染器始终在 Cairo 图像面上绘制，着色器效果可以改由 
 
 默认情况下，一帧之后的下一帧要等显示器下一次刷新（交换链的空位、Metal 层的显示同步或 GTK 的帧时钟），所以任何比一次刷新便宜的场景都显示为显示器的帧率，既测不出场景还剩多少余量，也比不出两个版本的差别。设置环境变量 `ZIGGURAT_UNCAPPED=1`（`true`/`on`/`yes` 同；启动时读一次，`ui.pacing.uncapped()`）后，上一帧呈现完下一帧就开始；只有被请求的帧来得更快，空闲的窗口仍然什么也不画。各平台的做法：
 
-- Direct3D：交换链用三个缓冲，DXGI 支持 `DXGI_FEATURE_PRESENT_ALLOW_TEARING` 时（窗口自己的交换链，不含 DirectComposition 合成的窗口）带允许撕裂标志，每帧以同步间隔 0 呈现，最大帧延迟为 2。
+- Direct3D：交换链用三个缓冲，DXGI 支持 `DXGI_FEATURE_PRESENT_ALLOW_TEARING` 时（窗口自己的交换链，不含 DirectComposition 合成的窗口）带允许撕裂标志，每帧以同步间隔 0 呈现，最大帧延迟为 2。窗口实时缩放时例外：从交换链第一次改变尺寸起，到尺寸保持 500 ms 后的下一帧为止，按显示节奏呈现（不撕裂、最大帧延迟 1），否则缩放期间排给 DWM 的帧比它合成得快，新尺寸的那一帧要排在它们后面（`zig build smoke-gpu-uncapped -Dgpu=true`，WARP）。
 - macOS：`CAMetalLayer.displaySyncEnabled` 关闭，drawable 在 GPU 画完后立即呈现；窗口服务器仍每次刷新合成一次窗口，显示最新一帧而不撕裂。
 - Linux：在每帧的时序里告诉 GTK 帧时钟一微秒的刷新间隔，下一帧在处理完其间到来的事件后立刻开始（会报告呈现时间的合成器仍会给它定节奏）；X11 上 GDK 绘制窗口所用 GLX drawable 的交换间隔设为 0（`GLX_EXT_swap_control`，否则 `GLX_MESA_swap_control`）。
 - 浏览器忽略它，`requestAnimationFrame` 决定帧节奏。
