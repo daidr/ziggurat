@@ -297,10 +297,6 @@ pub fn addDrawingSmokes(b: *std.Build, c: anytype) void {
         .{ .name = "ziggurat_view_graphics", .module = view_graphics },
         .{ .name = "ziggurat_view_video", .module = view_video },
     });
-    addSmoke(b, "smoke-window-hidden", "tests/window_hidden_smoke.zig", target, optimize, &.{
-        .{ .name = "ziggurat", .module = core },
-        .{ .name = "ziggurat_view", .module = declarative_view },
-    });
     addSmoke(b, "smoke-animation-ui", "tests/animation_ui_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_ui", .module = ui },

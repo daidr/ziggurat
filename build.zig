@@ -710,6 +710,12 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_system", .module = system },
         .{ .name = "ziggurat_automation", .module = automation },
     });
+    // A view building as its window hides and shows again, on every
+    // desktop target (Linux skips it at run time).
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) addSmoke(b, "smoke-window-hidden", "tests/window_hidden_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+    });
     // ziggurat-automation: the socket's command line client for agents.
     const automation_cli_options = b.addOptions();
     automation_cli_options.addOption([]const u8, "version", @import("build.zig.zon").version);
