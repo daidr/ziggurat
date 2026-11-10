@@ -29,15 +29,15 @@ _ = try context.setTheme(theme);
 _ = try context.setTheme(ui.Theme.light().withAccent(0x7c3aed)); // 品牌色
 ```
 
-`theme.withPreferences(.{ .accent, .high_contrast })` 返回跟随桌面设置的副本：取桌面强调色（同 `withAccent`），高对比度时边框与禁用文字向文字色靠近、焦点环取不透明的强调色、`scrollbar` 里半透明的颜色加强。已经跟随过的主题（`withPreferences` 返回的）再次跟随时，先撤回上次跟随改动的颜色，因此高对比度不会叠加加强，关掉的设置能恢复，而之后应用自己改过的颜色保留。桌面偏好变化时（`system.desktop.Watch` 的 `preferences`）对当前主题再调用一次即可：
+`theme.withPreferences(.{ .accent, .high_contrast, .text_scale })` 返回跟随桌面设置的副本：取桌面强调色（同 `withAccent`），高对比度时边框与禁用文字向文字色靠近、焦点环取不透明的强调色、`scrollbar` 里半透明的颜色加强，`font_size` 放大到 `text_scale` 倍（限制在 0.5 到 4 倍）。已经跟随过的主题（`withPreferences` 返回的）再次跟随时，先撤回上次跟随改动的颜色，因此高对比度不会叠加加强，关掉的设置能恢复，而之后应用自己改过的颜色保留。桌面偏好变化时（`system.desktop.Watch` 的 `preferences`）对当前主题再调用一次即可：
 
 ```zig
 fn followDesktop(context: *ui.Context, theme: ui.Theme, desktop: system.desktop.Preferences) !void {
-    _ = try context.setTheme(theme.withPreferences(.{ .accent = desktop.accent, .high_contrast = desktop.high_contrast }));
+    _ = try context.setTheme(theme.withPreferences(.{ .accent = desktop.accent, .high_contrast = desktop.high_contrast, .text_scale = desktop.text_scale }));
 }
 ```
 
-主题没有字号，桌面的文字缩放（`text_scale`）不由主题跟随，视图的字体由应用按它选择。
+`Theme.font_size`（默认 16，即 `Font{}` 的大小）是不自带字体的文字的字号：控件的标签（`Frame.label`）和视图里没有 `Style.font` 的文本与链接，视图按它测量与绘制；设了 `Style.font` 的文字保持自己的字号。
 
 ## 广色域颜色
 

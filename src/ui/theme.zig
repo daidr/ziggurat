@@ -1,6 +1,7 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const ScrollbarStyle = @import("scroll.zig").Style;
+const Font = @import("commands.zig").Font;
 
 /// The color `t` of the way from `a` to `b` (0xRRGGBB), rounded.
 fn mix(a: u32, b: u32, t: f32) u32 {
@@ -89,6 +90,11 @@ pub const Theme = struct {
     /// thumb over a track; a view's own style takes its place. The zero
     /// style is the usual rounded thumb in the palette's `track`.
     scrollbar: ScrollbarStyle = .{},
+    /// Size of the text that sets no font of its own, in DIP: controls'
+    /// labels, and a view's text with no `Style.font`. Larger under
+    /// the desktop's text scale once the theme follows it
+    /// (`withPreferences`).
+    font_size: f32 = default_font_size,
     /// What `withPreferences` changed, null where it has not.
     followed: ?Followed = null,
 
@@ -98,7 +104,11 @@ pub const Theme = struct {
         to: Palette,
         scrollbar_from: ScrollbarStyle,
         scrollbar_to: ScrollbarStyle,
+        font_from: f32 = default_font_size,
+        font_to: f32 = default_font_size,
     };
+    /// The size of `Font{}`, and of the theme's text unless it sets another.
+    pub const default_font_size: f32 = 16;
 
     /// Whether the theme is dark, by its background's luminance.
     pub fn isDark(self: Theme) bool {
@@ -145,31 +155,36 @@ pub const Theme = struct {
         /// 0xRRGGBB, null where the desktop has none.
         accent: ?u32 = null,
         high_contrast: bool = false,
+        /// How much larger the desktop asks text to be, 1 as usual; the
+        /// theme's `font_size` grows by it, within 0.5 to 4.
+        text_scale: f32 = 1,
     };
 
     /// A copy of the theme that follows the desktop's settings: in their
     /// accent (`withAccent`), and under high contrast with borders and
     /// disabled text closer to the text, the focus ring in the accent at
     /// full strength and the colors of `scrollbar` that are translucent
-    /// stronger. A theme that already follows them, as one this returns,
+    /// stronger, and with `font_size` `text_scale` times larger. A theme that already follows them, as one this returns,
     /// follows `preferences` in their place: what following changed goes
     /// back first, so high contrast is not made stronger twice and a
     /// setting turned off goes, while the colors set since stay.
     ///
     ///     var theme = ui.Theme.dark();
     ///     theme.palette.background = 0x18181b;
-    ///     _ = try context.setTheme(theme.withPreferences(.{ .accent = desktop.accent, .high_contrast = desktop.high_contrast }));
+    ///     _ = try context.setTheme(theme.withPreferences(.{ .accent = desktop.accent, .high_contrast = desktop.high_contrast, .text_scale = desktop.text_scale }));
     pub fn withPreferences(self: Theme, preferences: Preferences) Theme {
         var copy = self;
         if (copy.followed) |followed| copy.unfollow(followed);
         copy.followed = null;
         const from = copy;
         copy.follow(preferences);
-        copy.followed = .{ .from = from.palette, .to = copy.palette, .scrollbar_from = from.scrollbar, .scrollbar_to = copy.scrollbar };
+        copy.followed = .{ .from = from.palette, .to = copy.palette, .scrollbar_from = from.scrollbar, .scrollbar_to = copy.scrollbar, .font_from = from.font_size, .font_to = copy.font_size };
         return copy;
     }
     fn follow(self: *Theme, preferences: Preferences) void {
         if (preferences.accent) |accent| self.setAccent(accent & 0xffffff);
+        const scale = preferences.text_scale;
+        if (std.math.isFinite(scale) and scale > 0 and scale != 1) self.font_size = @min(256, self.font_size * std.math.clamp(scale, 0.5, 4));
         if (!preferences.high_contrast) return;
         const text = self.palette.text;
         self.palette.border = mix(self.palette.border, text, 0.45);
@@ -187,6 +202,7 @@ pub const Theme = struct {
             if (@field(self.palette, field.name) == @field(followed.to, field.name)) @field(self.palette, field.name) = @field(followed.from, field.name);
         }
         if (std.meta.eql(self.scrollbar, followed.scrollbar_to)) self.scrollbar = followed.scrollbar_from;
+        if (self.font_size == followed.font_to) self.font_size = followed.font_from;
     }
 
     pub fn light() Theme {
@@ -252,6 +268,11 @@ pub const Theme = struct {
             if (!std.math.isFinite(value) or value < least or value > 256) return error.InvalidThemeMetric;
         }
         if (self.metrics.indicator_size == 0 or self.metrics.thumb_size == 0 or self.metrics.track_width == 0) return error.InvalidThemeMetric;
+        if (!std.math.isFinite(self.font_size) or self.font_size < 1 or self.font_size > 256) return error.InvalidThemeMetric;
+    }
+    /// The font of text that sets none: the label font in `font_size`.
+    pub fn font(self: Theme) Font {
+        return .{ .size = self.font_size };
     }
 };
 
@@ -316,6 +337,19 @@ test "a theme follows the desktop again from what it was" {
     try std.testing.expectEqual(base.palette.focus, plain.palette.focus);
     try std.testing.expectEqual(base.scrollbar.thumb, plain.scrollbar.thumb);
     try std.testing.expectEqual(@as(u32, 0xfafafa), plain.palette.background);
+    // The text scale grows the font size once, and goes back.
+    const larger = base.withPreferences(.{ .text_scale = 1.5 });
+    try std.testing.expectEqual(@as(f32, 24), larger.font_size);
+    try std.testing.expectEqual(@as(f32, 24), larger.withPreferences(.{ .text_scale = 1.5 }).font_size);
+    try std.testing.expectEqual(@as(f32, 16), larger.withPreferences(.{}).font_size);
+    var sized = larger;
+    sized.font_size = 18;
+    try std.testing.expectEqual(@as(f32, 18), sized.withPreferences(.{}).font_size);
+    try std.testing.expectEqual(@as(f32, 64), base.withPreferences(.{ .text_scale = 9 }).font_size);
+    try std.testing.expectEqual(@as(f32, 16), base.withPreferences(.{ .text_scale = std.math.nan(f32) }).font_size);
+    var tiny = base;
+    tiny.font_size = 0;
+    try std.testing.expectError(error.InvalidThemeMetric, tiny.validate());
     // Without settings it is the theme as it was.
     try std.testing.expectEqualDeep(base.palette, base.withPreferences(.{}).palette);
 }

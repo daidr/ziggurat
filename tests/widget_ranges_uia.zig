@@ -13,6 +13,13 @@ fn check(hr: c.HRESULT) !void {
 fn expected(hr: c.HRESULT, actual: c.HRESULT) !void {
     try std.testing.expectEqual(hr, actual);
 }
+/// Names the property that differs, since a release CI log has no stack trace.
+fn same(comptime what: []const u8, want: anytype, got: @TypeOf(want)) !void {
+    if (want != got) {
+        std.debug.print("range UIA {s}: expected {any}, found {any}\n", .{ what, want, got });
+        return error.TestExpectedEqual;
+    }
+}
 fn paint(window: z.Window) void {
     _ = c.InvalidateRect(window.nativeHandle(), null, 0);
     _ = c.SendMessageW(window.nativeHandle(), c.WM_PAINT, 0, 0);
@@ -103,15 +110,15 @@ const Client = struct {
         var value: f64 = 0;
         var readonly: c.BOOL = 1;
         try check(slider.lpVtbl.*.get_CurrentMinimum.?(slider, &value));
-        try std.testing.expectEqual(@as(f64, 0), value);
+        try same("slider minimum", @as(f64, 0), value);
         try check(slider.lpVtbl.*.get_CurrentMaximum.?(slider, &value));
-        try std.testing.expectEqual(@as(f64, 100), value);
+        try same("slider maximum", @as(f64, 100), value);
         try check(slider.lpVtbl.*.get_CurrentSmallChange.?(slider, &value));
-        try std.testing.expectEqual(@as(f64, 5), value);
+        try same("slider small change", @as(f64, 5), value);
         try check(slider.lpVtbl.*.get_CurrentLargeChange.?(slider, &value));
-        try std.testing.expectEqual(@as(f64, 20), value);
+        try same("slider large change", @as(f64, 20), value);
         try check(slider.lpVtbl.*.get_CurrentIsReadOnly.?(slider, &readonly));
-        try std.testing.expectEqual(@as(c.BOOL, 0), readonly);
+        try same("slider read-only", @as(c.BOOL, 0), readonly);
         try expected(@bitCast(c.UIA_E_ELEMENTNOTENABLED), patterns[26].?.lpVtbl.*.SetValue.?(patterns[26].?, 50));
         try expected(c.E_INVALIDARG, low.lpVtbl.*.SetValue.?(low, 80));
         try check(slider.lpVtbl.*.SetValue.?(slider, 63));

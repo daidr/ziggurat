@@ -847,6 +847,11 @@ fn filled(commands: []const ui.commands.Command, color: u32) usize {
     return count;
 }
 
+/// Where the first shape in `color` is among the commands.
+fn shapeIndex(commands: []const ui.commands.Command, color: u32) ?usize {
+    for (commands, 0..) |command, index| if (command == .shape and command.shape.color.hex() == color) return index;
+    return null;
+}
 /// The radius of the first shape in `color`.
 fn radiusOf(commands: []const ui.commands.Command, color: u32) ?f32 {
     for (commands) |command| if (command == .shape and command.shape.color.hex() == color) return command.shape.radius;
@@ -888,6 +893,16 @@ test "a menu button's panel, and its submenus', wear the look its options give" 
     try h.render();
     commands = try paintMenus(&h, &context);
     try testing.expectEqual(@as(usize, 0), filled(commands, 0x1e1e2e));
+    // The panel and its submenus cast the shadows it gives, under them.
+    const cast = [_]view.BoxShadow{.{ .y = 18, .blur = 50, .color = .{ .r = 1, .g = 2, .b = 3, .a = 115 } }};
+    app.panel = .{ .background = 0x1e1e2e, .shadows = &cast };
+    try h.render();
+    commands = try paintMenus(&h, &context);
+    try testing.expectEqual(@as(usize, 2), filled(commands, 0x010203));
+    try testing.expect(shapeIndex(commands, 0x010203).? < shapeIndex(commands, 0x1e1e2e).?);
+    const too_many: [view.max_shadows + 1]view.BoxShadow = @splat(.{});
+    app.panel = .{ .shadows = &too_many };
+    try testing.expectError(error.InvalidValue, h.render());
     // A look that cannot be drawn is refused.
     app.panel = .{ .radius = -1 };
     try testing.expectError(error.InvalidValue, h.render());

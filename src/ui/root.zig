@@ -4563,8 +4563,11 @@ pub const Frame = struct {
             self.failure = self.failure orelse err;
         };
     }
+    /// A single-line label in the theme's font (`Theme.font_size`),
+    /// vertically centered and ellipsized.
     pub fn label(self: *Frame, bounds: Rect, text: []const u8, rgb: u32) void {
-        self.labelFont(bounds, text, rgb, .{});
+        const size = if (self.theme_override) |override| override.font_size else self.context.theme_value.font_size;
+        self.labelFont(bounds, text, rgb, .{ .size = size });
     }
     /// A single-line label in `font`, vertically centered and ellipsized
     /// like `label`.

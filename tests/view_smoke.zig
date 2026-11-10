@@ -20,6 +20,7 @@ extern fn g_object_ref(*anyopaque) *anyopaque;
 extern fn g_signal_emit_by_name(*anyopaque, [*:0]const u8, ...) void;
 const ScrollEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, state: c_uint, direction: c_int, device: ?*anyopaque, x_root: f64, y_root: f64, delta_x: f64, delta_y: f64, is_stop: c_uint };
 const MotionEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, is_hint: i16, device: ?*anyopaque, x_root: f64, y_root: f64 };
+const KeyEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, state: c_uint, keyval: c_uint, length: c_int, string: ?[*:0]u8, hardware_keycode: u16, group: u8, modifier_storage: c_uint };
 const ButtonEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, button: c_uint, device: ?*anyopaque, x_root: f64, y_root: f64 };
 
 const width = 360;
@@ -96,6 +97,20 @@ const Native = struct {
             native.* = .{ .kind = 31, .window = g_object_ref(gtk_widget_get_window(widget).?), .send_event = 1, .time = 0, .x = x, .y = y, .state = 0, .direction = 1, .device = null, .x_root = 0, .y_root = 0, .delta_x = 0, .delta_y = 0, .is_stop = 0 };
             var handled: c_int = 0;
             g_signal_emit_by_name(widget, "scroll-event", native, &handled);
+        }
+    }
+    /// A key press: `win` the Windows virtual key, `gtk` the GDK keyval.
+    fn key(window: z.Window, win: usize, gtk: u32) void {
+        if (builtin.os.tag == .windows) {
+            _ = c.SendMessageW(window.nativeHandle(), c.WM_KEYDOWN, win, 0);
+        } else {
+            const widget = gtk_bin_get_child(window.nativeHandle().?).?;
+            const event = gdk_event_new(8) orelse return;
+            defer gdk_event_free(event);
+            const native_event: *KeyEvent = @ptrCast(@alignCast(event));
+            native_event.* = .{ .kind = 8, .window = g_object_ref(gtk_widget_get_window(widget).?), .send_event = 1, .time = 0, .state = 0, .keyval = gtk, .length = 0, .string = null, .hardware_keycode = 0, .group = 0, .modifier_storage = 0 };
+            var handled: c_int = 0;
+            g_signal_emit_by_name(widget, "key-press-event", native_event, &handled);
         }
     }
     fn click(window: z.Window, bounds: view.Rect) void {
@@ -668,6 +683,56 @@ fn boundsOfText(host: *view.Host, kind: view.Kind, text: []const u8) ?view.Rect 
     return null;
 }
 
+/// Two buttons in a scroll view with room between them: one is out of
+/// sight while the other shows, and holds no control until it scrolls in.
+const Apart = struct {
+    model: view.ScrollModel = .{},
+    fn build(self: *Apart, v: *view.View) anyerror!void {
+        try v.column(.{ .grow = 1, .padding = .all(12) });
+        try v.scroll(&self.model, .{ .height = 200, .self_align = .stretch });
+        try v.column(.{});
+        _ = try v.button("Top", .{ .height = 30 });
+        try v.spacer(.{ .height = 400 });
+        _ = try v.button("Bottom", .{ .height = 30 });
+        try v.end();
+        try v.end();
+        try v.end();
+    }
+};
+
+fn idOfText(host: *view.Host, kind: view.Kind, text: []const u8) ?u64 {
+    for (host.view.nodes()) |*node| if (node.kind == kind and std.mem.eql(u8, node.text, text)) return node.id;
+    return null;
+}
+
+/// Tab moves on to a control scrolled out of sight: it scrolls into view
+/// and takes the focus once a frame holds it.
+fn runTabScroll(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Apart = .{};
+    var storage: view.Storage(16, 128) = .{};
+    var host = view.Host.init(&state, Apart.build, storage.buffers(), .{});
+    host.context.render_mode = .gdi;
+    const window = try app.createWindow(.{ .width = width, .height = height });
+    try host.attach(window);
+    try paint(&host, window);
+    Native.click(window, boundsOfText(&host, .button, "Top").?);
+    try std.testing.expectEqual(idOfText(&host, .button, "Top"), host.context.input_state.focused);
+    try std.testing.expect(!host.context.input_state.available(idOfText(&host, .button, "Bottom").?));
+    Native.key(window, 0x09, 0xff09);
+    var tries: usize = 0;
+    while (host.context.input_state.focused != idOfText(&host, .button, "Bottom") and tries < 4) : (tries += 1) {
+        try paint(&host, window);
+        try app.dispatch();
+    }
+    try std.testing.expectEqual(idOfText(&host, .button, "Bottom"), host.context.input_state.focused);
+    try std.testing.expect(state.model.offset.y > 0);
+    if (host.last_error) |err| return err;
+    _ = try window.destroy();
+    try app.dispatch();
+}
+
 fn runMenu(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
@@ -938,11 +1003,12 @@ pub fn main() !void {
     try runDamage(gpa.allocator());
     try runCache(gpa.allocator());
     try runZoom(gpa.allocator());
+    try runTabScroll(gpa.allocator());
     if (view.inspector.enabled) try runInspector(gpa.allocator());
     if (builtin.os.tag == .windows) {
         try @import("view_uia.zig").run(gpa.allocator());
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, video frames committed after paint, a zoomed window laid out and pressed in its own DIPs, a changed label redrawn alone, a card kept as one image, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, video frames committed after paint, a zoomed window laid out and pressed in its own DIPs, Tab scrolling a control out of sight into view, a changed label redrawn alone, a card kept as one image, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
 }
