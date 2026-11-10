@@ -9,6 +9,7 @@ const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const system = @import("ziggurat_system");
 const Watchdog = @import("watchdog.zig").Watchdog;
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 
 const windows = builtin.os.tag == .windows;
 const document =
@@ -96,9 +97,11 @@ const Probe = struct {
 };
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
+    // A page engine stuck in a native loop no longer runs App tasks.
+    try @import("watchdog.zig").exitAfter("forced appearance", 90);
     const store = if (!windows) try allocator.dupe(u8, "") else blk: {
         const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
         defer allocator.free(local);
