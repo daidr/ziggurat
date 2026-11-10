@@ -151,6 +151,17 @@ Linux 渲染器始终在 Cairo 图像面上绘制，着色器效果可以改由 
 
 `Context.setFrameStats(.{ .enabled = true, .slow_ns = 8 * std.time.ns_per_ms })` 为每帧计时：录制（build）、预检（preflight）与回放呈现（render）三段，以及命令数与是否走软件回放；`frameStats()` 返回帧数、慢帧数、平均、最近一帧与最慢一帧。超过阈值的帧通过 `std.log`（scope `ziggurat_frames`，info 级）输出一行。未显式设置时，attach 读取环境变量 `ZIGGURAT_FRAME_STATS`：`1`/`on`/`true`/`yes` 为 8 ms 阈值，数字为毫秒阈值，`all` 记录每帧，`0`/`off`/`false`/`no` 关闭。计时只读单调时钟，不分配内存。
 
+## 不按显示节奏呈现
+
+默认情况下，一帧之后的下一帧要等显示器下一次刷新（交换链的空位、Metal 层的显示同步或 GTK 的帧时钟），所以任何比一次刷新便宜的场景都显示为显示器的帧率，既测不出场景还剩多少余量，也比不出两个版本的差别。设置环境变量 `ZIGGURAT_UNCAPPED=1`（`true`/`on`/`yes` 同；启动时读一次，`ui.pacing.uncapped()`）后，上一帧呈现完下一帧就开始；只有被请求的帧来得更快，空闲的窗口仍然什么也不画。各平台的做法：
+
+- Direct3D：交换链用三个缓冲，DXGI 支持 `DXGI_FEATURE_PRESENT_ALLOW_TEARING` 时（窗口自己的交换链，不含 DirectComposition 合成的窗口）带允许撕裂标志，每帧以同步间隔 0 呈现，最大帧延迟为 2。
+- macOS：`CAMetalLayer.displaySyncEnabled` 关闭，drawable 在 GPU 画完后立即呈现；窗口服务器仍每次刷新合成一次窗口，显示最新一帧而不撕裂。
+- Linux：在每帧的时序里告诉 GTK 帧时钟一微秒的刷新间隔，下一帧在处理完其间到来的事件后立刻开始（会报告呈现时间的合成器仍会给它定节奏）；X11 上 GDK 绘制窗口所用 GLX drawable 的交换间隔设为 0（`GLX_EXT_swap_control`，否则 `GLX_MESA_swap_control`）。
+- 浏览器忽略它，`requestAnimationFrame` 决定帧节奏。
+
+同时开着帧统计时，每条帧日志末尾标出 `uncapped`，并且帧连续到来满一秒就记一行每秒多少帧、每帧多少毫秒；超过 250 ms 的间隔或单帧让计数重新开始（`pacing.Rate`）。游戏循环的固定步长与 `alpha` 在任何帧率下都保持（`zig build test-game`）。
+
 ## 验证
 
 - `zig build test-shader`：语言、诊断位置、静态步数上界、运行时错误、uniform 类型与分配失败。

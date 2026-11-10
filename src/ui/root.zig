@@ -147,6 +147,8 @@ pub const YuvFormat = @import("yuv.zig").YuvFormat;
 pub const YuvMatrix = @import("yuv.zig").YuvMatrix;
 pub const video_image = @import("video_image.zig");
 pub const frame_stats = @import("frame_stats.zig");
+/// Whether frames wait for the display (`ZIGGURAT_UNCAPPED`).
+pub const pacing = @import("pacing.zig");
 pub const FrameStats = frame_stats.Stats;
 pub const Canvas = canvas.Canvas;
 pub const gpu_resources = @import("gpu_resources.zig");
@@ -5322,6 +5324,7 @@ test {
     _ = @import("video_image.zig");
     _ = @import("yuv.zig");
     _ = frame_stats;
+    _ = pacing;
     _ = input;
     _ = layout;
     _ = grid;

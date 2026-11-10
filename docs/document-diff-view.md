@@ -147,7 +147,10 @@ either side shows (at least two digits), in a monospaced font at 0.85 of the
 text size, right-aligned on each row's first line in `Colors.line_number`.
 Changed rows tint their number cell with the row's color. `Parameters.line_numbers
 = false` removes the gutter and gives the columns their former width;
-`rowInfo` content rectangles always report where the text is.
+`rowInfo` content rectangles always report where the text is. An empty text
+has no lines, as `git diff` counts them: the side of a file added, deleted or
+emptied numbers none, in both the read-only and the editable views, even on
+the one line its Document's editor keeps.
 
 When the two Documents hold parts of files, as the hunks of a patch without
 the files, `Parameters.numbering` numbers each record as the line of its file

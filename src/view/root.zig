@@ -6529,7 +6529,10 @@ pub const View = struct {
                 index = node.end - 1;
                 continue;
             }
-            if (!node.isContainer() or node.child_count == 0) continue;
+            // A box with nothing in it, most of a tree, keeps the place its
+            // parent gave it; a scroll still sizes its content to its
+            // viewport.
+            if (!node.isContainer() or (node.child_count == 0 and node.kind != .scroll)) continue;
             const start = cursor;
             const items = try self.childItems(node, &cursor);
             if (self.buffers.rects.len < cursor) return error.OutputTooSmall;

@@ -4,10 +4,15 @@
 //! `1`/`on`/`true`/`yes` logs frames slower than 8 ms, a number logs frames
 //! slower than that many milliseconds, `all` logs every frame, and
 //! `0`/`off`/`false`/`no` keeps timing off. Timing reads a monotonic clock
-//! a few times per frame; it allocates nothing.
+//! a few times per frame; it allocates nothing. With `ZIGGURAT_UNCAPPED`
+//! set too (`pacing.zig`), frames wait for no refresh, so a frame's present
+//! is its own work: each frame logged says uncapped, and once a second the
+//! log tells how many frames came, the rate a scene draws at, which the
+//! display's no longer hides.
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
+const pacing = @import("pacing.zig");
 
 pub const env_name = "ZIGGURAT_FRAME_STATS";
 pub const default_slow_ns: u64 = 8 * std.time.ns_per_ms;
@@ -39,6 +44,8 @@ pub const Stats = struct {
     total_ns: u64 = 0,
     last: Sample = .{},
     worst: Sample = .{},
+    /// The frames counted for the rate while uncapped.
+    rate: pacing.Rate = .{},
     pub fn meanNs(self: Stats) u64 {
         return if (self.frames == 0) 0 else self.total_ns / self.frames;
     }
@@ -112,6 +119,9 @@ pub fn finish(stats: *Stats, options: Options, clock: *const Clock, commands: us
         .software = clock.software,
     };
     record(stats, options, sample);
+    if (pacing.uncapped()) if (stats.rate.count(start, end)) |rate| {
+        if (!builtin.is_test) log.info("{d:.0} frames a second, uncapped: {d:.2} ms a frame", .{ rate, 1000 / rate });
+    };
 }
 pub fn record(stats: *Stats, options: Options, sample: Sample) void {
     stats.frames +%= 1;
@@ -122,9 +132,9 @@ pub fn record(stats: *Stats, options: Options, sample: Sample) void {
     if (sample.total_ns < threshold) return;
     stats.slow +%= 1;
     if (builtin.is_test) return;
-    log.info("frame {d}: {d:.2} ms (build {d:.2}, preflight {d:.2}, render {d:.2}), {d} commands, {s}", .{
+    log.info("frame {d}: {d:.2} ms (build {d:.2}, preflight {d:.2}, render {d:.2}), {d} commands, {s}{s}", .{
         stats.frames,         ms(sample.total_ns), ms(sample.build_ns),                        ms(sample.preflight_ns),
-        ms(sample.render_ns), sample.commands,     if (sample.software) "software" else "gpu",
+        ms(sample.render_ns), sample.commands,     if (sample.software) "software" else "gpu", if (pacing.uncapped()) ", uncapped" else "",
     });
 }
 fn ms(ns: u64) f64 {

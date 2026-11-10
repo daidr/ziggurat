@@ -28,6 +28,10 @@ pub const Language = struct {
     /// Find the language of a file, as ".go" or "Makefile" (`forFile`).
     extensions: []const []const u8 = &.{},
     filenames: []const []const u8 = &.{},
+    /// The programs a script's #! line runs it with, as "python" or
+    /// "bash", without a version: `forText` finds the language of a file
+    /// its name does not tell by them.
+    interpreters: []const []const u8 = &.{},
     /// Starts a comment to the end of the line, as "//"; toggling comments
     /// uses it first, then `block_comment`.
     line_comment: []const u8 = "",
@@ -91,12 +95,12 @@ const js_words_spec = .{
 };
 const js_strings = [_]LexString{ cString("\""), cString("'"), .{ .open = "`", .close = "`", .escape = '\\', .multiline = true, .interp_open = "${", .interp_close = "}" } };
 const js_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c_block, .strings = &js_strings, .words = words(js_words_spec), .ident_chars = "$", .calls = true, .capital_types = true, .regexps = true, .decorator = '@', .operators = c_operators };
-pub const javascript = Language{ .name = "JavaScript", .extensions = &.{ ".js", ".mjs", ".cjs", ".jsx" }, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq_bt, .word_chars = "$", .tab_size = 2, .tokenizer = js_lexer.tokenizer() };
+pub const javascript = Language{ .name = "JavaScript", .extensions = &.{ ".js", ".mjs", ".cjs", ".jsx" }, .interpreters = &.{ "node", "nodejs" }, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq_bt, .word_chars = "$", .tab_size = 2, .tokenizer = js_lexer.tokenizer() };
 const ts_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c_block, .strings = &js_strings, .words = words(js_words_spec ++ .{
     .keyword, "abstract declare enum implements interface keyof namespace private protected public readonly type infer is satisfies override module",
     .type,    "any boolean never number object string symbol unknown void bigint",
 }), .ident_chars = "$", .calls = true, .capital_types = true, .regexps = true, .decorator = '@', .operators = c_operators };
-pub const typescript = Language{ .name = "TypeScript", .extensions = &.{ ".ts", ".mts", ".cts", ".tsx" }, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq_bt, .word_chars = "$", .tab_size = 2, .tokenizer = ts_lexer.tokenizer() };
+pub const typescript = Language{ .name = "TypeScript", .extensions = &.{ ".ts", ".mts", ".cts", ".tsx" }, .interpreters = &.{ "deno", "ts-node", "tsx" }, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq_bt, .word_chars = "$", .tab_size = 2, .tokenizer = ts_lexer.tokenizer() };
 
 // JSON.
 const json_lexer = lexers.Json{ .lexer = .{ .line_comments = &slash_comments, .block_comments = &c_block, .strings = &.{ cString("\""), cString("'") }, .words = words(.{ .constant, "true false null" }), .operators = ":" } };
@@ -130,7 +134,7 @@ const python_lexer = Lexer{ .line_comments = &hash_comments, .strings = &python_
     .type,     "int float str bytes bool list dict set tuple object type complex frozenset bytearray range Exception",
     .function, "print len open isinstance super self cls",
 }), .calls = true, .capital_types = true, .decorator = '@', .operators = c_operators };
-pub const python = Language{ .name = "Python", .extensions = &.{ ".py", ".pyi", ".pyw" }, .filenames = &.{ "SConstruct", "SConscript" }, .line_comment = "#", .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = python_lexer.tokenizer() };
+pub const python = Language{ .name = "Python", .extensions = &.{ ".py", ".pyi", ".pyw" }, .filenames = &.{ "SConstruct", "SConscript" }, .interpreters = &.{ "python", "pypy" }, .line_comment = "#", .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = python_lexer.tokenizer() };
 
 // Rust.
 const rust_lexer = Lexer{
@@ -187,7 +191,7 @@ const kotlin_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = 
     .constant, "true false null",
     .type,     "Any Boolean Byte Char Double Float Int Long Nothing Short String Unit",
 }), .calls = true, .capital_types = true, .decorator = '@', .operators = c_operators };
-pub const kotlin = Language{ .name = "Kotlin", .extensions = &.{ ".kt", ".kts" }, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = kotlin_lexer.tokenizer() };
+pub const kotlin = Language{ .name = "Kotlin", .extensions = &.{ ".kt", ".kts" }, .interpreters = &.{"kotlin"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = kotlin_lexer.tokenizer() };
 // Scala's interpolated strings first, as the lexer's state holds the index
 // of a string with interpolations in five bits.
 const scala_strings = blk: {
@@ -205,13 +209,13 @@ const scala_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &
     .type,     "Any AnyRef AnyVal Boolean Byte Char Double Float Int Long Nothing Null Short String Unit",
     .constant, "true false null None Some Nil",
 }), .calls = true, .capital_types = true, .decorator = '@', .operators = c_operators };
-pub const scala = Language{ .name = "Scala", .extensions = &.{ ".scala", ".sc", ".sbt" }, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = scala_lexer.tokenizer() };
+pub const scala = Language{ .name = "Scala", .extensions = &.{ ".scala", ".sc", ".sbt" }, .interpreters = &.{"scala"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = scala_lexer.tokenizer() };
 const swift_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c_block, .nest_comments = true, .strings = &.{ .{ .open = "\"\"\"", .close = "\"\"\"", .escape = '\\', .multiline = true }, cString("\"") }, .words = words(.{
     .keyword,  "associatedtype class deinit enum extension fileprivate func import init inout internal let open operator private precedencegroup protocol public rethrows static struct subscript typealias var break case catch continue default defer do else fallthrough for guard if in repeat return throw switch where while as is try await async throws some any self Self super actor nonisolated isolated mutating nonmutating override weak unowned lazy final required convenience",
     .constant, "true false nil",
     .type,     "Int Double Float String Bool Character Array Dictionary Set Optional Void",
 }), .calls = true, .capital_types = true, .decorator = '@', .directives = true, .operators = c_operators };
-pub const swift = Language{ .name = "Swift", .extensions = &.{".swift"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq, .tab_size = 4, .tokenizer = swift_lexer.tokenizer() };
+pub const swift = Language{ .name = "Swift", .extensions = &.{".swift"}, .interpreters = &.{"swift"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq, .tab_size = 4, .tokenizer = swift_lexer.tokenizer() };
 // Dart's interpolated strings first, then its raw ones, r'…'.
 const dart_strings = blk: {
     const quotes = [_][]const u8{ "\"\"\"", "'''", "\"", "'" };
@@ -227,7 +231,7 @@ const dart_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c
     .type,     "bool double dynamic int num void Never Null Object String List Map Set Iterable Future FutureOr Stream Function Record Symbol Type",
     .constant, "true false null",
 }), .ident_chars = "$", .calls = true, .capital_types = true, .decorator = '@', .operators = c_operators };
-pub const dart = Language{ .name = "Dart", .extensions = &.{".dart"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .word_chars = "$", .tab_size = 2, .tokenizer = dart_lexer.tokenizer() };
+pub const dart = Language{ .name = "Dart", .extensions = &.{".dart"}, .interpreters = &.{"dart"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .word_chars = "$", .tab_size = 2, .tokenizer = dart_lexer.tokenizer() };
 const csharp_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c_block, .strings = &.{
     .{ .open = "@\"", .close = "\"", .multiline = true },
     .{ .open = "$\"", .close = "\"", .escape = '\\', .interp_open = "{", .interp_close = "}" },
@@ -249,7 +253,7 @@ const shell_lexer = Lexer{ .line_comments = &hash_comments, .strings = &.{
     .keyword,  "if then else elif fi case esac for select while until do done in function time coproc return exit break continue local export declare readonly unset shift source alias eval exec set trap",
     .function, "echo printf cd pwd test read mkdir rm cp mv ls cat grep sed awk find xargs sudo chmod chown curl git go bun npm",
 }), .ident_chars = "-", .variables = true, .operators = "|&;<>=!*?" };
-pub const shell = Language{ .name = "Shell", .extensions = &.{ ".sh", ".bash", ".zsh", ".fish", ".ksh", ".command" }, .filenames = &.{ ".bashrc", ".zshrc", ".profile", ".bash_profile", "PKGBUILD", ".envrc" }, .line_comment = "#", .auto_close = &auto_dq_sq_bt, .tab_size = 2, .tokenizer = shell_lexer.tokenizer() };
+pub const shell = Language{ .name = "Shell", .extensions = &.{ ".sh", ".bash", ".zsh", ".fish", ".ksh", ".command" }, .filenames = &.{ ".bashrc", ".zshrc", ".profile", ".bash_profile", "PKGBUILD", ".envrc" }, .interpreters = &.{ "sh", "bash", "zsh", "ksh", "dash", "ash", "fish" }, .line_comment = "#", .auto_close = &auto_dq_sq_bt, .tab_size = 2, .tokenizer = shell_lexer.tokenizer() };
 const yaml_lexer = Lexer{ .line_comments = &hash_comments, .strings = &.{ cString("\""), .{ .open = "'", .close = "'" } }, .words = words(.{ .constant, "true false null yes no on off True False Null ~" }), .keys = true, .ident_chars = "-./", .operators = "|>-*&!?:" };
 pub const yaml = Language{ .name = "YAML", .extensions = &.{ ".yaml", ".yml" }, .filenames = &.{".clang-format"}, .line_comment = "#", .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = yaml_lexer.tokenizer() };
 const toml_lexer = lexers.Toml{ .lexer = .{ .line_comments = &.{ "#", ";" }, .strings = &.{
@@ -296,7 +300,7 @@ const r_lexer = Lexer{ .line_comments = &hash_comments, .strings = &r_strings, .
     .constant, "TRUE FALSE NULL NA NA_integer_ NA_real_ NA_complex_ NA_character_ Inf NaN",
     .function, "library require source print cat paste paste0 stop warning message invisible",
 }), .ident_chars = ".", .calls = true, .operators = "+-*/^=&|!<>~?:$@\\" };
-pub const r = Language{ .name = "R", .extensions = &.{".r"}, .filenames = &.{".Rprofile"}, .line_comment = "#", .auto_close = &auto_dq_sq_bt, .word_chars = ".", .tab_size = 2, .tokenizer = r_lexer.tokenizer() };
+pub const r = Language{ .name = "R", .extensions = &.{".r"}, .filenames = &.{".Rprofile"}, .interpreters = &.{"Rscript"}, .line_comment = "#", .auto_close = &auto_dq_sq_bt, .word_chars = ".", .tab_size = 2, .tokenizer = r_lexer.tokenizer() };
 
 // Ruby, Lua, PHP.
 const ruby_lexer = Lexer{ .line_comments = &hash_comments, .strings = &.{
@@ -306,12 +310,12 @@ const ruby_lexer = Lexer{ .line_comments = &hash_comments, .strings = &.{
     .keyword,  "alias and begin break case class def defined? do else elsif end ensure for if in module next not or redo rescue retry return self super then undef unless until when while yield require require_relative attr_accessor attr_reader attr_writer private protected public",
     .constant, "true false nil",
 }), .ident_chars = "?!", .calls = true, .capital_types = true, .operators = c_operators };
-pub const ruby = Language{ .name = "Ruby", .extensions = &.{ ".rb", ".rake", ".gemspec" }, .filenames = &.{ "Gemfile", "Rakefile", "Podfile", "Fastfile" }, .line_comment = "#", .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = ruby_lexer.tokenizer() };
+pub const ruby = Language{ .name = "Ruby", .extensions = &.{ ".rb", ".rake", ".gemspec", ".rbs" }, .filenames = &.{ "Gemfile", "Rakefile", "Podfile", "Fastfile" }, .interpreters = &.{ "ruby", "jruby", "truffleruby" }, .line_comment = "#", .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = ruby_lexer.tokenizer() };
 const lua_lexer = Lexer{ .line_comments = &.{"--"}, .block_comments = &.{.{ "--[[", "]]" }}, .strings = &.{ .{ .open = "[[", .close = "]]", .multiline = true }, cString("\""), cString("'") }, .words = words(.{
     .keyword,  "and break do else elseif end for function goto if in local not or repeat return then until while",
     .constant, "true false nil",
 }), .calls = true, .operators = "+-*/%^#=<>~.:" };
-pub const lua = Language{ .name = "Lua", .extensions = &.{".lua"}, .line_comment = "--", .block_comment = .{ "--[[", "]]" }, .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = lua_lexer.tokenizer() };
+pub const lua = Language{ .name = "Lua", .extensions = &.{".lua"}, .interpreters = &.{ "lua", "luajit" }, .line_comment = "--", .block_comment = .{ "--[[", "]]" }, .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = lua_lexer.tokenizer() };
 const php_lexer = Lexer{ .line_comments = &.{ "//", "#" }, .block_comments = &c_block, .strings = &.{
     .{ .open = "\"", .close = "\"", .escape = '\\', .multiline = true, .dollar = true },
     .{ .open = "'", .close = "'", .escape = '\\', .multiline = true },
@@ -319,14 +323,22 @@ const php_lexer = Lexer{ .line_comments = &.{ "//", "#" }, .block_comments = &c_
     .keyword,  "abstract and array as break callable case catch class clone const continue declare default do echo else elseif empty enddeclare endfor endforeach endif endswitch endwhile extends final finally fn for foreach function global goto if implements include include_once instanceof insteadof interface isset list match namespace new or print private protected public readonly require require_once return static switch throw trait try unset use var while xor yield",
     .constant, "true false null TRUE FALSE NULL",
 }), .calls = true, .capital_types = true, .variables = true, .operators = c_operators };
-pub const php = Language{ .name = "PHP", .extensions = &.{".php"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = php_lexer.tokenizer() };
+pub const php = Language{ .name = "PHP", .extensions = &.{".php"}, .interpreters = &.{"php"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = php_lexer.tokenizer() };
 
 // Styles and markup.
 pub const css = Language{ .name = "CSS", .extensions = &.{ ".css", ".scss", ".less", ".sass", ".pcss" }, .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .word_chars = "-", .tab_size = 2, .tokenizer = lexers.css };
 const html_brackets = [_]BracketPair{ .{ .open = "<", .close = ">" }, .{ .open = "(", .close = ")" }, .{ .open = "[", .close = "]" }, .{ .open = "{", .close = "}" } };
 /// HTML's tokenizer highlights the scripts and styles inside it.
 const html_markup = lexers.Markup{ .html = true, .script = js_lexer.tokenizer(), .style = lexers.css };
-pub const html = Language{ .name = "HTML", .extensions = &.{ ".html", ".htm", ".xhtml", ".vue", ".svelte" }, .block_comment = .{ "<!--", "-->" }, .brackets = &html_brackets, .auto_close = &auto_dq_sq, .word_chars = "-", .tab_size = 2, .tokenizer = html_markup.tokenizer() };
+pub const html = Language{ .name = "HTML", .extensions = &.{ ".html", ".htm", ".xhtml", ".vue" }, .block_comment = .{ "<!--", "-->" }, .brackets = &html_brackets, .auto_close = &auto_dq_sq, .word_chars = "-", .tab_size = 2, .tokenizer = html_markup.tokenizer() };
+/// ERB, as Rails' views and generators' .tt templates: HTML with Ruby in
+/// <% %>, <%= %> and <%- -%>, comments in <%# %>, and <%% a literal <%.
+const erb_template = lexers.Template{ .host = html_markup.tokenizer(), .code = ruby_lexer.tokenizer(), .tags = &.{ .{ .open = "<%#", .close = "%>", .comment = true }, .{ .open = "<%", .close = "%>" } }, .marks = "=-", .trims = "-", .escape = "<%%" };
+pub const erb = Language{ .name = "ERB", .extensions = &.{ ".erb", ".rhtml", ".tt" }, .block_comment = .{ "<!--", "-->" }, .brackets = &html_brackets, .auto_close = &auto_dq_sq, .word_chars = "-", .tab_size = 2, .tokenizer = erb_template.tokenizer() };
+/// Svelte: HTML whose {expressions} and {#blocks} lex as JavaScript, and
+/// whose <script lang="ts"> lexes as TypeScript.
+const svelte_markup = lexers.Markup{ .html = true, .script = js_lexer.tokenizer(), .style = lexers.css, .braces = true, .ts = ts_lexer.tokenizer() };
+pub const svelte = Language{ .name = "Svelte", .extensions = &.{".svelte"}, .block_comment = .{ "<!--", "-->" }, .brackets = &html_brackets, .auto_close = &auto_dq_sq, .word_chars = "-", .tab_size = 2, .tokenizer = svelte_markup.tokenizer() };
 const xml_markup = lexers.Markup{};
 pub const xml = Language{ .name = "XML", .extensions = &.{ ".xml", ".svg", ".plist", ".xsd", ".xsl", ".rss", ".atom", ".csproj", ".storyboard", ".xib" }, .block_comment = .{ "<!--", "-->" }, .brackets = &.{.{ .open = "<", .close = ">" }}, .auto_close = &auto_dq_sq, .word_chars = "-:", .tab_size = 2, .tokenizer = xml_markup.tokenizer() };
 pub const markdown = Language{ .name = "Markdown", .extensions = &.{ ".md", ".markdown", ".mdx", ".mkd" }, .filenames = &.{ "README", "CHANGELOG" }, .block_comment = .{ "<!--", "-->" }, .auto_close = &(c_brackets ++ [_]BracketPair{.{ .open = "`", .close = "`", .not_in = &not_in_text }}), .tab_size = 2, .tokenizer = lexers.markdown };
@@ -336,7 +348,7 @@ pub const diff = Language{ .name = "Diff", .extensions = &.{ ".diff", ".patch", 
 const dockerfile_lexer = Lexer{ .line_comments = &hash_comments, .strings = &.{ .{ .open = "\"", .close = "\"", .escape = '\\', .dollar = true }, .{ .open = "'", .close = "'" } }, .words = words(.{ .keyword, "FROM AS RUN CMD LABEL MAINTAINER EXPOSE ENV ADD COPY ENTRYPOINT VOLUME USER WORKDIR ARG ONBUILD STOPSIGNAL HEALTHCHECK SHELL" }), .variables = true, .ident_chars = "-", .operators = "=&|;<>" };
 pub const dockerfile = Language{ .name = "Dockerfile", .extensions = &.{".dockerfile"}, .filenames = &.{ "Dockerfile", "Containerfile" }, .line_comment = "#", .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = dockerfile_lexer.tokenizer() };
 const makefile_lexer = Lexer{ .line_comments = &hash_comments, .strings = &.{ .{ .open = "\"", .close = "\"", .escape = '\\', .dollar = true }, .{ .open = "'", .close = "'" } }, .words = words(.{ .keyword, "ifeq ifneq ifdef ifndef else endif include define endef export override .PHONY" }), .variables = true, .keys = true, .ident_chars = "-./", .operators = "=:?+!@" };
-pub const makefile = Language{ .name = "Makefile", .extensions = &.{ ".mk", ".mak" }, .filenames = &.{ "Makefile", "makefile", "GNUmakefile" }, .line_comment = "#", .auto_close = &auto_dq_sq, .tab_size = 4, .hard_tabs = true, .tokenizer = makefile_lexer.tokenizer() };
+pub const makefile = Language{ .name = "Makefile", .extensions = &.{ ".mk", ".mak" }, .filenames = &.{ "Makefile", "makefile", "GNUmakefile" }, .interpreters = &.{"make"}, .line_comment = "#", .auto_close = &auto_dq_sq, .tab_size = 4, .hard_tabs = true, .tokenizer = makefile_lexer.tokenizer() };
 const protobuf_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c_block, .strings = &.{ cString("\""), cString("'") }, .words = words(.{
     .keyword,  "syntax package import option message enum service rpc returns repeated optional required oneof map reserved extend extensions to max stream public weak",
     .type,     "double float int32 int64 uint32 uint64 sint32 sint64 fixed32 fixed64 sfixed32 sfixed64 bool string bytes",
@@ -370,10 +382,29 @@ const nix_lexer = Lexer{ .line_comments = &hash_comments, .block_comments = &c_b
     .constant, "true false null builtins",
     .function, "import abort throw derivation toString map removeAttrs baseNameOf dirOf isNull fetchTarball fetchGit",
 }), .ident_chars = "-", .assign_keys = true, .operators = "+-*/=<>!&|?:@" };
+// Jinja, as Ansible's .j2 templates: expressions in {{ }}, statements in
+// {% %} with their - and + whitespace control, and comments in {# #}. Its
+// text is plain: a template's name, as nginx.conf.j2, says what it makes,
+// but the tags may cut its syntax anywhere.
+const jinja_code = Lexer{ .strings = &.{ cString("\""), cString("'") }, .words = words(.{
+    .keyword,  "for in if elif else endif endfor set endset macro endmacro call endcall block endblock extends include import from as with endwith without context filter endfilter raw endraw autoescape endautoescape trans endtrans pluralize do continue break and or not is recursive scoped required ignore missing",
+    .constant, "true false none True False None",
+}), .calls = true, .operators = "+-*/%=<>!|~:?" };
+const jinja_template = lexers.Template{ .code = jinja_code.tokenizer(), .tags = &.{ .{ .open = "{#", .close = "#}", .comment = true }, .{ .open = "{{", .close = "}}" }, .{ .open = "{%", .close = "%}" } }, .marks = "-+", .trims = "-+" };
+pub const jinja = Language{ .name = "Jinja", .extensions = &.{ ".j2", ".jinja", ".jinja2" }, .block_comment = .{ "{#", "#}" }, .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = jinja_template.tokenizer() };
+
+// HCL, as Terraform's.
+const hcl_lexer = lexers.Hcl{ .lexer = .{ .line_comments = &.{ "#", "//" }, .block_comments = &c_block, .strings = &.{.{ .open = "\"", .close = "\"", .escape = '\\', .interp_open = "${", .interp_close = "}" }}, .words = words(.{
+    .keyword,  "for in if else endif endfor resource data variable output module provider locals terraform",
+    .type,     "string number bool list map set object tuple any",
+    .constant, "true false null",
+}), .ident_chars = "-", .assign_keys = true, .calls = true, .operators = "+-*/%=<>!&|?:" } };
+pub const hcl = Language{ .name = "HCL", .extensions = &.{ ".hcl", ".tf", ".tfvars" }, .line_comment = "#", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq, .word_chars = "-", .tab_size = 2, .tokenizer = hcl_lexer.tokenizer() };
+
 pub const nix = Language{ .name = "Nix", .extensions = &.{".nix"}, .line_comment = "#", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq, .word_chars = "-", .tab_size = 2, .tokenizer = nix_lexer.tokenizer() };
 
 /// Every known language, in the order lookups try them.
-pub const all = [_]*const Language{ &go, &javascript, &typescript, &json, &python, &rust, &c, &cpp, &java, &kotlin, &scala, &swift, &dart, &csharp, &shell, &yaml, &toml, &sql, &r, &ruby, &lua, &php, &css, &html, &xml, &markdown, &diff, &dockerfile, &makefile, &protobuf, &graphql, &zig, &nix };
+pub const all = [_]*const Language{ &go, &javascript, &typescript, &json, &python, &rust, &c, &cpp, &java, &kotlin, &scala, &swift, &dart, &csharp, &shell, &yaml, &toml, &sql, &r, &ruby, &lua, &php, &css, &html, &erb, &svelte, &xml, &markdown, &diff, &dockerfile, &makefile, &protobuf, &graphql, &zig, &nix, &jinja, &hcl };
 
 /// The language of a file by its name, as "main.go" or "Makefile", or null.
 /// A full file name match wins over an extension.
@@ -388,6 +419,39 @@ pub fn forFile(filename: []const u8) ?*const Language {
     const extension = base[dot..];
     for (all) |language| for (language.extensions) |candidate| if (std.ascii.eqlIgnoreCase(candidate, extension)) return language;
     return null;
+}
+
+/// The language of a file by its name, as `forFile`, or else by the
+/// interpreter its text's #! line runs, as "#!/usr/bin/env ruby" or
+/// "#!/bin/bash -e"; null when neither tells.
+pub fn forText(filename: []const u8, text: []const u8) ?*const Language {
+    if (forFile(filename)) |language| return language;
+    const name = shebangInterpreter(text);
+    if (name.len == 0) return null;
+    for (all) |language| for (language.interpreters) |interpreter| if (std.mem.eql(u8, interpreter, name)) return language;
+    return null;
+}
+
+/// The program the #! line opening `text` runs, without its directory or
+/// version: "python" for "#!/usr/bin/python3.12", and "ruby" for
+/// "#!/usr/bin/env -S ruby -w", skipping env's options and variables.
+pub fn shebangInterpreter(text: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, text, "#!")) return "";
+    const line = text[2 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+    var fields = std.mem.tokenizeAny(u8, line, " \t\r");
+    var name = baseName(fields.next() orelse return "");
+    if (std.mem.eql(u8, name, "env")) {
+        name = "";
+        while (fields.next()) |field| if (field[0] != '-' and std.mem.indexOfScalar(u8, field, '=') == null) {
+            name = baseName(field);
+            break;
+        };
+    }
+    return std.mem.trimEnd(u8, name, "0123456789.");
+}
+fn baseName(path: []const u8) []const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[slash + 1 ..];
 }
 
 /// The language known by a name, as "Go", "TypeScript" or "tsx", ignoring
@@ -429,6 +493,8 @@ fn alias(name: []const u8) []const u8 {
         .{ "toml", &.{ "ini", "cfg", "conf" } },
         .{ "protobuf", &.{"proto"} },
         .{ "css", &.{ "scss", "less" } },
+        .{ "erb", &.{"eruby"} },
+        .{ "hcl", &.{"terraform"} },
     };
     for (table) |entry| for (entry[1]) |other| if (std.mem.eql(u8, other, name)) return entry[0];
     return name;

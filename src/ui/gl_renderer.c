@@ -66,6 +66,10 @@
 #include <gtk/gtk.h>
 #include <epoxy/egl.h>
 #include <epoxy/gl.h>
+#ifdef GDK_WINDOWING_X11
+#include <gdk/gdkx.h>
+#include <epoxy/glx.h>
+#endif
 #include <pango/pangocairo.h>
 #include <dlfcn.h>
 #endif
@@ -79,6 +83,7 @@
 #include "coverage_resource.h"
 #include "layer_resource.h"
 #include "gpu_sweep.h"
+#include "pacing.h"
 
 typedef struct ZlInstance {float rect[4],clip[4],color[4],params[4],uv[4];} ZlInstance;
 typedef struct ZlBrush {float head[4],ab[4],offsets[16],colors[16][4];} ZlBrush;
@@ -1965,6 +1970,28 @@ int zglr_end(void *p,cairo_t *cr){
     return 0;
 }
 #else
+/* Uncapped (ZIGGURAT_UNCAPPED), sets the swap interval of the GLX drawable
+   GDK paints the window into to 0, so that its swaps wait for no vertical
+   blank: called after gdk_cairo_draw_from_gl, with the window's paint
+   context current. GDK sets 1 there on an X11 display without a
+   compositor, which holds frames to the display's refreshes, and 0 under
+   one, which paces the window itself; its EGL, on Wayland, swaps with 0
+   already. GLX_EXT_swap_control, else GLX_MESA_swap_control
+   (GLX_SGI_swap_control takes no 0); nothing without either. GDK sets its
+   own interval again only when a compositor starts or stops, so a call
+   each paint keeps 0, which costs nothing once set. */
+static void unsync_glx_swaps(GdkWindow *window){
+#ifdef GDK_WINDOWING_X11
+    if(!window||!GDK_IS_X11_DISPLAY(gdk_window_get_display(window)))return;
+    Display *display=glXGetCurrentDisplay();GLXContext context=glXGetCurrentContext();GLXDrawable drawable=glXGetCurrentDrawable();
+    if(!display||!context||!drawable)return;
+    int screen=0;if(glXQueryContext(display,context,GLX_SCREEN,&screen)!=Success)return;
+    if(epoxy_has_glx_extension(display,screen,"GLX_EXT_swap_control"))glXSwapIntervalEXT(display,drawable,0);
+    else if(epoxy_has_glx_extension(display,screen,"GLX_MESA_swap_control"))glXSwapIntervalMESA(0);
+#else
+    (void)window;
+#endif
+}
 int zglr_end(void *p,cairo_t *cr){
     ZlRenderer *s=p;if(!s->drawing||s->offscreen)return 1;
     s->drawing=0;
@@ -1981,6 +2008,7 @@ int zglr_end(void *p,cairo_t *cr){
         if(s->transparent){cairo_set_operator(cr,CAIRO_OPERATOR_CLEAR);cairo_paint(cr);}
         cairo_restore(cr);
         gdk_cairo_draw_from_gl(cr,s->gdk_window,(int)s->back.texture,GL_TEXTURE,(int)s->scale,0,0,(int)s->width,(int)s->height);
+        if(zpacing_uncapped())unsync_glx_swaps(s->gdk_window);
         s->stats.presents++;
         return cairo_status(cr)==CAIRO_STATUS_SUCCESS?0:2;
     }

@@ -51,7 +51,53 @@ fn decode(value: f64) f64 {
 }
 fn encode(value: f64) f64 {
     if (value == 1) return 1;
-    return if (value <= 0.0031308) value * 12.92 else 1.055 * std.math.pow(f64, value, 1.0 / 2.4) - 0.055;
+    if (value <= 0.0031308) return value * 12.92;
+    const table = srgbTable() orelse return encodeExact(value);
+    if (value >= 1) return table[srgb_steps];
+    // Above 0.0031308 and below 1.
+    const x = value * srgb_steps;
+    const i: usize = @intFromFloat(x);
+    const a: f64 = table[i];
+    const b: f64 = table[i + 1];
+    return a + (b - a) * (x - @as(f64, @floatFromInt(i)));
+}
+fn encodeExact(value: f64) f64 {
+    return 1.055 * std.math.pow(f64, value, 1.0 / 2.4) - 0.055;
+}
+
+/// The resolution of the table `encode` reads, 16 bits of linear light.
+const srgb_steps = 1 << 16;
+/// `encodeExact(i / srgb_steps)`, built the first time a mix needs it: a
+/// gradient mixed in linear light or Oklab encodes three channels a pixel,
+/// and `pow` costs more than the rest of the pixel. It lies in zeroed
+/// memory that an app drawing no such gradient never touches. Between two
+/// entries `encode` is within 0.0002 of 255 of `encodeExact`.
+var srgb_table: [srgb_steps + 1]f32 = undefined;
+/// 0 while the table is not built, 1 while a thread builds it, 2 once built.
+var srgb_state = std.atomic.Value(u8).init(0);
+
+/// The table, or null while another thread builds it, which then encodes
+/// exactly rather than wait.
+fn srgbTable() ?*const [srgb_steps + 1]f32 {
+    switch (srgb_state.load(.acquire)) {
+        2 => return &srgb_table,
+        1 => return null,
+        else => {},
+    }
+    if (srgb_state.cmpxchgStrong(0, 1, .acquire, .monotonic) != null) return if (srgb_state.load(.acquire) == 2) &srgb_table else null;
+    for (&srgb_table, 0..) |*entry, i| entry.* = @floatCast(if (i == 0) 0 else encodeExact(@as(f64, @floatFromInt(i)) / srgb_steps));
+    srgb_state.store(2, .release);
+    return &srgb_table;
+}
+
+test "the sRGB table encodes as the curve does" {
+    var worst: f64 = 0;
+    var value: f64 = 0.0031309;
+    while (value < 1) : (value += 0.0000371) worst = @max(worst, @abs(encode(value) - encodeExact(value)));
+    try std.testing.expect(worst * 255 < 0.0002);
+    try std.testing.expectEqual(@as(f64, 1), encode(1));
+    try std.testing.expectApproxEqAbs(@as(f64, 1), encode(1.5), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.01292), encode(0.001), 1e-12);
 }
 fn labFromLinear(rgb: [3]f64) [3]f64 {
     const l = std.math.cbrt(0.4122214708 * rgb[0] + 0.5363325363 * rgb[1] + 0.0514459929 * rgb[2]);
