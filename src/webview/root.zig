@@ -532,7 +532,8 @@ pub const AuthHandler = struct {
     context: *anyopaque,
     /// Synchronous, on the App owner thread while the load waits: the
     /// credentials to sign in with, or null to go without, which shows the
-    /// server's refusal (its 401 or 407 page). A server that refuses them
+    /// server's refusal (its 401 or 407 page) on WebKit; WebView2 does not
+    /// render that page, the load ends failed instead. A server that refuses them
     /// asks again; the engine keeps those it accepts for the session, for
     /// that server and realm, so this is not asked for every request. To ask
     /// the user, return null, prompt, and reload once there is an answer.
@@ -2540,7 +2541,9 @@ pub const View = struct {
         var password: [http_auth.limits.credential_bytes + 1:0]u16 = undefined;
         if (!wideCredential(&user, credentials.username) or !wideCredential(&password, credentials.password)) return;
         defer std.crypto.secureZero(u16, &password);
-        _ = zwv_auth_answer(call, &user, &password);
+        // An answer the engine refused leaves the sign-in cancelled.
+        const hr = zwv_auth_answer(call, &user, &password);
+        if (hr < 0) self.last_hresult = hr;
     }
     fn wideCredential(out: *[http_auth.limits.credential_bytes + 1:0]u16, text: []const u8) bool {
         if (text.len > http_auth.limits.credential_bytes) return false;

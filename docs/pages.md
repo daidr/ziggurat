@@ -252,11 +252,11 @@ frame 文档导航、弹窗、下载、权限仍默认拒绝。资源入口额�
 
 ## HTTP 登录与证书错误
 
-`Options.http_auth` 回答远程页面及其加载内容遇到的 HTTP 认证质询（Basic、Digest、NTLM、Negotiate），质询可以来自服务器，也可以来自代理。处理器在 App 所有者线程上同步运行，加载会等它返回。`AuthChallenge` 包含 host、port、realm、小写 scheme，以及是否由代理提出。WebView2 不区分代理，所以 Windows 上 `proxy` 恒为 false，此时 host 就是代理的 host。处理器返回 `Credentials` 就用它登录；返回 null 表示不带凭据继续，页面会看到服务器的拒绝（401 或 407 页）。服务器拒绝凭据时会再次质询。引擎在本会话内按服务器和 realm 记住它接受的凭据，所以不会每个请求都询问一次。凭据只借用到处理器返回，原生层复制后，Zig 侧会清零密码缓冲区；长于 1024 字节或含 NUL 的凭据会被拒绝，并按不带凭据处理。没有处理器时，每个质询都会被取消，两端都不会显示引擎自己的登录框。客户端证书仍然一律取消。
+`Options.http_auth` 回答远程页面及其加载内容遇到的 HTTP 认证质询（Basic、Digest、NTLM、Negotiate），质询可以来自服务器，也可以来自代理。处理器在 App 所有者线程上同步运行，加载会等它返回。`AuthChallenge` 包含 host、port、realm、小写 scheme，以及是否由代理提出。WebView2 不区分代理，所以 Windows 上 `proxy` 恒为 false，此时 host 就是代理的 host。处理器返回 `Credentials` 就用它登录；返回 null 表示不带凭据继续：WebKit 上页面会看到服务器的拒绝（401 或 407 页）；WebView2 取消质询后不渲染服务器的拒绝页，这次加载以失败结束，页面停在空白页。服务器拒绝凭据时会再次质询。引擎在本会话内按服务器和 realm 记住它接受的凭据，所以不会每个请求都询问一次。凭据只借用到处理器返回，原生层复制后，Zig 侧会清零密码缓冲区；长于 1024 字节或含 NUL 的凭据会被拒绝，并按不带凭据处理。没有处理器时，每个质询都会被取消，两端都不会显示引擎自己的登录框。客户端证书仍然一律取消。
 
 `Options.certificate_errors` 决定无法验证的服务器证书。`CertificateError` 包含正在加载的 URI、其中的 host、引擎给出的原因，以及 DER 编码的证书。处理器返回 true 时继续加载；没有处理器或返回 false 时，加载失败。只应放行预期的那张证书（比较 DER 或其哈希），不要按 host 一律放行，因为中间任何人都能出示一张证书。Windows 来自 `ICoreWebView2_14` 的 `ServerCertificateErrorDetected`，覆盖页面及其子资源，放行后在浏览器进程结束前对该 host 一直有效。Windows Profile owner 自己的回环证书仍按原规则放行，其余证书交给处理器。Linux 来自 `load-failed-with-tls-errors`，WebKitGTK 只报告主文档：子资源遇到这样的服务器会直接失败，不会询问。放行后调用 `webkit_web_context_allow_tls_certificate_for_host`，在 View 的 web context 结束前对该 host 有效，等失败的加载结束后重新导航到同一 URI（仍需该来源的导航授权）；同一页面连续重试最多三次。两项都只对远程页面生效。
 
-`smoke-webview-http-auth` 由 `tests/http_auth_host.py` 启动两个回环服务器：一个 HTTP 服务器按两个 realm 要求 Basic 认证，一个 HTTPS 服务器出示无人信任的公开测试证书。smoke 依次检查：用凭据登录并看到欢迎页；另一个 realm 返回 null，看到服务器的拒绝页；第一次拒绝证书时加载失败；第二次按 DER 放行后页面加载成功。Linux（WebKitGTK 2.52.6，xvfb）本地通过，Windows 在 CI 的 WebView2 任务中运行。
+`smoke-webview-http-auth` 由 `tests/http_auth_host.py` 启动两个回环服务器：一个 HTTP 服务器按两个 realm 要求 Basic 认证，一个 HTTPS 服务器出示无人信任的公开测试证书。smoke 依次检查：用凭据登录并看到欢迎页；另一个 realm 返回 null，看到服务器的拒绝页（Windows 上看到加载失败）；第一次拒绝证书时加载失败；第二次按 DER 放行后页面加载成功。Linux（WebKitGTK 2.52.6，xvfb）本地通过，Windows 在 CI 的 WebView2 任务中运行。
 
 ## 页面上下文菜单
 
@@ -388,7 +388,7 @@ Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须�
 
 `Options.untrusted = true` 把页面当作别人的页面，例如从自定义 scheme 显示插件界面：无论来源的授权（`OriginGrant.ipc`、`LocalSite.scheme_ipc`、普通 html）如何，页面的消息都不会成为 `Event.message`；`post` 仍能把消息送达页面。页面通往应用的通道是它向自己 scheme 发出的请求：`on_resource` 收到的 `ResourceRequest.page` 是发出请求的文档的 `PageId`，处理器据此判断是哪一个页面、哪一代文档在请求，再用 `postFor` 回复。权限、下载、新窗口和跨来源导航仍按各自的显式策略处理，默认全部拒绝。
 
-`PolicyRequest.user_gesture` 说明导航或新窗口请求是否由用户手势发起：点击链接，或在点击、按键的处理函数里设置 `location.href`、调用 `window.open()`；页面脚本自己（定时器、加载时）发起的为 false。Windows 来自事件参数的 `IsUserInitiated`；Linux 来自 `webkit_navigation_action_is_user_gesture`，`window.open()` 经 `create` 信号报告。WebKitGTK 自己会先拒绝没有手势的 `window.open()`，所以 Linux 只会报告有手势的那些；WebKit 把宿主 `evaluateJS` 运行的脚本视为用户手势，WebView2 的 ExecuteScript 不是。frame 导航不提供该信息，为 null。Linux 现在也接受 `policy.new_window = .notify`。
+`PolicyRequest.user_gesture` 说明导航或新窗口请求是否由用户手势发起：点击链接，或在点击、按键的处理函数里设置 `location.href`、调用 `window.open()`；页面脚本自己（定时器、加载时）发起的为 false。Windows 来自事件参数的 `IsUserInitiated`；Linux 来自 `webkit_navigation_action_is_user_gesture`，`window.open()` 经 `create` 信号报告。WebKitGTK 自己会先拒绝没有手势的 `window.open()`，所以 Linux 只会报告有手势的那些；WebKit 和 WebView2 都把宿主 `evaluateJS` 运行的脚本视为用户手势。frame 导航不提供该信息，为 null。Linux 现在也接受 `policy.new_window = .notify`。
 
 `Options.autoplay = .allow` 让页面在用户点击或输入之前就能播放有声媒体，隐藏窗口里的页面也一样：默认情况下没有手势时，有声的 `<audio>`/`<video>` 的 `play()` 以 `NotAllowedError` 拒绝。Linux 在每次主 frame 导航的 website policies 中设置 `WEBKIT_AUTOPLAY_ALLOW`。Windows 以 `--autoplay-policy=no-user-gesture-required` 启动浏览器：这是 WebView2 环境的参数，同一 user data folder 的所有 View 共享环境并且必须一致，否则后创建的 View 失败；Windows Profile owner 暂不接受这个选项（`UnsupportedCapability`）。
 
