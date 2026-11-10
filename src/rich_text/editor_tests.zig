@@ -613,7 +613,6 @@ test "list markers number by level" {
 }
 
 test "font families of runs come from the first family of a CSS list" {
-    const view = @import("ziggurat_view");
     var font: view.Font = .{};
     ed.applyFamily(&font, "'Courier New', monospace");
     try testing.expect(font.family != 0 and !font.monospace);
@@ -904,4 +903,175 @@ test "the room the application asks for above a paragraph moves it and those bel
     try e.layoutNow();
     boxes = try e.visibleParagraphs();
     try testing.expectEqual(third, boxes[2].top);
+}
+
+// ---- Editors in a view -------------------------------------------------
+
+const ui = @import("ziggurat_ui");
+const view = @import("ziggurat_view");
+
+const Windowless = struct {
+    fn draw(_: *anyopaque, _: *ui.Frame) void {}
+    fn action(_: *anyopaque, _: u64) void {}
+};
+
+/// A page of editors in a view, without a window: the test lays the
+/// editors out as their posted task would.
+const Page = struct {
+    storage: view.Storage(32, 512) = .{},
+    dummy: u8 = 0,
+    host: view.Host = undefined,
+    h: view.Harness = undefined,
+    model: view.ScrollModel = .{},
+    editors: []Editor = &.{},
+    /// Each editor's height, its width, and the paragraphs in view read
+    /// right after building it.
+    heights: [2]f32 = .{ 400, 400 },
+    widths: [2]?f32 = .{ null, null },
+    read: [2][]const ed.ParagraphBox = .{ &.{}, &.{} },
+    scrolls: bool = false,
+
+    fn build(self: *Page, v: *view.View) anyerror!void {
+        if (self.scrolls) try v.scroll(&self.model, .{ .grow = 1, .self_align = .stretch }) else try v.row(.{ .grow = 1, .self_align = .stretch });
+        for (self.editors, 0..) |*e, k| {
+            try v.embed(e.embed(), .{ .key = k + 1, .height = self.heights[k], .width = self.widths[k], .grow = if (self.widths[k] == null) 1 else 0, .self_align = .stretch });
+            self.read[k] = try e.visibleParagraphs();
+        }
+        try v.end();
+    }
+    fn start(self: *Page) !void {
+        self.host.context = ui.Context.init(&self.dummy, Windowless.draw, Windowless.action);
+        for (self.editors) |*e| e.host = &self.host;
+        self.h = view.Harness.init(self, build, self.storage.buffers(), .{});
+        try self.h.attachInput(&self.host.context);
+        try self.settle();
+    }
+    /// Renders, lays the editors out where they were placed, and renders
+    /// again for the build to read what they laid out.
+    fn settle(self: *Page) !void {
+        try self.h.render();
+        for (self.editors) |*e| try e.layoutNow();
+        try self.h.render();
+    }
+    /// The commands of the view painted, which stay until the next call.
+    fn paint(self: *Page) ![]const ui.commands.Command {
+        const context = &self.host.context;
+        context.command_buffer.reset();
+        context.input_state.beginFrame();
+        var frame: ui.Frame = .{ .context = context, .size = .{ .width = 640, .height = 480, .scale = 1 } };
+        try self.h.view.paint(&frame);
+        if (frame.failure) |err| return err;
+        context.input_state.commitFrame();
+        return context.command_buffer.commands();
+    }
+};
+
+/// The texts painted, and how many of them show in the window.
+fn textsIn(commands: []const ui.commands.Command) struct { all: usize, shown: usize } {
+    var all: usize = 0;
+    var shown: usize = 0;
+    for (commands) |command| if (command == .text) {
+        all += 1;
+        const b = command.text.bounds;
+        if (b.y + b.height > 0 and b.y < 480) shown += 1;
+    };
+    return .{ .all = all, .shown = shown };
+}
+
+test "an editor as tall as its text, in a scroll container, paints only what the container shows, starts counted on" {
+    var t = try Text.init(gpa);
+    var starts: [300]u32 = undefined;
+    var at: u32 = 0;
+    for (0..300) |i| {
+        var buffer: [64]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buffer, "paragraph {d}: çok güzel, {s}", .{ i, "éééééé"[0 .. (i % 7) * 2] });
+        starts[i] = at;
+        at += @intCast(std.unicode.utf8CountCodepoints(line) catch unreachable);
+        at += 1;
+        try t.append(line, .{});
+        if (i + 1 < 300) try t.append("\n", .{});
+    }
+    var doc = Document.init(gpa, t);
+    defer doc.deinit();
+    var editors = [_]Editor{Editor.init(undefined, gpa, &doc, .{ .no_scrollbar = true, .frame = false })};
+    defer editors[0].deinit();
+    var page: Page = .{ .editors = &editors, .scrolls = true, .heights = .{ 300 * 40, 0 } };
+    try page.start();
+    // Every paragraph is in the editor's box, each with the rune it starts at.
+    const boxes = page.read[0];
+    try testing.expectEqual(@as(usize, 300), boxes.len);
+    for (boxes, 0..) |box, i| {
+        try testing.expectEqual(i, box.index);
+        try testing.expectEqual(starts[i], box.start);
+    }
+    // It paints what the window shows, not all three hundred.
+    const top = textsIn(try page.paint());
+    try testing.expect(top.shown > 0);
+    try testing.expectEqual(top.shown, top.all);
+    try testing.expect(top.all < 60);
+    // Scrolled down the text, the text there shows.
+    try page.h.wheel(100, 100, .{ .x = 0, .y = 2000 });
+    try page.settle();
+    try testing.expect(page.model.offset.y > 1000);
+    const down = textsIn(try page.paint());
+    try testing.expect(down.shown > 0);
+    try testing.expectEqual(down.shown, down.all);
+}
+
+test "two editors of one document read each one's paragraphs, and the frames settle" {
+    var t = try Text.init(gpa);
+    for (0..6) |_| try t.append("a word or two, again and again, to wrap at a narrow width; ", .{});
+    try t.append("\nsecond\nthird", .{});
+    var doc = Document.init(gpa, t);
+    defer doc.deinit();
+    var editors = [_]Editor{ Editor.init(undefined, gpa, &doc, .{}), Editor.init(undefined, gpa, &doc, .{}) };
+    defer for (&editors) |*e| e.deinit();
+    var page: Page = .{ .editors = &editors, .widths = .{ 450, 150 } };
+    try page.start();
+    const wide = page.read[0];
+    const narrow = page.read[1];
+    try testing.expect(wide.len >= 2 and narrow.len >= 2);
+    // Each editor's boxes are its own, at its own width.
+    try testing.expect(narrow[0].height > wide[0].height);
+    // Painting what was read asks for no other frame: each editor compares
+    // what it placed with what was read of it.
+    var painted = try page.paint();
+    _ = &painted;
+    for (&editors) |*e| try testing.expect(!e.boxes_read);
+    try page.h.render();
+    for (page.read, [_][]const ed.ParagraphBox{ wide, narrow }) |now, before| try testing.expectEqualDeep(before, now);
+}
+
+test "an editor without a scroll bar draws none, and a press where it would be goes to the text" {
+    var t = try Text.init(gpa);
+    for (0..200) |_| try t.append("line\n", .{});
+    var doc = Document.init(gpa, t);
+    defer doc.deinit();
+    const track = (view.Theme{}).palette.track;
+    for ([_]bool{ false, true }) |hidden| {
+        doc.setSelection(0, 0);
+        var editors = [_]Editor{Editor.init(undefined, gpa, &doc, .{ .no_scrollbar = hidden, .frame = false })};
+        defer editors[0].deinit();
+        var page: Page = .{ .editors = &editors, .widths = .{ 500, null } };
+        try page.start();
+        const e = &editors[0];
+        try testing.expectEqual(@as(f32, 500), e.bounds.width);
+        // The pointer over the editor, which shows its bar.
+        e.hovered = true;
+        var bars: usize = 0;
+        for (try page.paint()) |command| bars += switch (command) {
+            .fill => |fill| @intFromBool(fill.color == track),
+            .shape => |shape| @intFromBool(shape.color.hex() == track),
+            else => 0,
+        };
+        try testing.expectEqual(@as(usize, if (hidden) 0 else 1), bars);
+        click(e, e.bounds.x + 495, e.bounds.y + 30);
+        const sel = doc.selection();
+        if (hidden) {
+            try testing.expect(sel.anchor == sel.caret and sel.caret > 0);
+        } else {
+            // The press took the bar's thumb.
+            try testing.expectEqual(@as(u32, 0), sel.caret);
+        }
+    }
 }

@@ -1112,3 +1112,75 @@ test "Shift choices in a table whose chosen last rows were taken out start from 
         }
     }
 }
+
+/// The scroll bars painted: thumbs in the theme's track color.
+fn barCount(commands: []const ui.commands.Command) usize {
+    const track = ui.Color.rgb((view.Theme{}).palette.track);
+    var n: usize = 0;
+    for (commands) |command| n += @intFromBool(command == .shape and std.meta.eql(command.shape.color, track));
+    return n;
+}
+
+test "a table hides each scroll bar as its style says, and a hidden bar takes no press" {
+    var app: Files = .{};
+    app.init(.single);
+    app.use_columns = &sheet_columns;
+    var f: Fixture = .{};
+    try f.start(&app);
+    const b = (try f.leaf()).bounds;
+    try testing.expectEqual(@as(usize, 2), barCount(try paintAgain(&f)));
+    // The vertical bar hidden: the horizontal one stays, and a press where
+    // the vertical one was goes to the row under it.
+    app.options.style.scrollbar_axes = .{ .vertical = false };
+    try f.h.render();
+    try testing.expectEqual(@as(usize, 1), barCount(try paintAgain(&f)));
+    const x = b.x + b.width - 3;
+    try f.h.drag(x, b.y + 32, x, b.y + b.height - 10, 4);
+    try testing.expectEqual(@as(f64, 0), app.state.scrollOffset());
+    try testing.expectEqualSlices(u64, &.{7}, app.selection.items());
+    // The wheel scrolls still.
+    try f.h.wheel(b.x + 100, b.y + 100, .{ .x = 0, .y = 60 });
+    try testing.expect(app.state.scrollOffset() > 0);
+    try f.h.wheel(b.x + 100, b.y + 100, .{ .x = 0, .y = -600 });
+    // The horizontal bar hidden: the vertical one shows and drags.
+    app.options.style.scrollbar_axes = .{ .horizontal = false };
+    try f.h.render();
+    try testing.expectEqual(@as(usize, 1), barCount(try paintAgain(&f)));
+    try f.h.drag(x, b.y + 32, x, b.y + 120, 4);
+    try testing.expect(app.state.scrollOffset() > 0);
+    // Scrollbars false hides both, whatever the axes say; leaving both out
+    // shows both again.
+    app.options.style.scrollbar_axes = .{};
+    app.options.style.scrollbars = false;
+    try f.h.render();
+    try testing.expectEqual(@as(usize, 0), barCount(try paintAgain(&f)));
+    app.options.style.scrollbars = true;
+    try f.h.render();
+    try testing.expectEqual(@as(usize, 2), barCount(try paintAgain(&f)));
+}
+
+test "hiding the vertical bar its thumb is dragged by ends the drag, and the release presses nothing" {
+    var app: Files = .{};
+    app.init(.single);
+    var f: Fixture = .{};
+    try f.start(&app);
+    const b = (try f.leaf()).bounds;
+    const x = b.x + b.width - 3;
+    try f.h.press(x, b.y + 32, .{});
+    try f.h.moveTo(x, b.y + 60);
+    const dragged = app.state.scrollOffset();
+    try testing.expect(dragged > 0);
+    app.options.style.scrollbar_axes = .{ .vertical = false };
+    try f.h.render();
+    try f.h.moveTo(x, b.y + 200);
+    try testing.expectEqual(dragged, app.state.scrollOffset());
+    try f.h.release(x, b.y + 200);
+    try testing.expectEqual(dragged, app.state.scrollOffset());
+    try testing.expectEqual(@as(usize, 0), app.selection.items().len);
+    try testing.expectEqual(@as(usize, 0), app.clicks);
+    // Shown again, the bar drags again.
+    app.options.style.scrollbar_axes = .{};
+    try f.h.render();
+    try f.h.drag(x, b.y + 32, x, b.y - 500, 4);
+    try testing.expectEqual(@as(f64, 0), app.state.scrollOffset());
+}

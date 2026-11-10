@@ -85,7 +85,7 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 
 三个平台对这些属性的映射：Linux ATK 用 table/tree table 角色与 xml-roles grid/treegrid/searchbox、content deletion/insertion 角色、rowcount/colcount/rowindex/colindex 属性、described-by/description-for 与 error-message/error-for 关系、vertical/horizontal 状态；macOS 用 AXTable、AXDeleteStyleGroup/AXInsertStyleGroup、AXSearchField 子角色、AXARIARowCount 等属性、AXErrorMessageElements、AXOrientation，旧 API 也回答 AXHelp，列表没有自己的大小时取其条目的 set_size 作为 AXRowCount；Windows 共享层把网格报为 DataGrid，表格、网格与树状网格带 Grid 与 Table 模式，其单元格与行列标题带 GridItem 与 TableItem（按 row_index/column_index、行的 position 或已建出的行与单元格数出所在行列），可选的单元格带 SelectionItem；删除与插入报为本地化类型 deletion/insertion 的文本、搜索框报为 search box 的编辑框，给出 Orientation（滑块与分隔线默认横向）、FullDescription、ControllerFor（controls，无效时加上 error_message）、DescribedBy、AriaRole、Level、PositionInSet 与 SizeOfSet；`.tab_panel` 是本地化类型为 tab panel 的 Pane，`.main` 是 main 地标类型的 Group，`.banner`、`.content_info`、`.complementary` 是自定义地标类型、分别名为 banner、content information、complementary 的 Group；Linux ATK 把 tab panel 报为 scroll pane、这四个地标报为 landmark，都带 xml-roles；macOS 把 tab panel 报为角色描述为 tab panel 的 AXGroup，四个地标报为 AXLandmarkMain/AXLandmarkBanner/AXLandmarkContentInfo/AXLandmarkComplementary 子角色的 AXGroup。名称、启用、有效性、描述、AriaProperties、勾选、选中、展开、范围值与文本值变化时，Windows 发属性变化事件，焦点移动时发焦点事件。
 - 焦点环：持有键盘焦点的控件画主题的焦点环：宽 `Metrics.focus_ring_width`（默认 2 DIP），内缘在控件边缘外 `Metrics.focus_ring_offset`（默认 1 DIP；0 落在边缘上，负数在边缘内），颜色为调色板的 `focus`。列表、树与表格的行、列头会被外层列表裁剪，默认画在行内。`Style.focus_ring_offset` 单独设置一个节点的偏移，例如外层容器裁剪越界内容时用负值把环画到里面；`Style.focus_ring_color` 单独设置颜色。
-- 滚动指示器：滚动容器的 `scrollbars = false` 不画滚动指示器，滚轮、按键和辅助技术照常滚动，适合自己绘制指示的表面。
+- 滚动指示器：滚动容器的 `scrollbars = false` 不画滚动指示器，滚轮、按键和辅助技术照常滚动，适合自己绘制指示的表面。`scrollbar_axes`（`ScrollbarAxes{ .horizontal, .vertical }`，默认都显示）分别控制横向与纵向指示器及其指针命中区，见下文“滚动”。
 - 占位符：`search`、`tokenField` 与 `editableComboBox` 的 `placeholder` 与 `placeholder_color` 交给直接放在其中的文本输入，输入为空且没有输入法组合时显示（见下文 `TextField` 的同名选项）。
 - 层叠顺序：`z_index`（默认 0）决定兄弟节点的绘制先后，如 CSS 的 `z-index`：数值大的画在上面、先接收指针，相同的保持构建顺序。它只改变绘制与命中，不改变排布，Tab 顺序与读屏顺序仍按构建顺序。
 
@@ -102,6 +102,14 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 `scroll(&model, style)` 与 `end` 配对，开始一个纵向滚动、始终裁剪的列。`ui.scroll.ScrollModel` 由应用持有，跨帧保存偏移。它的最小高度为零，首选高度是内容高度，所以要让它出现滚动，需给它固定 `height`，或者在受限的父容器里用 `grow`/收缩。每次排列都会以视口和内容尺寸调用 `model.setSizes`，偏移随内容变化被夹回有效范围；子项按内容坐标排列后整体上移 `offset.y`，因此节点边界始终是窗口坐标。内容溢出时，右侧画一条不可交互的细滑块指示位置。
 
 `Style.scrollbars = false` 时不画这条滑块，其余滚动行为不变。
+
+`Style.scrollbar_axes` 分别控制横向与纵向的指示器及其指针命中区，两者默认都显示。自己提供上下导航的视图可以只留横向条、隐藏纵向条：
+
+```zig
+try collections.table(v, &state, &columns, rows, cells, .{ .style = .{ .grow = 1, .scrollbar_axes = .{ .vertical = false } } });
+```
+
+隐藏的轴仍可用滚轮、触控板、键盘焦点与辅助技术滚动；隐藏正在拖动的那条会取消这次拖动，松开时不点到下面的内容；留下的那条位置不变。`scrollbars = false` 无论 `scrollbar_axes` 怎么设都隐藏两条，`scrollbars = true` 时按 `scrollbar_axes`。它是样式字段，每次构建按当次的值，构建时不设就恢复两轴都显示；不继承。它适用于 `scroll`（纵向滚动，只有纵向条）以及 `collections` 的表格、大纲表格与网格视图（`Options.style`）。
 
 自己滚动、不经滚动容器的视图（终端、富文本编辑器、虚拟表格与大纲）用 `ui.scroll.Bar` 画滚动条，外观与滚动容器一致，跟随主题：`box` 是滑块所沿的视图（右边缘，`leading` 时左边缘，横向时底边），`view`、`content`、`offset` 是可见长度、总长度与偏移，单位任意（终端用行数）。`Frame.scrollbar(bar, .{ .dragging, .color })` 画滑块：默认主题的 `track` 色，`color` 给自有配色的视图（如终端）替换；拖动时向内容一侧加宽 2 DIP；无处可滚时什么也不画。`thumb` 给出滑块矩形，`offsetAt(start)` 把拖动中滑块起点换算成偏移，`hit(point)` 判断指针是否在边缘 12 DIP 的条带上。终端与富文本编辑器只在指针位于其上或拖动滑块时显示滚动条；虚拟集合与滚动容器一样常显。
 

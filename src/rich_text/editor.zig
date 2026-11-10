@@ -317,6 +317,13 @@ pub const Options = struct {
     /// Room to leave above a paragraph, more than the theme's, as a list
     /// opens a place where an item dragged would go.
     space: ?Spacer = null,
+    /// Draws no scroll bar of the editor's own, and a press where it would
+    /// be goes to the text: an application that makes the editor as tall
+    /// as its text, and scrolls it with a page around it, shows the page's
+    /// bar alone, even in a frame where the editor's height falls short of
+    /// its text and it scrolls a little itself. The editor still scrolls to
+    /// keep the caret in view, and with the wheel.
+    no_scrollbar: bool = false,
 };
 
 /// Room above a paragraph (`Options.space`): `above` is given paragraph
@@ -1249,7 +1256,7 @@ pub const Editor = struct {
             if (k >= self.boxes.items.len or !std.meta.eql(self.boxes.items[k], box)) moved = true;
             k += 1;
         }
-        if (moved or k != self.boxes.items.len) if (self.host.context.window) |window| window.invalidate();
+        if (moved or k != self.boxes.items.len) self.invalidate();
     }
 
     fn contentPoint(self: *const Editor, point: z.Point) struct { x: f32, y: f64 } {
@@ -1381,12 +1388,18 @@ pub const Editor = struct {
         const sel = self.selection();
         const a = sel[0];
         const b = sel[1];
+        // Only the paragraphs the frame's clip shows are painted: an editor
+        // as tall as its text, in a scroll container, has all of them in
+        // its box.
+        const shown = frame.visibleRect();
+        const composing = if (self.compose.items.len > 0) self.paraAt(self.sel_caret) else null;
         var i = self.first;
         while (i <= self.last and i < self.paras.items.len) : (i += 1) {
             const pv = &self.paras.items[i];
             if (!pv.laid) continue;
             const st = pv.style;
             const top = oy + @as(f32, @floatCast(self.heights.top(i) - self.scroll));
+            if (shown) |vis| if (top + pv.h < vis.y or top > vis.y + vis.height) continue;
             const o = self.origin(i);
             const x = ox + o.x;
             const y = oy + @as(f32, @floatCast(o.y - self.scroll));
@@ -1410,7 +1423,7 @@ pub const Editor = struct {
             self.paintRuns(frame, &pv.layout, x, y);
             try self.paintAttachments(frame, i, pv, x, y);
             self.paintMarker(frame, i, st, pv, x, y);
-            if (self.compose.items.len > 0 and self.paraAt(self.sel_caret) == i) {
+            if (composing == i) {
                 const c = self.local(i, self.sel_caret);
                 for (0..pv.layout.lines.items.len) |k| {
                     if (pv.layout.selectionRect(@intCast(k), c, c + self.compose_runes)) |r| frame.rect(.{ .x = x + r.x, .y = y + r.y + r.height - 2, .width = r.width, .height = 1 }, look.text);
@@ -1434,7 +1447,7 @@ pub const Editor = struct {
         // The scroll bar, as a scroll container's, while the pointer is
         // over the editor or drags the thumb.
         self.bar_style = frame.scrollbarStyle();
-        if (self.hovered or self.thumb) {
+        if (!self.options.no_scrollbar and (self.hovered or self.thumb)) {
             var bar = self.scrollbar();
             bar.box = bounds;
             frame.scrollbar(bar, .{ .dragging = self.thumb });
@@ -1629,6 +1642,7 @@ pub const Editor = struct {
     }
 
     fn overScrollbar(self: *const Editor, point: z.Point) bool {
+        if (self.options.no_scrollbar) return false;
         return self.scrollbar().hit(.{ .x = point.x, .y = point.y });
     }
 

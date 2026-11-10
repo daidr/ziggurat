@@ -168,8 +168,9 @@ test "a node ignoring input lets the pointer and focus pass, and assistive techn
 const Scrolling = struct {
     model: view.ScrollModel = .{},
     bars: bool = true,
+    axes: view.ScrollbarAxes = .{},
     fn build(self: *Scrolling, v: *View) anyerror!void {
-        try v.scroll(&self.model, .{ .height = 60, .scrollbars = self.bars });
+        try v.scroll(&self.model, .{ .height = 60, .scrollbars = self.bars, .scrollbar_axes = self.axes });
         for (0..12) |i| try v.textf("Line {d}", .{i}, .{ .key = i });
         try v.end();
     }
@@ -644,4 +645,43 @@ test "a text cut in its middle keeps its start and its end" {
     shown = try shownText(&h, &context);
     try testing.expect(std.mem.endsWith(u8, shown, ".pdf"));
     try testing.expect(std.mem.indexOf(u8, shown, "\u{2026}") != null);
+}
+
+test "a scroll container hides each axis's indicator as it says, and scrolls still" {
+    var storage: Storage = .{};
+    var app: Scrolling = .{};
+    var h = Harness.init(&app, Scrolling.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const track = (view.Theme{}).palette.track;
+    const thumbs = struct {
+        fn count(commands: []const ui.commands.Command) usize {
+            var n: usize = 0;
+            for (commands) |command| switch (command) {
+                .fill => |fill| n += @intFromBool(fill.color == track),
+                .shape => |shape| n += @intFromBool(shape.color.hex() == track),
+                else => {},
+            };
+            return n;
+        }
+    };
+    // A column scrolls up and down: hiding the horizontal axis keeps its bar.
+    app.axes = .{ .horizontal = false };
+    try h.render();
+    try testing.expectEqual(@as(usize, 1), thumbs.count(try paintAgain(&h, &context)));
+    app.axes = .{ .vertical = false };
+    try h.render();
+    try testing.expectEqual(@as(usize, 0), thumbs.count(try paintAgain(&h, &context)));
+    try h.scroll(.{ .kind = .scroll }, .{ .x = 0, .y = 30 });
+    try testing.expect(app.model.offset.y > 0);
+    // Scrollbars false hides both, whatever the axes say.
+    app.axes = .{};
+    app.bars = false;
+    try h.render();
+    try testing.expectEqual(@as(usize, 0), thumbs.count(try paintAgain(&h, &context)));
+    // A build that leaves both out shows the bar again.
+    app.bars = true;
+    try h.render();
+    try testing.expectEqual(@as(usize, 1), thumbs.count(try paintAgain(&h, &context)));
 }
