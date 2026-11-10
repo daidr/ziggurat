@@ -177,6 +177,36 @@ divider line there. `rowInfo` content rectangles start below the band.
 In a split view the header text stops at the end of the old side and
 ellipsizes there, so it never runs into the new side's text.
 
+Lines are compared with their line feeds, as `git diff` compares them, so a
+last line that gains or loses its newline is a changed line, and the
+read-only View ends the last line of a side whose text ends without a
+newline with a muted mark after its text, in `Colors.line_number`:
+`Parameters.no_newline_mark`, "No newline at end of file" by default, git's
+`\ No newline at end of file`. `noNewlineMark(locale)` gives it in Japanese
+and Simplified or Traditional Chinese, and an empty mark shows none.
+`rowInfo` reports where it shows (`RowInfo.marks`). The texts of a patch's
+hunks end without a newline either way, so `Parameters.no_newline` says
+which sides to mark instead, as the patch's `\` lines name them after a
+deleted line, an added line or a line of both:
+
+```zig
+parameters.no_newline = partial.noNewline();
+```
+
+When the host has the files too, as a git client reads them from the
+repository, `code_editor.patch.compareFiles(allocator, file_patch, job.a,
+job.b)` makes the comparison of the whole files whose changes are the
+patch's runs of `-` and `+` lines, as `git diff` aligned them with its own
+options (`--patience`, `--histogram`), in place of `diff.compare`; publish it
+as any result. The unchanged lines between them collapse and expand as in
+any comparison, and the lines are numbered as the files' lines. It fails,
+making nothing, for a binary patch or one that does not make `b` from `a`:
+the files moved on since the patch, so show its hunks alone with `Partial`.
+After an edit of the new file, `code_editor.patch.recompare(allocator,
+&previous, a, previous_b, b)` compares again only the lines the edit changed,
+with three unchanged lines around them and the changes they touch, and
+moves the other changes with the edit as git found them.
+
 Changing `line_numbers` or the numbering reshapes the visible rows once at
 the new width. Numbers are recorded as ordinary label commands in `draw`,
 which allocates nothing.
