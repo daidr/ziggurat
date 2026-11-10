@@ -107,8 +107,7 @@ pub const Stats = struct { owned_bytes: usize, reserved_peak_bytes: usize, nodes
 const Anchor = struct { line: usize = 0, id: u64 = 0, intra: f64 = 0 };
 const VisualCaret = struct { selected: d.Selection, affinity: t.Affinity = .downstream, preferred_x: ?f32 = null };
 const Movement = struct { selected: d.Selection, affinity: t.Affinity, preferred_x: ?f32, primary: bool = false };
-/// `changes` move inlays back on undo and forth on redo.
-const Receipt = struct { before: *ix.Node, after: *ix.Node, before_folds: ?*folding.Set, after_folds: ?*folding.Set, changes: []inlay_set.Change = &.{} };
+const Receipt = struct { before: *ix.Node, after: *ix.Node, before_folds: ?*folding.Set, after_folds: ?*folding.Set };
 const BatchMode = enum { mapped, selections, composition };
 const NativeInput = struct { window: z.Window, token: ?z.TextClientToken, space: ?ui.SpaceBinding, space_generation: u64, input_stamp: z.TextInputStamp, observer_generation: u64, authority: ?u64 };
 /// Linear main-thread borrow. End in reverse nesting order before releasing
@@ -1186,7 +1185,6 @@ const State = struct {
         ix.release(&self.storage, value.after);
         folding.release(value.before_folds);
         folding.release(value.after_folds);
-        self.allocator().free(value.changes);
     }
     fn clearHistory(self: *State) void {
         for (0..self.history_len) |i| self.drop(self.receipt(i).*);
@@ -1194,9 +1192,9 @@ const State = struct {
         self.history_len = 0;
         self.history_cursor = 0;
     }
-    fn note(self: *State, before: *ix.Node, after: *ix.Node, after_folds: ?*folding.Set, changes: []inlay_set.Change) void {
-        if (self.history.len == 0) return self.allocator().free(changes);
-        const value: Receipt = .{ .before = ix.retain(before).?, .after = ix.retain(after).?, .before_folds = folding.retain(self.folds), .after_folds = folding.retain(after_folds), .changes = changes };
+    fn note(self: *State, before: *ix.Node, after: *ix.Node, after_folds: ?*folding.Set) void {
+        if (self.history.len == 0) return;
+        const value: Receipt = .{ .before = ix.retain(before).?, .after = ix.retain(after).?, .before_folds = folding.retain(self.folds), .after_folds = folding.retain(after_folds) };
         while (self.history_len > self.history_cursor) {
             self.history_len -= 1;
             self.drop(self.receipt(self.history_len).*);
@@ -1307,6 +1305,7 @@ const State = struct {
     /// The inlays shown now: none while masked or composing, inlays at the
     /// text version they were set for, a suggestion at the revision.
     fn inlayKey(self: *State) !InlayKey {
+        try self.followInlays();
         if (self.masked or try self.document.composition() != null) return .{};
         const live_inlays = self.inlays.entries.len != 0 and self.inlay_text_version == try self.document.committedTextVersion();
         return .{ .inlays = if (live_inlays) self.inlay_version else 0, .suggestion = if (try self.suggestionLive()) self.suggestion_version else 0 };
@@ -1337,15 +1336,15 @@ const State = struct {
         _ = try self.replaceSelections(text, false);
         return true;
     }
-    /// Whether the inlays are those of the committed text now.
-    fn inlaysLive(self: *State) !bool {
-        return self.inlays.entries.len != 0 and self.inlay_text_version == try self.document.committedTextVersion();
-    }
-    /// Keep live inlays with the text an edit made: moved by its changes.
-    fn followInlays(self: *State, live: bool, changes: []const inlay_set.Change, back: bool) !void {
-        if (!live) return;
-        if (back) inlay_set.moveBack(&self.inlays, changes) else inlay_set.move(&self.inlays, changes);
-        self.inlay_text_version = try self.document.committedTextVersion();
+    /// Move the inlays through the Document's changes since the text version
+    /// they are of, by whoever made them; when its journal no longer reaches
+    /// that version they stay stale until set again.
+    fn followInlays(self: *State) !void {
+        const since = self.inlay_text_version orelse return;
+        const now = try self.document.committedTextVersion();
+        if (since == now or self.inlays.entries.len == 0 or !try self.document.canMapFrom(since)) return;
+        for (self.inlays.entries) |*entry| entry.offset = try self.document.mapOffset(since, entry.offset, .right);
+        self.inlay_text_version = now;
     }
     fn validateRange(self: *State, range: d.Range) !void {
         if (range.start > range.end) return error.InvalidRange;
@@ -1389,18 +1388,11 @@ const State = struct {
         errdefer ix.release(&self.storage, plan.root);
         const next_folds = try self.editFolds(&plan.root, &.{.{ .range = range, .text = text }});
         errdefer folding.release(next_folds);
-        const changes = try self.allocator().alloc(inlay_set.Change, 1);
-        changes[0] = .{ .start = range.start, .end = range.end, .len = text.len };
-        var noted = false;
-        defer if (!noted) self.allocator().free(changes);
         try self.synchronize();
         try self.checkNativeInput();
-        const live = try self.inlaysLive();
         if (commit) try self.mutate(d.Document.commitComposition, .{ self.document, text }) else try self.mutate(d.Document.replace, .{ self.document, range, text });
         const committed_revision = try self.document.version();
-        noted = true;
-        self.note(self.committed.?, plan.root, next_folds, changes);
-        try self.followInlays(live, changes, false);
+        self.note(self.committed.?, plan.root, next_folds);
         self.publishFolds(next_folds);
         ix.release(&self.storage, self.committed);
         ix.release(&self.storage, self.overlay);
@@ -1460,22 +1452,15 @@ const State = struct {
             for (selected.items) |item| if (item.range().end > candidate.sum.bytes) return error.InvalidRange;
             try self.validateFoldCaretsIn(candidate, selected.items);
         }
-        const changes = try self.allocator().alloc(inlay_set.Change, edits.len);
-        for (changes, edits) |*change, edit| change.* = .{ .start = edit.range.start, .end = edit.range.end, .len = edit.text.len };
-        var noted = false;
-        defer if (!noted) self.allocator().free(changes);
         try self.synchronize();
         try self.checkNativeInput();
-        const live = try self.inlaysLive();
         switch (mode) {
             .mapped => if (final) |selected| try self.mutate(d.Document.replaceManyWithSelections, .{ self.document, expected_revision.?, edits, selected.items, selected.primary }) else try self.mutate(d.Document.replaceMany, .{ self.document, self.observed, edits }),
             .selections => try self.mutate(d.Document.replaceSelections, .{ self.document, text }),
             .composition => try self.mutate(d.Document.commitComposition, .{ self.document, text }),
         }
         const committed_revision = try self.document.version();
-        noted = true;
-        self.note(self.committed.?, candidate, next_folds, changes);
-        try self.followInlays(live, changes, false);
+        self.note(self.committed.?, candidate, next_folds);
         self.publishFolds(next_folds);
         ix.release(&self.storage, self.committed);
         ix.release(&self.storage, self.overlay);
@@ -1669,14 +1654,12 @@ const State = struct {
         self.dragging = false;
         self.synchronize() catch |err| if (err != error.IndexRequired and err != error.FoldIndexRequired) return err;
         try self.checkNativeInput();
-        const live = try self.inlaysLive();
         const changed = if (redo) try self.mutate(d.Document.redo, .{self.document}) else try self.mutate(d.Document.undo, .{self.document});
         if (!changed) return .{ .changed = false, .index_required = self.index_required };
         self.observed = try self.document.version();
         const known = !self.index_required and (if (redo) self.history_cursor < self.history_len else self.history_cursor > 0);
         if (known) {
             const receipt_value = self.receipt(if (redo) self.history_cursor else self.history_cursor - 1).*;
-            try self.followInlays(live, receipt_value.changes, !redo);
             const root = ix.retain(if (redo) receipt_value.after else receipt_value.before).?;
             ix.release(&self.storage, self.committed);
             self.committed = root;
@@ -2043,9 +2026,12 @@ pub const Adapter = opaque {
         guard.check() catch return .{ .version = version, .current = false };
         return .{ .version = version, .current = true };
     }
-    /// Replace the inlays: hints and trailing text at committed source bytes,
-    /// ascending by offset, live until the committed text changes. An empty
-    /// list clears them.
+    /// Replace the inlays: hints and trailing text at committed source bytes
+    /// of text version `expected_text_version`, ascending by offset. They
+    /// move with every later change the Document's journal remembers, and
+    /// those of an older version move to the text now; when the journal no
+    /// longer reaches their version they stay stale until set again
+    /// (`status().inlays_required`). An empty list clears them.
     pub fn setInlays(self: *Adapter, expected_text_version: u64, definitions: []const Inlay) !InlayResult {
         const value = try self.state();
         const window: ?z.Window = if (value.token) |token| token.window else if (value.native_input) |input| input.window else null;
@@ -2053,17 +2039,23 @@ pub const Adapter = opaque {
         defer if (scope) |pin| pin.end();
         value.busy = true;
         defer value.busy = false;
-        const guard: RangeMarkerGuard = .{ .state = value, .window = window, .token = value.token, .text_version = expected_text_version };
+        // Inlays of an older text version, as a language server's that come
+        // late, move through the changes since to the text now.
+        if (!try value.document.canMapFrom(expected_text_version)) return error.StaleRevision;
+        const guard: RangeMarkerGuard = .{ .state = value, .window = window, .token = value.token, .text_version = try value.document.committedTextVersion() };
         try guard.check();
         if (value.inlay_version == std.math.maxInt(u64)) return error.IdExhausted;
         var candidate = inlay_set.capture(value.allocator(), definitions, value.limits.inlays) catch |err| return value.budget.normalize(err);
         var published = false;
         errdefer if (!published) candidate.free(value.allocator());
         try guard.check();
-        for (candidate.entries) |entry| try value.validateRange(.{ .start = entry.offset, .end = entry.offset });
+        for (candidate.entries) |*entry| {
+            entry.offset = try value.document.mapOffset(expected_text_version, entry.offset, .right);
+            try value.validateRange(.{ .start = entry.offset, .end = entry.offset });
+        }
         var old = value.inlays;
         value.inlays = candidate;
-        value.inlay_text_version = expected_text_version;
+        value.inlay_text_version = guard.text_version;
         value.inlay_version += 1;
         const version = value.inlay_version;
         value.layout_required = true;
@@ -2203,7 +2195,7 @@ pub const Adapter = opaque {
     pub fn status(self: *const Adapter) !Status {
         const value = try self.state();
         const revision = try value.document.version();
-        return .{ .revision = revision, .index_required = value.index_required or revision != value.observed, .folds_required = value.folds_required or value.pending_fold_restore or (revision != value.observed and value.folds != null), .fold_version = value.fold_version, .layout_required = value.layout_required or revision != value.observed, .last_layout_error = value.last_layout_error, .projection_active = if (value.view) |*view| view.projected and !value.layout_required and revision == value.observed else false, .line_backgrounds_required = value.line_backgrounds.len != 0 and value.background_text_version != try value.document.committedTextVersion(), .range_markers_required = value.range_markers.len != 0 and value.marker_text_version != try value.document.committedTextVersion(), .inlays_required = value.inlays.entries.len != 0 and value.inlay_text_version != try value.document.committedTextVersion() };
+        return .{ .revision = revision, .index_required = value.index_required or revision != value.observed, .folds_required = value.folds_required or value.pending_fold_restore or (revision != value.observed and value.folds != null), .fold_version = value.fold_version, .layout_required = value.layout_required or revision != value.observed, .last_layout_error = value.last_layout_error, .projection_active = if (value.view) |*view| view.projected and !value.layout_required and revision == value.observed else false, .line_backgrounds_required = value.line_backgrounds.len != 0 and value.background_text_version != try value.document.committedTextVersion(), .range_markers_required = value.range_markers.len != 0 and value.marker_text_version != try value.document.committedTextVersion(), .inlays_required = value.inlays.entries.len != 0 and !try value.document.canMapFrom(value.inlay_text_version.?) };
     }
     /// Optional composing adapters retain only lifetime, never text authority.
     pub fn retainClient(self: *Adapter) !void {

@@ -293,7 +293,8 @@ fn run(allocator: std.mem.Allocator) !void {
     _ = try adapter.undo();
     try expectText(document, "abc 😀 אבג e\u{301}\r\nxyz");
     try state.presenter.prepare(bounds, state.parameters);
-    try std.testing.expect((try broker.display(.diagnostics)) == null);
+    // Diagnostics move with the edit and its undo.
+    try std.testing.expect((try broker.display(.diagnostics)) != null);
     try publish(broker, .{ .completion = &.{items[1]} }, 3);
     try state.presenter.prepare(bounds, state.parameters);
     info = try state.presenter.overlayInfo();

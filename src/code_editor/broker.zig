@@ -16,7 +16,9 @@ const Slot = struct {
     published: bool = false,
 };
 pub const Display = struct { ticket: Ticket, data: r.Data, position: usize };
-const Stored = struct { ticket: Ticket, result: r.OwnedResult, position: usize };
+/// `text_version` is the committed text a stored result's ranges are in:
+/// diagnostics move with the edits after their ticket's.
+const Stored = struct { ticket: Ticket, result: r.OwnedResult, position: usize, text_version: u64 };
 
 /// Owner-thread scoped result borrow. Mutating Broker operations return Busy
 /// until end, including allocator callback reentry. Scope/copies must not be
@@ -142,7 +144,28 @@ pub const Broker = struct {
         return if (value.serial == ticket.serial and value.revision == ticket.revision and value.text_version == ticket.text_version and value.kind == ticket.kind) value else null;
     }
     fn fresh(self: *const Broker, ticket: Ticket) !bool {
-        return if (ticket.kind == .completion) ticket.revision == try self.document.version() else ticket.text_version == try self.document.committedTextVersion();
+        return switch (ticket.kind) {
+            .completion => ticket.revision == try self.document.version(),
+            .hover => ticket.text_version == try self.document.committedTextVersion(),
+            // Diagnostics of an older text, as a language server's that come
+            // late, move through the edits since.
+            .diagnostics => try self.document.canMapFrom(ticket.text_version),
+        };
+    }
+    /// Move stored diagnostics through the edits since their text: a start
+    /// after text inserted at it, an end before it. False when the Document
+    /// no longer remembers those edits.
+    fn follow(self: *Broker, stored: *Stored) !bool {
+        const now = try self.document.committedTextVersion();
+        if (stored.text_version == now) return true;
+        if (!try self.document.canMapFrom(stored.text_version)) return false;
+        for (@constCast(stored.result.data.diagnostics)) |*item| {
+            const start = try self.document.mapOffset(stored.text_version, item.range.start, .right);
+            const end = try self.document.mapOffset(stored.text_version, item.range.end, .left);
+            item.range = .{ .start = start, .end = @max(start, end) };
+        }
+        stored.text_version = now;
+        return true;
     }
     fn drop(self: *Broker, kind: r.Kind) void {
         const index = @backingInt(kind);
@@ -227,7 +250,8 @@ pub const Broker = struct {
         try validateResult(owned, self.limits.results, value.snapshot.?);
         const generation = try self.nextDisplay();
         const old = self.stored[@backingInt(ticket.kind)];
-        self.stored[@backingInt(ticket.kind)] = .{ .ticket = ticket, .result = owned.*, .position = value.position };
+        self.stored[@backingInt(ticket.kind)] = .{ .ticket = ticket, .result = owned.*, .position = value.position, .text_version = ticket.text_version };
+        if (ticket.kind == .diagnostics) _ = self.follow(&self.stored[@backingInt(ticket.kind)].?) catch false;
         owned.storage = null;
         owned.data = .{ .completion = &.{} };
         value.published = true;
@@ -284,7 +308,7 @@ pub const Broker = struct {
             }
             if (at != index and (!std.mem.eql(u8, left.detail, right.detail) or !std.mem.eql(u8, left.documentation, right.documentation))) return error.InvalidRefinement;
         }
-        self.stored[@backingInt(r.Kind.completion)] = .{ .ticket = ticket, .result = owned.*, .position = previous.position };
+        self.stored[@backingInt(r.Kind.completion)] = .{ .ticket = ticket, .result = owned.*, .position = previous.position, .text_version = previous.text_version };
         self.display_generation = generation;
         owned.storage = null;
         owned.data = .{ .completion = &.{} };
@@ -292,20 +316,28 @@ pub const Broker = struct {
         old.deinit(); // Gate and newly published result cover the final free.
     }
     /// Explicit event/update invalidation. Completion tracks full revision;
-    /// hover/diagnostics track committed text only. No guessed delta mapping.
+    /// hover tracks committed text only; diagnostics move with the edits the
+    /// Document remembers, and drop when it no longer does.
     pub fn observe(self: *Broker) !void {
         try self.enter();
         defer self.busy = false;
         const revision = try self.document.version();
         const text_version = try self.document.committedTextVersion();
         var changed = false;
-        for (self.stored) |item| if (item) |stored| if (!try self.fresh(stored.ticket)) {
+        for (self.stored) |item| if (item) |stored| if (!try self.fresh(stored.ticket) or stored.text_version != text_version) {
             changed = true;
         };
         const generation = if (changed) try self.nextDisplay() else self.display_generation;
-        for (self.slots) |*value| if (value.serial != 0 and (if (value.kind == .completion) value.revision != revision else value.text_version != text_version)) value.control.cancelled.store(true, .release);
-        for (self.stored, 0..) |item, index| if (item) |stored| if (!try self.fresh(stored.ticket)) {
-            self.drop(@fromBackingInt(@intCast(index)));
+        for (self.slots) |*value| if (value.serial != 0) {
+            const stale = switch (value.kind) {
+                .completion => value.revision != revision,
+                .hover => value.text_version != text_version,
+                .diagnostics => !try self.document.canMapFrom(value.text_version),
+            };
+            if (stale) value.control.cancelled.store(true, .release);
+        };
+        for (&self.stored, 0..) |*item, index| if (item.*) |_| {
+            if (!try self.fresh(item.*.?.ticket) or (item.*.?.ticket.kind == .diagnostics and !try self.follow(&item.*.?))) self.drop(@fromBackingInt(@intCast(index)));
         };
         self.display_generation = generation;
     }
@@ -319,6 +351,8 @@ pub const Broker = struct {
         if (self.stopping) return error.Closed;
         const item = self.stored[@backingInt(kind)] orelse return null;
         if (!try self.fresh(item.ticket) or try self.document.composition() != null) return null;
+        // Diagnostics show once observe has moved them to the text now.
+        if (kind == .diagnostics and item.text_version != try self.document.committedTextVersion()) return null;
         return .{ .ticket = item.ticket, .data = item.result.data, .position = item.position };
     }
     pub fn borrow(self: *Broker) !Borrow {
@@ -581,7 +615,7 @@ test "producer cannot bypass narrower owner text policy and failure preserves ol
     scope.end();
 }
 
-test "diagnostics survive caret and IME preview changes but committed edits invalidate them" {
+test "diagnostics survive caret and IME preview changes and move with committed edits" {
     const doc = try testDocument();
     defer doc.close() catch unreachable;
     const broker = try Broker.create(std.testing.allocator, doc, .{});
@@ -605,6 +639,34 @@ test "diagnostics survive caret and IME preview changes but committed edits inva
     try std.testing.expect((try broker.display(.diagnostics)) == null);
     try broker.observe();
     try std.testing.expect(broker.display_generation > generation);
+    // Text typed at the start goes before it; replaced text shrinks it.
+    try std.testing.expectEqual(d.Range{ .start = 1, .end = 4 }, (try broker.display(.diagnostics)).?.data.diagnostics[0].range);
+    try doc.replace(.{ .start = 3, .end = 5 }, "");
+    try broker.observe();
+    try std.testing.expectEqual(d.Range{ .start = 1, .end = 3 }, (try broker.display(.diagnostics)).?.data.diagnostics[0].range);
+    // A restore's edits are unknown: they drop.
+    const saved = try doc.snapshot();
+    defer saved.close() catch unreachable;
+    try doc.restore(saved);
+    try broker.observe();
+    try std.testing.expect((try broker.display(.diagnostics)) == null);
+}
+
+test "late diagnostics move through the edits made while they were computed" {
+    const doc = try testDocument();
+    defer doc.close() catch unreachable;
+    const broker = try Broker.create(std.testing.allocator, doc, .{});
+    defer broker.close() catch unreachable;
+    const job = try broker.begin(.diagnostics, 0);
+    try doc.replace(.{ .start = 0, .end = 0 }, ">>");
+    try broker.observe();
+    try std.testing.expect(!try job.isCancelled());
+    try job.release();
+    var result = try r.OwnedResult.init(std.testing.allocator, .{ .diagnostics = &.{.{ .range = .{ .start = 4, .end = 8 }, .message = "late" }} }, .{});
+    defer result.deinit();
+    try broker.publish(job.ticket, &result);
+    _ = try broker.finish(job.ticket);
+    try std.testing.expectEqual(d.Range{ .start = 6, .end = 10 }, (try broker.display(.diagnostics)).?.data.diagnostics[0].range);
 }
 
 fn allocationFixture(allocator: std.mem.Allocator) !void {

@@ -53,12 +53,19 @@ try document.restore(saved);
 | `history_entries` | 128 | 固定预分配历史槽，最多 4096；0 禁用历史 |
 | `snapshots` | 128 | 同时存活的 snapshot owner 数，clone 也计数，最多 4096；0 禁用 |
 | `composition_bytes` | 4096 | 预分配虚拟 preedit UTF-8 缓冲，硬上限 64 KiB |
+| `change_journal` | 1024 | 预分配改动日志能记住的替换段数，硬上限 65536；0 不记 |
 
 `stats()` 报告当前/峰值 owned 字节、全部存活节点、快照数、当前树高、累计复制/访问/回收节点及最近编辑候选额外峰值。节点访问不包括一个叶内的 scalar 扫描次数；不能据此推断所有查询耗时相同。
 
 聚合长度查询 O(1)；定位为 O(log N + 叶内扫描)，叶内最多 4096 字节；读取为 O(log N + 输出字节 + 经过的叶)。构造全文为 O(输入字节)，替换候选包含插入内容构造及树路径/边界 chunk 复制。相邻叶仅在 concat 递归实际遇到且总长不超 4096 时合并；**不保证叶至少半满**，长期编辑可能产生碎片，达到 node/live 预算时明确失败，没有后台压缩。
 
 历史/快照让旧 chunk 继续存活。保留根为 O(1)，snapshot/clone 另有一次显式分配；最终 release 需要访问并释放真正不再引用的节点。undo/redo、restore、历史淘汰和 close 的根交换虽然常量，整体操作可能回收整棵旧树，不能称 O(1) 或纯 O(log N)。回收同步发生于 owner 线程；应用必须按文档规模和历史/快照预算安排成本。
+
+## 改动日志与位置映射
+
+每次提交文本变化（`replace`、`replaceMany`、`replaceSelections`、组合提交、`undo`、`redo`）都把它的替换段 `旧 start..end → 新 start..end` 记进固定大小的环形日志，并标上它产生的 committed 文本版本；undo 记录被撤销编辑的逆，redo 记录原编辑。历史条目保存自己那次编辑的替换段（在最终提交闸门之前分配）。日志写满时按整次改动从最旧的一端淘汰；`restore` 的替换未知，会清空日志。
+
+`mapOffset(since, offset, bias)` 把 committed 文本版本 `since` 中的字节位置依次映射过此后每次改动，得到当前文本中的位置：改动之前不动，之后按长度差平移；落在被替换范围里的，`right` 到替换文字末尾、`left` 到开头；正好在插入点上的，`right` 在插入文字之后、`left` 在之前。`since` 早于日志能覆盖的版本（被淘汰或 restore 之后）或晚于当前版本时返回 `ChangesUnavailable`，`canMapFrom(since)` 先行判断。每次改动内二分查找，成本 O(改动次数 × log 段数)，不分配。编辑器的行内提示、代码编辑器的诊断都用它跟随编辑，包括宿主直接调用 Document 做的修改。
 
 revision 是单调 `u64`，选择与虚拟 preedit 更新也使其递增。到达最大值后所有修改返回 `IdExhausted`，不会回绕；只读查询、快照和关闭仍有效。需要继续编辑时显式重建 Document。最大 revision 的 preedit 无法通过 cancel 修改；解绑仍撤销原生入口并释放 lifetime pin，报告取消错误，留下可读取的虚拟状态直到关闭。
 

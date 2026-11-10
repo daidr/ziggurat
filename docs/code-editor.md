@@ -20,7 +20,7 @@ post 返回 `Full` 或 `Closed` 不接管任务或结果。宿主应保留任务
 
 Document 的 `version()` 包括选择、预编辑和文本变化；`committedTextVersion()` 只在提交文本、restore、undo、redo 时单调增加，选择和临时 IME 文本不改变它，耗尽拒绝文本修改。Snapshot/Reader 保留捕获时的两个版本。
 
-completion 绑定完整 revision 和请求位置，光标/选择/预编辑变化后不能接受旧补全。hover 与 diagnostics 绑定 committedTextVersion，因此移动光标不用重跑全文诊断。IME 组合期间暂时不显示它们，取消后可以恢复；提交后全部旧范围失效。没有猜测 delta 或把旧范围强行应用到新文本。hover 的业务展示范围由宿主请求决定；失焦、取消输入或 Escape 会隐藏当前弹层，新请求可以重新显示。
+completion 绑定完整 revision 和请求位置，光标/选择/预编辑变化后不能接受旧补全。hover 绑定 committedTextVersion，正文改动后失效。diagnostics 跟着编辑移动：`observe` 用 Document 的改动日志（`mapOffset`）把起点按 right、终点按 left 映射到当前文本（终点不早于起点），包括宿主直接修改 Document；请求期间文本已改动的迟到诊断也照样映射后发布，不会因此被取消。日志不再覆盖其版本（淘汰或 restore）时诊断才失效。移动光标不用重跑全文诊断；IME 组合期间暂时不显示，取消后恢复。hover 的业务展示范围由宿主请求决定；失焦、取消输入或 Escape 会隐藏当前弹层，新请求可以重新显示。
 
 `observe()` 是显式事件/更新阶段的取消和回收；draw 不做回收。`display(kind)` 是一次 owner 调用中的只读借用，不能跨后续 Broker 修改保存切片。需要跨分配器重入保存借用时使用线性 `borrow()` scope，并在 defer 中 end；期间修改、关闭返回 Busy。停止后的客户端释放可用 `borrowForTeardown()`，它不恢复业务入口。
 
