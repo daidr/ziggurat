@@ -52,6 +52,11 @@ pub fn utf16Length(text: []const u8) usize {
     }
     return count;
 }
+/// The byte offset in `text` of UTF-16 code unit `units`, kept within the
+/// text and moved back to the start of the character it falls inside.
+pub fn byteOfUtf16(text: []const u8, units: usize) usize {
+    return fitUtf16(text, units).len;
+}
 /// The longest start of `text` that takes at most `room` UTF-16 code
 /// units, cut between characters.
 pub fn fitUtf16(text: []const u8, room: usize) []const u8 {
@@ -263,6 +268,71 @@ pub fn Field(comptime Private: type) type {
             try self.enter();
             defer self.leave();
             return try (self.token orelse return error.NotAttached).perform(.{ .set_value = bytes });
+        }
+        /// Put `text` in place of the field's text from `start_utf16` to
+        /// `end_utf16` (UTF-16 code units, as `select` counts them), as an
+        /// edit that is a step of undo of its own: Undo brings back what the
+        /// user had written, and Redo `text` again. A command that writes a
+        /// message replaces all of it, from 0 to `std.math.maxInt(usize)`; a
+        /// completion, the word before the caret. The offsets are kept
+        /// within the text, in either order. As a paste does, it puts the
+        /// caret after `text`, takes a CRLF as one line break and, in a
+        /// single-line field, line breaks as spaces; `Options.max_length`
+        /// does not cut it, as it does not cut other text the application
+        /// puts in. The text the field held already, as the field would
+        /// take it, is no edit: nothing changes and `text_committed` is
+        /// false. `Options.changed` reports an edit. An input method's
+        /// composition is cancelled first.
+        pub fn replaceText(self: *Self, start_utf16: usize, end_utf16: usize, text: []const u8) !ui.TextFieldResult {
+            try self.enter();
+            defer self.leave();
+            const window = self.window orelse return error.NotAttached;
+            try self.validate();
+            try commandGate(self);
+            if (text.len > self.scratch.len) return error.FieldValueTooLarge;
+            @memcpy(self.scratch[0..text.len], text);
+            const bytes = try normalizeReplacement(self.scratch[0..text.len], self.options.multiline);
+            try validateText(bytes, self.options.multiline);
+            if (try self.document.composition() != null) {
+                try window.cancelTextComposition();
+                _ = try self.adapter.handleEvent(window, .text_preedit_cancel, self.bounds, self.parameters);
+                if (self.retired) return error.FieldClosed;
+            }
+            try self.copyValue();
+            const value = self.value[0..self.value_len];
+            const first = byteOfUtf16(value, @min(start_utf16, end_utf16));
+            const last = byteOfUtf16(value, @max(start_utf16, end_utf16));
+            if (std.mem.eql(u8, value[first..last], bytes)) return .{ .handled = true };
+            if (value.len - (last - first) + bytes.len > self.value.len) return error.FieldValueTooLarge;
+            var native: ?e.NativeInputScope = if (try self.adapter.isBound()) try self.adapter.beginNativeInput(window) else null;
+            defer if (native) |*scope| scope.end();
+            const revision = try self.document.version();
+            const replacement = [_]d.Replacement{.{ .range = .{ .start = first, .end = last }, .text = bytes }};
+            const caret = first + bytes.len;
+            const selected = [_]d.Selection{.{ .anchor = caret, .caret = caret }};
+            _ = try self.adapter.replaceManyWithSelections(revision, &replacement, &selected, 0);
+            var result: ui.TextFieldResult = .{ .handled = true, .text_committed = true };
+            _ = self.adapter.prepare(self.bounds, self.parameters) catch |err| {
+                result.presentation_error = err;
+            };
+            self.notify(window);
+            if (!self.retired and result.presentation_error == null) try self.copyValue();
+            if (!self.retired) window.invalidate();
+            return result;
+        }
+        /// `bytes` as an edit puts them in: a CRLF is one line break, and a
+        /// single-line field has spaces for line breaks.
+        fn normalizeReplacement(bytes: []u8, multiline: bool) ![]const u8 {
+            if (!multiline) return normalizePaste(bytes, false);
+            if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
+            var used: usize = 0;
+            var at: usize = 0;
+            while (at < bytes.len) : (at += 1) {
+                if (bytes[at] == '\r' and at + 1 < bytes.len and bytes[at + 1] == '\n') continue;
+                bytes[used] = bytes[at];
+                used += 1;
+            }
+            return bytes[0..used];
         }
         pub fn select(self: *Self, start_utf16: usize, end_utf16: usize) !ui.TextFieldResult {
             try self.enter();
@@ -648,4 +718,7 @@ test "a maximum length counts and cuts in UTF-16 code units, between characters"
     try std.testing.expectEqualStrings("a", fitUtf16("a\u{1F600}", 2));
     try std.testing.expectEqualStrings("a\u{1F600}", fitUtf16("a\u{1F600}b", 3));
     try std.testing.expectEqualStrings("", fitUtf16("中文", 0));
+    try std.testing.expectEqual(@as(usize, 2), byteOfUtf16("ab", std.math.maxInt(usize)));
+    try std.testing.expectEqual(@as(usize, 1), byteOfUtf16("a\u{1F600}b", 2));
+    try std.testing.expectEqual(@as(usize, 5), byteOfUtf16("a\u{1F600}b", 3));
 }

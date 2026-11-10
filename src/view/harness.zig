@@ -190,6 +190,8 @@ pub const Harness = struct {
         self.view.focus_request = null;
         const id = self.view.focusTarget(self.view.restore orelse return);
         self.view.restore = null;
+        // As Host does, the focus the build moves scrolls into view.
+        _ = self.view.revealFocus(id, self.focusId());
         self.setFocus(id);
     }
 
@@ -221,12 +223,23 @@ pub const Harness = struct {
         }
         if (self.view.focus_request) |id| {
             self.view.focus_request = null;
-            for (self.view.nodes()) |*node| if (node.id == id) self.setFocus(id);
+            for (self.view.nodes()) |*node| if (node.id == id) {
+                _ = self.view.revealFocus(id, self.focusId());
+                self.setFocus(id);
+            };
         }
         // Focus a render pass asked for once the frame registered it, as
         // Host does after paint.
         self.restoreFocus();
         self.frames += 1;
+        // What this frame no longer built goes, as in Host.
+        self.view.runUnmounts();
+    }
+    /// Close the window, as far as the view sees it: every function
+    /// `View.onUnmount` gave runs once, as Host runs them as the window's
+    /// content detaches.
+    pub fn close(self: *Harness) void {
+        self.view.runAllUnmounts();
     }
 
     /// The mistake the last render found, as error.DuplicateKey tells.
@@ -930,6 +943,7 @@ pub const Harness = struct {
     }
     pub fn press(self: *Harness, x: f32, y: f32, modifiers: z.KeyModifiers) anyerror!void {
         self.pressed = null;
+        self.view.pointer_held = true;
         self.sample(true);
         try self.observe(.{ .pointer_down = .{ .position = .{ .x = x, .y = y }, .button = .primary, .modifiers = modifiers } });
         _ = self.view.pressedAt(.{ .x = x, .y = y }, .primary, modifiers);
@@ -987,6 +1001,7 @@ pub const Harness = struct {
     /// it. Renders.
     pub fn release(self: *Harness, x: f32, y: f32) anyerror!void {
         self.view.pointer_sample.pressure = 0;
+        self.view.pointer_held = false;
         _ = self.view.controlPressed(null);
         try self.observe(.{ .pointer_up = .{ .position = .{ .x = x, .y = y }, .button = .primary } });
         if (self.config.options.tools()) |tools| if (tools.pointerUp(.{ .x = x, .y = y })) return self.render();
@@ -1009,6 +1024,7 @@ pub const Harness = struct {
     /// Lose the press, as focus loss or a cancelled capture does. Renders.
     pub fn cancelPointer(self: *Harness) anyerror!void {
         self.pressed = null;
+        self.view.pointer_held = false;
         _ = self.view.controlPressed(null);
         if (self.view.areaCancel()) |event| try self.run(event);
         return self.apply(self.view.captureCancel());
@@ -1024,6 +1040,8 @@ pub const Harness = struct {
             return taken;
         }
         const point: view.Point = .{ .x = x, .y = y };
+        self.view.pointer_held = true;
+        defer self.view.pointer_held = false;
         _ = self.view.pointerMoved(point);
         _ = self.view.pressedAt(point, button, modifiers);
         if (self.view.pointerDown(point) == .consumed) {
