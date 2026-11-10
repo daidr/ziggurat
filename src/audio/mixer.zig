@@ -6,6 +6,8 @@ const output = @import("output.zig");
 const Sound = @import("sound.zig").Sound;
 const Stream = @import("stream.zig").Stream;
 const Stretcher = @import("stretch.zig").Stretcher;
+const resample = @import("resample.zig");
+pub const SincBank = resample.SincBank;
 
 /// How long volume changes, fades in and fades out take: 5 ms.
 pub const ramp_frames = output.sample_rate / 200;
@@ -124,11 +126,13 @@ pub const Voice = struct {
     loop_start: i64 = 0,
     loop_end: i64 = 0,
 
-    /// The four source frames the output is interpolated between, the
-    /// second at `index`, and how far the output is past it.
-    history: [4][2]f32 = undefined,
+    /// The source frames around the output (`resample.Ring`). The output
+    /// is `phase` past frame `index`, and `head` is the frame that comes in
+    /// next, as far ahead as the interpolation reaches.
+    ring: resample.Ring = undefined,
     index: i64 = 0,
     phase: f64 = 0,
+    head: i64 = 0,
     /// The frame after the last, once the source ended, or -1.
     end: i64 = -1,
 
@@ -142,8 +146,11 @@ pub const Voice = struct {
     input_position: usize = 0,
     input_len: usize = 0,
     /// Time-stretches the source once its player preserved pitch, and
-    /// counts where `history` is in the source: null for every other voice.
+    /// counts where `ring` is in the source: null for every other voice.
     stretcher: ?*Stretcher = null,
+    /// The sinc's weights while the voice downsamples: allocated by the
+    /// engine for a voice that can, and without them it uses the spline.
+    bank: ?*SincBank = null,
 
     /// The gains applied, a 2×2 matrix from the source's channels to the
     /// output's (ll, rl, lr, rr), ramping to `target`.
@@ -176,10 +183,11 @@ pub const Voice = struct {
     /// Starts over at frame `frame` of the source, which the caller moved
     /// there.
     pub fn reset(self: *Voice, frame: i64) void {
-        self.history = @splat(.{ 0, 0 });
-        // Three frames come in before the first output: the second is `frame`.
-        self.index = frame - 3;
-        self.phase = 3;
+        // Silence before `frame`.
+        self.ring = @splat(.{ 0, 0 });
+        self.index = frame;
+        self.phase = 0;
+        self.head = frame;
         self.end = -1;
         self.input_position = 0;
         self.input_len = 0;
@@ -195,7 +203,10 @@ pub const Voice = struct {
     /// The source frame the voice mixes next, counted on past its loop's
     /// end.
     pub fn at(self: *const Voice) f64 {
-        if (self.stretcher) |stretcher| return stretcher.tags[1] + self.phase * (stretcher.tags[2] - stretcher.tags[1]);
+        if (self.stretcher) |stretcher| {
+            const a = stretcher.tags[@intCast(self.index & resample.ring_mask)];
+            return a + self.phase * (stretcher.tags[@intCast((self.index + 1) & resample.ring_mask)] - a);
+        }
         return @as(f64, @floatFromInt(self.index)) + self.phase;
     }
 
@@ -203,10 +214,11 @@ pub const Voice = struct {
     /// as its player starts to preserve pitch.
     pub fn stretch(self: *Voice, stretcher: *Stretcher) void {
         const channels = self.channelCount();
-        // The frame coming in next is at index + 3, and the second of the
-        // history at index.
-        stretcher.reset(self.index + 3, true);
-        for (&stretcher.tags, 0..) |*tag, k| tag.* = @floatFromInt(self.index - 1 + @as(i64, @intCast(k)));
+        // The frame coming in next is at `head`, and those in the ring at
+        // themselves.
+        stretcher.reset(self.head, true);
+        var frame = self.index;
+        while (frame < self.head) : (frame += 1) stretcher.tags[@intCast(frame & resample.ring_mask)] = @floatFromInt(frame);
         const held = @min(self.input_len - self.input_position, stretcher.buffer.len);
         @memcpy(stretcher.buffer[0..held], self.input[self.input_position..][0..held]);
         stretcher.count = held / channels;
@@ -266,15 +278,15 @@ pub const Voice = struct {
         return if (self.mono) 1 else 2;
     }
 
-    /// Shifts in the source's next frame; false while a stream has none
-    /// decoded yet.
+    /// Takes in the source's next frame, at `head`; false while a stream has
+    /// none decoded yet.
     fn next(self: *Voice) bool {
         const channels = self.channelCount();
         if (self.input_position >= self.input_len) {
             if (self.end >= 0) {
                 // Past the end, silence.
-                self.shift(0, 0);
-                if (self.stretcher) |stretcher| stretcher.push(stretcher.next);
+                if (self.stretcher) |stretcher| stretcher.push(self.head, stretcher.next);
+                self.push(0, 0);
                 return true;
             }
             const result = if (self.stretcher) |stretcher| stretcher.read(&self.source, self.pitch, self.speed) else self.source.read(self.input[0 .. 256 * channels]);
@@ -282,28 +294,33 @@ pub const Voice = struct {
             self.input_len = result.frames * channels;
             if (result.frames == 0) {
                 if (!result.ended) return false;
-                // The frame coming in would be at index + 3.
-                self.end = self.index + 3;
-                self.shift(0, 0);
-                if (self.stretcher) |stretcher| stretcher.push(stretcher.next);
+                self.end = self.head;
+                if (self.stretcher) |stretcher| stretcher.push(self.head, stretcher.next);
+                self.push(0, 0);
                 return true;
             }
         }
         const frames: []const f32 = if (self.stretcher) |stretcher| stretcher.current else &self.input;
         const left = frames[self.input_position];
         const right = if (self.mono) left else frames[self.input_position + 1];
-        if (self.stretcher) |stretcher| stretcher.push(stretcher.tag0 + @as(f64, @floatFromInt(self.input_position / channels)) * stretcher.tag_step);
+        if (self.stretcher) |stretcher| stretcher.push(self.head, stretcher.tag0 + @as(f64, @floatFromInt(self.input_position / channels)) * stretcher.tag_step);
         self.input_position += channels;
-        self.shift(left, right);
+        self.push(left, right);
         return true;
     }
 
-    fn shift(self: *Voice, left: f32, right: f32) void {
-        self.history[0] = self.history[1];
-        self.history[1] = self.history[2];
-        self.history[2] = self.history[3];
-        self.history[3] = .{ left, right };
-        self.index += 1;
+    /// Puts frame `head` into the ring.
+    fn push(self: *Voice, left: f32, right: f32) void {
+        const k: usize = @intCast(self.head & resample.ring_mask);
+        self.ring[k] = .{ left, right };
+        self.ring[k + resample.ring_frames] = .{ left, right };
+        self.head += 1;
+    }
+
+    /// Whether the voice plays more than one source frame an output frame
+    /// at `speed`, and so needs its sinc bank.
+    pub fn downsamples(self: *const Voice, speed: f64) bool {
+        return self.rate * speed > output.sample_rate;
     }
 
     /// The matrix of the voice's volume and pan, and the master volume.
@@ -360,13 +377,22 @@ pub const Voice = struct {
         // A stretched voice is at its speed already.
         const stretched = if (self.stretcher) |stretcher| stretcher.on else false;
         const step = self.rate / output.sample_rate * (if (stretched) 1 else self.speed);
+        // The spline reaches 2 frames ahead, the sinc further the faster.
+        const bank: ?*SincBank = if (step > 1) self.bank else null;
+        var reach: i64 = 2;
+        if (bank) |sinc| {
+            sinc.set(step);
+            reach = @intCast(sinc.reach);
+        }
         var index: usize = 0;
         while (index < out.len) : (index += 2) {
-            while (self.phase >= 1) {
+            const whole: i64 = @intFromFloat(self.phase);
+            while (self.head <= self.index + whole + reach) {
                 // The stream is late: silence until it catches up.
                 if (!self.next()) return .{ .outcome = .playing, .frames = index / 2 };
-                self.phase -= 1;
             }
+            self.index += whole;
+            self.phase -= @floatFromInt(whole);
             if (self.ended()) {
                 self.playing = false;
                 return .{ .outcome = .ended, .frames = index / 2 };
@@ -376,7 +402,7 @@ pub const Voice = struct {
                 self.ramp_left -= 1;
                 if (self.ramp_left == 0) self.gain = self.target;
             } else if (!self.playing) return .{ .outcome = .faded, .frames = index / 2 };
-            const left, const right = self.sample();
+            const left, const right = if (bank) |sinc| sinc.sample(&self.ring, self.index, self.phase, self.mono) else self.sample();
             out[index] += left * self.gain[0] + right * self.gain[2];
             out[index + 1] += left * self.gain[1] + right * self.gain[3];
             self.phase += step;
@@ -384,11 +410,12 @@ pub const Voice = struct {
         return .{ .outcome = .playing, .frames = out.len / 2 };
     }
 
-    /// Interpolates between the second and third frames with a
-    /// Catmull-Rom spline.
+    /// Interpolates between frames `index` and `index + 1` with a
+    /// Catmull-Rom spline through the frames either side.
     fn sample(self: *const Voice) struct { f32, f32 } {
         const t: f32 = @floatCast(self.phase);
-        const h = &self.history;
+        const first: usize = @intCast((self.index - 1) & resample.ring_mask);
+        const h = self.ring[first..][0..4];
         const spline = struct {
             fn at(time: f32, p0: f32, p1: f32, p2: f32, p3: f32) f32 {
                 return p1 + 0.5 * time * (p2 - p0 + time * (2 * p0 - 5 * p1 + 4 * p2 - p3 + time * (3 * (p1 - p2) + p3 - p0)));

@@ -109,6 +109,9 @@ pub fn addMacos(b: *std.Build, c: anytype) void {
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_webview", .module = view },
     });
+    addSmoke(b, "smoke-webview-forced-appearance", "tests/forced_appearance_webview_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view }, .{ .name = "ziggurat_system", .module = c.system },
+    });
     addEmbeddedWebView(b, target, optimize, core, ui, declarative_view, view);
 }
 
@@ -359,6 +362,9 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
     addSmoke(b, "smoke-webview-page-facts", "tests/page_facts_webview_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
     });
+    addSmoke(b, "smoke-webview-forced-appearance", "tests/forced_appearance_webview_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view }, .{ .name = "ziggurat_system", .module = c.system },
+    });
     _ = addHttpAuthSmoke(b, target, optimize, core, view);
     addSmoke(b, "smoke-webview-context-menu", "tests/context_menu_webview_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
@@ -555,6 +561,9 @@ pub fn addLinux(b: *std.Build, c: anytype) void {
     });
     addSmoke(b, "smoke-webview-page-facts", "tests/page_facts_webview_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+    });
+    addSmoke(b, "smoke-webview-forced-appearance", "tests/forced_appearance_webview_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view }, .{ .name = "ziggurat_system", .module = c.system },
     });
     const http_auth_run = addHttpAuthSmoke(b, target, optimize, core, view);
     http_auth_run.step.dependOn(&install_extension.step);

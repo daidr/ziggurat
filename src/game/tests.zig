@@ -214,3 +214,28 @@ test "an unturned lens snaps to whole screen pixels and culls" {
     try testing.expect(lens.shows(.{ .x = 0, .y = 0, .width = 1, .height = 1 }));
     try testing.expect(!lens.shows(.{ .x = 500, .y = 0, .width = 16, .height = 16 }));
 }
+
+test "steps keep the game's rate, and alpha its place between them, at any frame rate" {
+    // Under the steps' rate, at a display's, and far over it, as frames
+    // uncapped (`ZIGGURAT_UNCAPPED`) come: a second of frames runs 60
+    // steps, and alpha, from 0 to 1, grows from frame to frame between two.
+    for ([_]u64{ 20 * std.time.ns_per_ms, 6250 * std.time.ns_per_us, std.time.ns_per_ms, 100 * std.time.ns_per_us }) |every| {
+        var storage: Storage = .{};
+        var app: App = .{};
+        setUp(&app);
+        var h = Harness.init(&app, App.build, storage.buffers(), .{});
+        var dummy: u8 = 0;
+        var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+        try h.attachInput(&context);
+        var updates = app.walker.updates;
+        var alpha = app.walker.alpha;
+        for (0..std.time.ns_per_s / every) |_| {
+            try h.advance(every);
+            try testing.expect(app.walker.alpha >= 0 and app.walker.alpha < 1);
+            if (app.walker.updates == updates) try testing.expect(app.walker.alpha > alpha);
+            updates = app.walker.updates;
+            alpha = app.walker.alpha;
+        }
+        try testing.expectEqual(@as(usize, 60), app.walker.updates);
+    }
+}

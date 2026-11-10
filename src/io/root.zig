@@ -777,6 +777,26 @@ pub fn tmpDir(options: std.Io.Dir.OpenOptions) TmpDir {
     return .{ .dir = dir, .parent_dir = parent_dir, .sub_path = sub_path };
 }
 
+test "a file held open for reading never blocks replacing it" {
+    // Files open sharing their deletion and replace with POSIX semantics on
+    // Windows, so an app reading one of its files while another thread
+    // saves it never makes the save fail with access denied.
+    var temporary = tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(io(), .{ .sub_path = "state.json", .data = "old" });
+    const held = try temporary.dir.openFile(io(), "state.json", .{});
+    defer held.close(io());
+    var buffer: [64]u8 = undefined;
+    var atomic = try AtomicFile.init(temporary.dir, "state.json", .{ .write_buffer = &buffer });
+    defer atomic.deinit();
+    try atomic.file_writer.interface.writeAll("new");
+    try atomic.finish();
+    var old: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("old", old[0..try readAll(held, &old)]);
+    var fresh: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("new", try temporary.dir.readFile(io(), "state.json", &fresh));
+}
+
 /// `std.DynLib`, which Zig 0.17 no longer provides on Windows; there the
 /// library is loaded with LoadLibraryW and its symbols found by name.
 pub const DynLib = if (builtin.os.tag == .windows) struct {

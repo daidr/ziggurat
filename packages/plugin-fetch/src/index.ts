@@ -187,27 +187,42 @@ export async function fetch(input: RequestInfo | URL, init: RequestInit = {}): P
     statusText: head.statusText,
     headers: head.headers.map(({ name, value }) => [name, value] as [string, string]),
   });
-  const own = (name: string, value: unknown) => Object.defineProperty(res, name, { value, enumerable: true });
-  own("url", head.url || url.href);
-  own("redirected", head.redirected);
-  if (!valid) own("status", status);
   // Reading an aborted body rejects with the signal's reason, as fetch's
   // own does; a WebView may instead report its stream error as its own.
   if (readable && signal) {
     for (const name of ["arrayBuffer", "blob", "bytes", "formData", "json", "text"] as const) {
       const read = (res as unknown as Record<string, unknown>)[name];
       if (typeof read !== "function") continue;
-      own(name, (...args: unknown[]) =>
-        (read.apply(res, args) as Promise<unknown>).catch((error: unknown) => {
-          throw aborted ? signal.reason : error;
-        }),
-      );
+      Object.defineProperty(res, name, {
+        value: (...args: unknown[]) =>
+          (read.apply(res, args) as Promise<unknown>).catch((error: unknown) => {
+            throw aborted ? signal.reason : error;
+          }),
+      });
     }
   }
-  return res;
+  return withMetadata(res, head.url || url.href, head.redirected, status);
 }
 
 export default fetch;
+
+/** A response with the url, redirection and status the host reported. A
+ *  native clone copies the response's internal data, not these own
+ *  properties, so clone is wrapped to carry them to the copy too. */
+function withMetadata(res: Response, url: string, redirected: boolean, status: number): Response {
+  // The native method, taken before the wrapper replaces it.
+  const clone = res.clone;
+  const own = (name: string, value: unknown) => Object.defineProperty(res, name, { value, enumerable: true });
+  own("url", url);
+  own("redirected", redirected);
+  if (res.status !== status) own("status", status);
+  Object.defineProperty(res, "clone", {
+    value(this: Response): Response {
+      return withMetadata(clone.call(this), this.url, this.redirected, this.status);
+    },
+  });
+  return res;
+}
 
 /** The error a failed request rejects with. */
 function failure(error: unknown): Error {

@@ -126,6 +126,10 @@ pub fn show(record: *core.WindowRecord) void {
 pub fn perform(record: *core.WindowRecord, action: core.WindowAction) !void {
     zlm_window_action(record.native.native.?, @backingInt(action));
 }
+/// Shows the window without bringing the app to the front.
+pub fn showInactive(record: *core.WindowRecord) !void {
+    zlm_window_action(record.native.native.?, 8);
+}
 pub fn state(record: *core.WindowRecord) core.WindowState {
     const flags = zlm_window_state(record.native.native.?);
     return .{ .visible = flags & 1 != 0, .minimized = flags & 2 != 0, .maximized = flags & 4 != 0, .focused = flags & 8 != 0, .enabled = flags & 16 != 0, .fullscreen = flags & 32 != 0, .fullscreen_requested = flags & 64 != 0, .always_on_top = flags & 128 != 0, .always_on_top_requested = flags & 256 != 0 };

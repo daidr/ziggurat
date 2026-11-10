@@ -19,7 +19,7 @@ const pkgbuild = @import("pkgbuild.zig");
 
 const usage =
     \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
-    \\ziggurat dev [--web [--port PORT]] [--sign IDENTITY] [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
+    \\ziggurat dev [--web [--port PORT]] [--background] [--sign IDENTITY] [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
     \\ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
     \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--install-dir-name NAME] [--hook-init CMD] [--hook-install CMD] [--hook-uninstall CMD] [--command LIST] [--output FILE]
     \\ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>" [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--command LIST] [--output FILE]
@@ -48,7 +48,9 @@ const usage =
     \\when there are several), so that macOS keeps the permissions and Keychain
     \\access it allowed it across builds; without one it signs ad hoc, whose
     \\signature changes with every build. --sign picks another identity; --sign -
-    \\signs ad hoc.
+    \\signs ad hoc. --background starts the app, and again after each rebuild,
+    \\without bringing it to the front: its windows show without the focus until
+    \\you click one, so the editor keeps it as you save.
     \\build runs `zig build` with ReleaseSafe; --package writes an update package
     \\to dist/ from zig-out/bin and ziggurat.json, with the icon of ziggurat.json,
     \\and signs the Windows executable first when windows in ziggurat.json says how.
@@ -1149,10 +1151,13 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var web = false;
     var port: u16 = dev_web_port;
     var sign: ?[]const u8 = null;
+    var background = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--sign") and index + 1 < args.len) {
+        if (std.mem.eql(u8, arg, "--background")) {
+            background = true;
+        } else if (std.mem.eql(u8, arg, "--sign") and index + 1 < args.len) {
             sign = args[index + 1];
             index += 1;
         } else if (std.mem.eql(u8, arg, "--watch") and index + 1 < args.len) {
@@ -1186,6 +1191,14 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var build_args: std.ArrayList([]const u8) = .empty;
     try build_args.append(allocator, "build");
     try build_args.appendSlice(allocator, extra);
+    // With --background the app starts, and starts again after each
+    // rebuild, without taking the focus from the editor.
+    var environment: ?std.process.Environ.Map = null;
+    defer if (environment) |*map| map.deinit();
+    if (background) {
+        environment = try zio.getEnvMap(allocator);
+        try environment.?.put("ZIGGURAT_DEV_BACKGROUND", "1");
+    }
     var last = try snapshot(allocator, cwd, roots.items);
     while (true) {
         var app: ?std.process.Child = null;
@@ -1206,7 +1219,7 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
                 break :blk null;
             } else executable.?;
             if (program) |path| {
-                app = try zio.spawn(.{ .argv = &.{path} });
+                app = try zio.spawn(.{ .argv = &.{path}, .environ_map = if (environment) |*map| map else null });
                 std.debug.print("ziggurat: running {s} (watching {d} paths)\n", .{ path, roots.items.len });
             } else std.debug.print("ziggurat: waiting for changes\n", .{});
         } else std.debug.print("ziggurat: build failed; waiting for changes\n", .{});

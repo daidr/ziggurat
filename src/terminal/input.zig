@@ -284,6 +284,10 @@ test "keys under normal and application cursor modes" {
     try std.testing.expectEqualStrings("\x1bX", key(.{ .key = .x, .modifiers = .{ .alt = true, .shift = true } }, modes, &buffer).?);
     try std.testing.expectEqualStrings("\x00", key(.{ .key = .space, .modifiers = .{ .control = true } }, modes, &buffer).?);
     try std.testing.expectEqualStrings("\x1f", key(.{ .key = .slash, .modifiers = .{ .control = true } }, modes, &buffer).?);
+    // Ctrl+I, Ctrl+M and Ctrl+[ send Tab, Enter and Esc, as xterm does.
+    try std.testing.expectEqualStrings("\t", key(.{ .key = .i, .modifiers = .{ .control = true } }, modes, &buffer).?);
+    try std.testing.expectEqualStrings("\r", key(.{ .key = .m, .modifiers = .{ .control = true } }, modes, &buffer).?);
+    try std.testing.expectEqualStrings("\x1b", key(.{ .key = .left_bracket, .modifiers = .{ .control = true } }, modes, &buffer).?);
     // Plain characters are typed text.
     try std.testing.expect(key(.{ .key = .a }, modes, &buffer) == null);
     try std.testing.expect(key(.{ .key = .a, .modifiers = .{ .shift = true } }, modes, &buffer) == null);

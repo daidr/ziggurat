@@ -100,6 +100,10 @@ const Snapshot = struct {
     /// The size digits are written in, and how the records are numbered.
     number_size: f32 = 0,
     numbering: ?gutters.Numbering = null,
+    /// Sides whose text is empty, as of a file added or deleted: the
+    /// comparison counts no lines of them, so their one line shows no
+    /// number.
+    empty: [2]bool = @splat(false),
     button: ui.Rect,
     scale: f32,
     rows: [max_rows]RenderRow = undefined,
@@ -250,9 +254,15 @@ pub const View = struct {
         const half = (bounds.width - 8) / 2;
         // Each side's gutter is as wide as the largest number it shows.
         var gutter_width: f32 = 0;
+        var empty: [2]bool = @splat(false);
+        for ([_]Side{ .a, .b }) |side| {
+            const source = if (side == .a) display.a else display.b;
+            empty[@backingInt(side)] = try source.byteLength() == 0;
+        }
         if (parameters.line_numbers) {
             var largest: usize = 0;
             for ([_]Side{ .a, .b }) |side| {
+                if (empty[@backingInt(side)]) continue;
                 const source = if (side == .a) display.a else display.b;
                 const total = try source.lineCount();
                 if (total == 0) continue;
@@ -294,7 +304,7 @@ pub const View = struct {
             anchor.row = @min(anchor.row, index.heights.len - 1);
             anchor.inset = @min(anchor.inset, index.heights[anchor.row] - 1);
         }
-        var candidate: Snapshot = .{ .serial = display.serial, .generation = generation, .a_revision = revision_a, .b_revision = revision_b, .bounds = bounds, .columns = columns, .gutters = gutter_rects, .number_size = parameters.font.size * 0.85, .numbering = parameters.numbering, .button = .{ .x = bounds.x + bounds.width - 136, .y = bounds.y, .width = 136, .height = header_height }, .scale = parameters.scale };
+        var candidate: Snapshot = .{ .serial = display.serial, .generation = generation, .a_revision = revision_a, .b_revision = revision_b, .bounds = bounds, .columns = columns, .gutters = gutter_rects, .number_size = parameters.font.size * 0.85, .numbering = parameters.numbering, .empty = empty, .button = .{ .x = bounds.x + bounds.width - 136, .y = bounds.y, .width = 136, .height = header_height }, .scale = parameters.scale };
         defer candidate.close();
         var row = anchor.row;
         var y = -@as(f32, @floatCast(ix.dip(anchor.inset)));
@@ -544,7 +554,7 @@ pub const View = struct {
                     if (reference == null) hatch.fill(frame, rectangle, column.x, column.y - hatch.phase(scrolled), colors.blank, colors.hatch) else frame.rect(rectangle, if (side == .a) colors.deleted else colors.added);
                     if (reference != null and number_box.width > 0 and number_box.height > 0) frame.rect(number_box, if (side == .a) colors.deleted else colors.added);
                 }
-                if (gutter.width > 0 and number_box.height > 0) if (self.index.?.row(row.index).side(side)) |record| {
+                if (gutter.width > 0 and number_box.height > 0 and !snapshot.empty[@backingInt(side)]) if (self.index.?.row(row.index).side(side)) |record| {
                     try drawNumber(frame, snapshot, side, record, gutter, text_y, row.band > 0, colors);
                 };
                 if (row.hunk != null and row.hunk == self.selected) frame.rect(.{ .x = column.x, .y = rectangle.y, .width = 3, .height = rectangle.height }, colors.selected);

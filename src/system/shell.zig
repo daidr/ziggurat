@@ -1,6 +1,7 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
+const z = @import("ziggurat");
 const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 const NativeShellFailure = extern struct { domain: u32 = 0, code: u32 = 0 };
 /// GIO on Linux; macOS implements the same entry points with NSWorkspace
@@ -84,6 +85,31 @@ pub const FileIcon = struct {
     pixels: []const u8,
 };
 const posix_shell = builtin.os.tag == .linux or builtin.os.tag == .macos;
+
+const quick_look = if (builtin.os.tag == .macos) struct {
+    extern fn zsh_preview(path: [*:0]const u8) c_int;
+} else struct {};
+/// Shows the item at the absolute `path` in the Quick Look panel, the
+/// preview Finder opens with the space bar. The panel is not modal: it stays
+/// open until the user closes it, the app keeps running, and another call
+/// replaces the item it shows. Main thread. macOS only; elsewhere
+/// `UnsupportedCapability`.
+pub fn previewItem(app: *z.App, path: []const u8) !void {
+    app.assertOwner();
+    if (comptime builtin.os.tag != .macos or builtin.is_test) return error.UnsupportedCapability else {
+        try validateText(path);
+        if (!absolute(path)) return error.AbsolutePathRequired;
+        var storage: [max_argument_bytes + 1]u8 = undefined;
+        const target = narrowZ(&storage, path);
+        const status: GioStatus = @fromBackingInt(@intCast(quick_look.zsh_preview(target.ptr)));
+        return switch (status) {
+            .ok => {},
+            .not_found => error.FileNotFound,
+            .not_supported => error.UnsupportedCapability,
+            else => error.PreviewFailed,
+        };
+    }
+}
 pub const capabilities = .{
     .launch_executable = builtin.os.tag == .windows or posix_shell,
     // Browsers open a tab, through `OpenUrl`.

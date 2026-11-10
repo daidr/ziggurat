@@ -148,7 +148,10 @@ const MarkBuffers = struct {
 };
 /// `gutters` are the line numbers' columns before each side's text, empty
 /// without line numbers; a unified view's first holds both numbers.
-const Snapshot = struct { bounds: ui.Rect, columns: [2]ui.Rect, gutters: [2]ui.Rect = @splat(.{ .x = 0, .y = 0, .width = 0, .height = 0 }), parameters: Parameters, font: Font = .{}, revisions: [2]u64, view_versions: [2]u64, serial: u64, projected: bool, composing: bool, rows: [max_rows]Row = undefined, count: usize = 0 };
+/// `empty` are the sides whose text is empty, as of a file added or
+/// deleted: the comparison counts no lines of them, so their one line shows
+/// no number.
+const Snapshot = struct { bounds: ui.Rect, columns: [2]ui.Rect, gutters: [2]ui.Rect = @splat(.{ .x = 0, .y = 0, .width = 0, .height = 0 }), empty: [2]bool = @splat(false), parameters: Parameters, font: Font = .{}, revisions: [2]u64, view_versions: [2]u64, serial: u64, projected: bool, composing: bool, rows: [max_rows]Row = undefined, count: usize = 0 };
 
 /// Explicit affine companion borrow. Close the native publisher before close;
 /// Context storage covers the installed Space through native client unbinding.
@@ -541,6 +544,7 @@ pub const View = opaque {
             const box = ui.layout.intersect(.{ .x = gutter.x, .y = y, .width = gutter.width, .height = row.height - row.band }, gutter);
             if (box.height <= 0) continue;
             if (row.hunk != null) frame.rect(box, if (side == .a and (mode == .split or row.b == null)) colors.deleted else colors.added);
+            if (snapshot.empty[at]) continue;
             const which: gutters.Side = @fromBackingInt(@intCast(at));
             // A header's band over the row marks the segment already.
             if (parameters.numbering) |numbering| if (row.band == 0 and numbering.startsSegment(which, record) and (mode == .split or side == .b or row.b == null)) {
@@ -1375,9 +1379,12 @@ const State = struct {
         // Each side's gutter is as wide as the largest number it shows; a
         // unified view's holds the old and the new number side by side.
         var gutter_rects: [2]ui.Rect = @splat(.{ .x = 0, .y = 0, .width = 0, .height = 0 });
+        var empty: [2]bool = @splat(false);
+        for (self.documents(), &empty) |document, *value| value.* = try document.byteLength() == 0;
         if (parameters.line_numbers) {
             var largest: usize = 0;
             for (self.documents(), 0..) |document, side| {
+                if (empty[side]) continue;
                 const total = try document.lineCount();
                 if (total == 0) continue;
                 const last = if (parameters.numbering) |numbering| numbering.lineOf(@fromBackingInt(@intCast(side)), total - 1) else total - 1;
@@ -1414,7 +1421,7 @@ const State = struct {
             const stats = try adapter.stats();
             if (token == null and stats.visible_paragraphs < stats.paragraphs) return error.FoldedDocument;
         }
-        var candidate: Snapshot = .{ .bounds = bounds, .columns = columns, .gutters = gutter_rects, .parameters = parameters, .revisions = undefined, .view_versions = undefined, .serial = if (display) |value| value.serial else 0, .projected = display != null and !composing, .composing = composing };
+        var candidate: Snapshot = .{ .bounds = bounds, .columns = columns, .gutters = gutter_rects, .empty = empty, .parameters = parameters, .revisions = undefined, .view_versions = undefined, .serial = if (display) |value| value.serial else 0, .projected = display != null and !composing, .composing = composing };
         candidate.font.set(parameters.font);
         candidate.parameters.font = candidate.font.options;
         var index: ?ix.Index = null;

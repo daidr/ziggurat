@@ -28,7 +28,7 @@ music.play();
 
 ## 播放器
 
-`play`、`pause`（淡出，无爆音）、`stop`（暂停并回到开头）、`seek`、`position`、`duration`（未知长度为 null），`setVolume`（增益，变化在 5 ms 内渐变）、`setPan`（单声道等功率，立体声把一侧并入另一侧）、`setSpeed`（同时改变音高，最大 16 倍）、`setLoop` 与 `setLoopRange`（区间外的部分只播一次，`setLoop(false)` 后越过区间结尾一直播到末尾）。不同采样率的源用 Catmull-Rom 插值重采样到输出频率。`Engine.setVolume` 是总音量，混音结果截断到 [-1, 1]。
+`play`、`pause`（淡出，无爆音）、`stop`（暂停并回到开头）、`seek`、`position`、`duration`（未知长度为 null），`setVolume`（增益，变化在 5 ms 内渐变）、`setPan`（单声道等功率，立体声把一侧并入另一侧）、`setSpeed`（同时改变音高，最大 16 倍）、`setLoop` 与 `setLoopRange`（区间外的部分只播一次，`setLoop(false)` 后越过区间结尾一直播到末尾）。不同采样率的源重采样到输出频率：比输出慢的（如 44.1 kHz 或放慢播放）用 Catmull-Rom 插值；比输出快的（88.2、96、192 kHz 的声音，或加速播放）改用 Kaiser 窗 sinc 低通（两侧各 32 个输出帧，20 kHz 内平直、22 kHz 处 -6 dB、24 kHz 起至少衰减 80 dB），超过 24 kHz 的内容不会折叠回可听频段；每秒源帧超过输出 8 倍时核宽封顶 256 个源帧并相应降低截止频率。这样的播放器在创建或首次加速时多分配一份约 75 KB 的权重表，混音本身仍不分配内存。`Engine.setVolume` 是总音量，混音结果截断到 [-1, 1]。
 
 `setPreservesPitch(true)` 让变速时保持音高，像 HTML 媒体的 `preservesPitch`：播客或讲座以 1.5 倍速播放时仍是原来的嗓音。它在播放器的源与重采样之间插入 WSOLA（波形相似叠加）时间伸缩：按半重叠、Hann 窗交叉淡化的两跳长片段（一跳约 16 ms）输出，每段在速度给出的位置附近约 10 ms 内找与上一段自然延续最相似的起点（先按约 16 kHz 步长粗搜，再逐帧细搜），跳过或重复整个周期，音高不变；重采样随后只按采样率、不再按速度。适合语音等有音高的声音，速度约 0.5 到 4 倍，混音稍多耗一点；鼓之类的尖锐起音会略微模糊。切换在已伸缩的约 16 ms 之后生效、没有缝隙，`position` 仍按源的位置前进。首次开启时分配伸缩器（失败返回 `error.OutOfMemory`），之后混音不分配；默认 `false` 保持重采样，`preservesPitch()` 读取当前设置。
 

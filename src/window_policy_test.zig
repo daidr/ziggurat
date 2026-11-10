@@ -130,6 +130,22 @@ test "app activation reports focus entering and leaving the app, not moves betwe
     try expect(probe.changes[2] and !probe.changes[3]);
 }
 
+test "an app started in the background shows its windows without the focus until it takes it" {
+    const app = try z.App.initWithOptions(std.testing.allocator, .{ .background = true });
+    defer app.deinit();
+    const a = try app.createWindow(.{});
+    a.show();
+    try equal(1, record(a).native.inactive_shows);
+    try expect((try a.state()).visible);
+    // The user clicks the window: the app is the active one from now on.
+    record(a).emit(.{ .focus = true });
+    try app.dispatch();
+    const b = try app.createWindow(.{});
+    b.show();
+    try equal(0, record(b).native.inactive_shows);
+    try expect((try b.state()).visible);
+}
+
 test "an app with an all-windows-closed handler keeps running without windows" {
     const Probe = struct {
         app: *z.App = undefined,

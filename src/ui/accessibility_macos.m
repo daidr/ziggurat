@@ -831,8 +831,11 @@ static NSString *const ZuaScrollToVisible = @"AXScrollToVisible";
         [h request:self kind:ACTION_SET_RANGE value:nil start:0 end:0 number:open ? 3 : 2];
 }
 - (void)setAccessibilityValue:(id)newValue {
-    [super setAccessibilityValue:newValue];
     ZuaHost *h = host;
+    /* What assistive technology writes to a password field is not kept on
+       the element, or any other assistive app could read it back; the
+       content's own value, empty, still is. */
+    if (!(node.flags & PASSWORD) || !h || h->updating) [super setAccessibilityValue:newValue];
     if (!h || h->updating) return;
     if (textual(node.role)) {
         [h request:self kind:ACTION_SET_VALUE value:zua_string_of(newValue) start:0 end:0 number:0];
@@ -843,7 +846,7 @@ static NSString *const ZuaScrollToVisible = @"AXScrollToVisible";
 /* Typing over a text field's selection, as Voice Control, dictation and
    automation insert text. */
 - (void)setAccessibilitySelectedText:(NSString *)inserted {
-    [super setAccessibilitySelectedText:inserted];
+    if (!(node.flags & PASSWORD)) [super setAccessibilitySelectedText:inserted];
     ZuaHost *h = host;
     if (!h || h->updating || !textual(node.role) || (node.flags & READ_ONLY)) return;
     NSString *current = value ?: @"";
@@ -1438,6 +1441,7 @@ void zua_test_act(void *pointer, int kind, double number, const char *text) {
         case 4: [element setAccessibilityValue:@(number)]; break;
         case 5: [element setAccessibilityFocused:YES]; break;
         case 6: [element setAccessibilitySelectedTextRange:NSMakeRange((NSUInteger)number, 1)]; break;
+        case 7: [element setAccessibilitySelectedText:[NSString stringWithUTF8String:text]]; break;
         }
     }
 }

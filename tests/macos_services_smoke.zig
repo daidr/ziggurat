@@ -116,6 +116,24 @@ fn checkShell(allocator: std.mem.Allocator) !void {
     try std.testing.expectError(error.NoAssociation, worker.openUrl("ziggurat-smoke-none://x", .{ .extra_schemes = &.{"ziggurat-smoke-none"} }));
 }
 
+extern fn zsh_test_preview_shows(path: [*:0]const u8) c_int;
+extern fn zsh_test_preview_close() void;
+/// Quick Look shows a file in its panel, as Finder's space bar does, and
+/// refuses one that does not exist or a relative path.
+fn checkPreview(app: *z.App) !void {
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const temp = try system.identity.directory(.temp, &path_buffer);
+    var name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&name_buffer, "{s}/ziggurat-preview-smoke-{d}.txt", .{ temp, std.c.getpid() }, 0);
+    try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = path, .data = "Quick Look" });
+    defer std.Io.Dir.cwd().deleteFile(zio.io(), path) catch {};
+    try system.shell.previewItem(app, path);
+    try std.testing.expect(zsh_test_preview_shows(path.ptr) != 0);
+    zsh_test_preview_close();
+    try std.testing.expectError(error.AbsolutePathRequired, system.shell.previewItem(app, "relative.txt"));
+    try std.testing.expectError(error.FileNotFound, system.shell.previewItem(app, "/nonexistent/ziggurat-preview.txt"));
+}
+
 fn runShell(allocator: std.mem.Allocator, result: *anyerror!void) void {
     result.* = checkShell(allocator);
 }
@@ -265,6 +283,7 @@ pub fn main() !void {
     const network = try desktop.network(app);
     try std.testing.expect(network.state != .unknown);
     _ = try desktop.cursorPosition(app);
+    try checkPreview(app);
 
     // A Follower applies a forced source and reads it back at once.
     var follower: theme.Follower = .{};

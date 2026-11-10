@@ -191,6 +191,8 @@ pub const Entry = struct { key: Key, state: State };
 pub const Store = struct {
     storage: []Entry,
     count: usize = 0,
+    /// `clear` forgot the states: `put` keeps none for the rest of the run.
+    cleared: bool = false,
     pub fn init(storage: []Entry) !Store {
         if (storage.len == 0 or storage.len > max_entries) return error.InvalidCapacity;
         return .{ .storage = storage };
@@ -205,6 +207,7 @@ pub const Store = struct {
     pub fn put(self: *Store, key: Key, state: State) !void {
         try key.validate();
         try state.validate();
+        if (self.cleared) return;
         for (self.storage[0..self.count]) |*entry| if (entry.key.eql(key)) {
             entry.state = state;
             return;
@@ -212,6 +215,15 @@ pub const Store = struct {
         if (self.count == self.storage.len) return error.CapacityExceeded;
         self.storage[self.count] = .{ .key = key, .state = state };
         self.count += 1;
+    }
+    /// Forgets every state, as an app's "Reset settings" does, and keeps
+    /// `put` from recording any for the rest of the run: the windows still
+    /// open save no state as they close or the app quits, so that the
+    /// empty store the host saves next stays empty. Windows created later,
+    /// as those of the next launch, open with their options.
+    pub fn clear(self: *Store) void {
+        self.count = 0;
+        self.cleared = true;
     }
     pub fn remove(self: *Store, key: Key) bool {
         for (self.items(), 0..) |entry, at| if (entry.key.eql(key)) {

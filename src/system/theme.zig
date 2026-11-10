@@ -39,6 +39,12 @@ const dwm_use_immersive_dark_mode = 20;
 /// `.system` resolves to.
 pub fn apply(app: *z.App, source: Source, dark: bool) void {
     app.assertOwner();
+    // Pages on Windows draw with their own engine, which follows this.
+    app.setForcedAppearance(switch (source) {
+        .system => .system,
+        .light => .light,
+        .dark => .dark,
+    });
     if (comptime !native_supported) return;
     // A page draws nothing of its own for the app: its content follows.
     if (comptime browser) return;

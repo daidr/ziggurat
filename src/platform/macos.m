@@ -94,6 +94,9 @@ typedef struct NativeWindow {
     NSWindow *window;ZigView *view;ZigDelegate *delegate;
     void *owner;Emit emit;int refs,destroyed;
     int decoration,popup,enabled,keyboard,fullscreen_requested,topmost_requested,shown;
+    /* Hide ordered the window out while it was in the Dock: it no longer
+       counts as visible until it shows or deminiaturizes again. */
+    int hid_miniaturized;
     uint32_t observed_width,observed_height,observed_scale;int size_observed;
     NSEvent *gesture;NSRect caret;
     /* The primary button is down for a secondary click: a Control-click,
@@ -605,7 +608,7 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
     release_window(s);
 }
 - (void)windowDidMiniaturize:(NSNotification *)note{(void)note;if(native)notify_state(native);}
-- (void)windowDidDeminiaturize:(NSNotification *)note{(void)note;if(native)notify_state(native);}
+- (void)windowDidDeminiaturize:(NSNotification *)note{(void)note;if(native){native->hid_miniaturized=0;notify_state(native);}}
 - (void)windowDidEnterFullScreen:(NSNotification *)note{(void)note;if(native)notify_state(native);}
 - (void)windowDidExitFullScreen:(NSNotification *)note{(void)note;if(native)notify_state(native);}
 - (void)windowDidChangeBackingProperties:(NSNotification *)note{(void)note;if(native)notify_size(native);}
@@ -700,7 +703,8 @@ static void detach_over_popup(NativeWindow *s){
 void zlm_window_action(NativeWindow *s,int action){
     @autoreleasepool{
         NSWindow *window=s->window;
-        if(action==1)detach_over_popup(s);
+        if(action==1){detach_over_popup(s);s->hid_miniaturized=[window isMiniaturized]?1:0;}
+        if(action==0||action==5||action==8)s->hid_miniaturized=0;
         switch(action){
             case 0:
                 if(s->popup&&!(s->popup&POPUP_FOCUSABLE))[window orderFront:nil];
@@ -715,16 +719,23 @@ void zlm_window_action(NativeWindow *s,int action){
                 [NSApp activateIgnoringOtherApps:YES];[window makeKeyAndOrderFront:nil];[window makeFirstResponder:s->view];s->shown=1;break;
             case 6:s->enabled=1;break;
             case 7:s->enabled=0;break;
+            /* Shown without bringing the app to the front or the window
+               the keyboard. */
+            case 8:[window orderFront:nil];s->shown=1;break;
             default:break;
         }
-        if((action==0||action==5)&&!s->destroyed)attach_over_popup(s);
+        if((action==0||action==5||action==8)&&!s->destroyed)attach_over_popup(s);
     }
     if(!s->destroyed)notify_state(s);
 }
+/* Visible is what show and hide set, as on Windows and Linux: AppKit's
+   isVisible is false for a window in the Dock, which still counts as
+   shown unless hide ordered it out there. */
 uint32_t zlm_window_state(NativeWindow *s){
     NSWindow *window=s->window;
     const int fullscreen=([window styleMask]&NSWindowStyleMaskFullScreen)!=0,topmost=[window level]>NSNormalWindowLevel;
-    return ([window isVisible]?1u:0u)|([window isMiniaturized]?2u:0u)|(!fullscreen&&[window isZoomed]?4u:0u)|([window isKeyWindow]?8u:0u)|(s->enabled?16u:0u)|
+    const int visible=[window isVisible]||(!s->hid_miniaturized&&[window isMiniaturized]);
+    return (visible?1u:0u)|([window isMiniaturized]?2u:0u)|(!fullscreen&&[window isZoomed]?4u:0u)|([window isKeyWindow]?8u:0u)|(s->enabled?16u:0u)|
         (fullscreen?32u:0u)|(s->fullscreen_requested?64u:0u)|(topmost?128u:0u)|(s->topmost_requested?256u:0u);
 }
 /* 1 while none of the window shows on screen: other windows cover it, or
@@ -1392,6 +1403,16 @@ void zlm_test_click(NativeWindow *s,double x,double y,int how){
     }
 }
 /* AppKit's terminate:, as the Dock menu's Quit sends it. */
+/* Runs the event loop until the window is in the Dock (want 1) or out of
+   it (want 0), for up to five seconds: AppKit animates both. */
+int zlm_test_wait_miniaturized(NativeWindow *s,int want){@autoreleasepool{
+    for(int i=0;i<100;i++){
+        if((([s->window isMiniaturized])?1:0)==want)return 1;
+        NSEvent *event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.05] inMode:NSDefaultRunLoopMode dequeue:YES];
+        if(event)[NSApp sendEvent:event];
+    }
+    return (([s->window isMiniaturized])?1:0)==want;
+}}
 void zlm_test_terminate(void){@autoreleasepool{[NSApp terminate:nil];}}
 /* Moves the pointer to x, y in DIP from the content's top left of a window
    with an input region and has the window follow it, as a move would;

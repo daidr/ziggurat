@@ -80,6 +80,23 @@ test "random fit agrees with independently checked workarea containment and DIP 
     const topology = try m.Topology.init(.win32_physical, &.{monitor("panel-a", 0, 0, 1920, 1080, true)});
     for ([_]f64{ 0, -1, std.math.nan(f64), std.math.inf(f64), 17 }) |scale| try std.testing.expectError(error.InvalidScale, m.resolve(sample(), &topology, .{ .units_per_dip = scale }, .{}));
 }
+test "a cleared store keeps no state for the rest of the run" {
+    var rows: [4]m.Entry = undefined;
+    var store = try m.Store.init(&rows);
+    try store.put(key("main"), sample());
+    try store.put(key("inspector"), sample());
+    store.clear();
+    try std.testing.expectEqual(@as(usize, 0), store.items().len);
+    // A window closing after the reset saves no state again.
+    try store.put(key("main"), sample());
+    try std.testing.expect(store.get(key("main")) == null);
+    var data: [codec.max_bytes]u8 = undefined;
+    var restored_rows: [4]m.Entry = undefined;
+    var restored = try m.Store.init(&restored_rows);
+    try codec.decode(&restored, try codec.encode(&store, &data));
+    try std.testing.expectEqual(@as(usize, 0), restored.items().len);
+}
+
 test "store and versioned codec preserve old state on capacity, corruption and unsupported versions" {
     var rows: [2]m.Entry = undefined;
     var store = try m.Store.init(&rows);

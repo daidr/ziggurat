@@ -7,6 +7,7 @@
 #include <gdk/gdkwayland.h>
 #endif
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "linux_content.h"
@@ -489,8 +490,46 @@ static gboolean state_changed(GtkWidget *widget, GdkEventWindowState *event, gpo
     if (!s->destroyed && s->pointer_operation==operation) notify_state(s);
     release(s); return FALSE;
 }
+/* Whether frames present without waiting for the display, as
+   ZIGGURAT_UNCAPPED=1 (true, on, yes) asks; read once. */
+static int uncapped_frames(void) {
+    static int known=0,value=0;
+    if (!known) {
+        const char *text=getenv("ZIGGURAT_UNCAPPED");
+        value=text&&(!g_ascii_strcasecmp(text,"1")||!g_ascii_strcasecmp(text,"true")||!g_ascii_strcasecmp(text,"on")||!g_ascii_strcasecmp(text,"yes"));
+        known=1;
+    }
+    return value;
+}
+/* Uncapped, tell GTK's frame clock a refresh interval of a microsecond in
+   the timings of the frame being drawn: the clock waits that long after a
+   frame before the next (gdk/gdkframeclockidle.c), and 1/60 s while no
+   frame's timings tell it, so the next frame asked for starts as soon as
+   the last was painted, after the events that came meanwhile. A compositor
+   that tells when frames show still paces it. GDK keeps the timings
+   private: refresh_interval is after smoothed_frame_time, which GTK
+   3.24.24 added, else in its place; the field is found once by the public
+   getter, and none is written where neither holds it. */
+static void pace_uncapped(GtkWidget *area) {
+    static int offset=0; /* 0 unknown, -1 none */
+    if (!uncapped_frames()||offset<0) return;
+    GdkFrameClock *clock=gtk_widget_get_frame_clock(area); if (!clock) return;
+    GdkFrameTimings *timings=gdk_frame_clock_get_current_timings(clock);
+    if (!timings||gdk_frame_timings_get_refresh_interval(timings)!=0) return;
+    static const int offsets[]={56,48};
+    for (size_t i=0;i<sizeof offsets/sizeof offsets[0];i++) {
+        if (offset>0&&offsets[i]!=offset) continue;
+        gint64 *field=(gint64 *)((char *)timings+offsets[i]);
+        if (*field!=0) continue;
+        *field=1;
+        if (gdk_frame_timings_get_refresh_interval(timings)==1) { offset=offsets[i]; return; }
+        *field=0;
+    }
+    if (offset==0) offset=-1;
+}
 static gboolean draw(GtkWidget *widget, cairo_t *context, gpointer data) {
     (void)widget; NativeWindow *s=data; NativeEvent event={0}; event.kind=1; event.context=context;
+    pace_uncapped(s->area);
     size_event(s,&event); emit(s,&event); return FALSE;
 }
 static gboolean configured(GtkWidget *widget, GdkEventConfigure *native, gpointer data) {
@@ -1181,6 +1220,16 @@ void zlg_window_action(NativeWindow *s, int action) {
     if (action==1 || action==7) s->gesture=NULL;
     switch(action) {
         case 0: if (s->popup) popup_show(s); else gtk_widget_show(s->window); break;
+        case 8: {
+            /* Shown without taking the focus: the window manager does not
+               give it to a window mapped without focus-on-map. */
+            if (s->popup) { popup_show(s); break; }
+            gboolean focus=gtk_window_get_focus_on_map(GTK_WINDOW(s->window));
+            gtk_window_set_focus_on_map(GTK_WINDOW(s->window),FALSE);
+            gtk_widget_show(s->window);
+            if (!s->destroyed) gtk_window_set_focus_on_map(GTK_WINDOW(s->window),focus);
+            break;
+        }
         case 1: s->popup_regrab=FALSE; popup_ungrab(s); if(!s->destroyed)gtk_widget_hide(s->window); break;
         case 2: request_mode(s,MODE_MINIMIZED); break; case 3: request_mode(s,MODE_MAXIMIZED); break;
         case 4:

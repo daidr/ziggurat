@@ -115,6 +115,14 @@ pub const Highlighter = struct {
         self.confirmed = 1;
         self.dirty = -1;
     }
+    /// The lines, in order, that start in state 0 whatever the line before
+    /// ends in (`setRestarts`), as the edits since have moved them: the
+    /// first lines of a patch's hunks, for highlighting of a host's own,
+    /// as a parser's, to start each hunk on its own as well. Valid until
+    /// the next `setRestarts` or `edit`.
+    pub fn restartLines(self: *const Highlighter) []const usize {
+        return self.restarts.items;
+    }
     /// Whether line `index` starts in state 0 (`setRestarts`).
     pub fn restartsAt(self: *const Highlighter, index: usize) bool {
         const items = self.restarts.items;
@@ -233,7 +241,11 @@ pub const Highlighter = struct {
 
     /// Work toward the states of the lines up to `last`, tokenizing at most
     /// `budget` lines, and report whether they are ready. Call it before
-    /// showing lines, and again later while it reports false.
+    /// showing lines, and again later while it reports false. A long line
+    /// counts as one line for each `line_work` bytes of it, so that a pass
+    /// over minified or generated text, whose lines are kilobytes, stays
+    /// within the budget; a line too long to color (`syntax.max_line`) is
+    /// not tokenized and counts as one.
     pub fn highlight(self: *Highlighter, source: anytype, last_line: usize, budget: usize) !bool {
         const count = try source.lineCount();
         self.line_count = count;
@@ -254,9 +266,9 @@ pub const Highlighter = struct {
         outer: while (self.frontier <= last) {
             var i = self.frontier - 1;
             while (i <= last) : (i += 1) {
-                if (work == budget) return false;
-                work += 1;
+                if (work >= budget) return false;
                 const line = try source.readLine(i, self.line_buffer);
+                work += 1 + if (line.length > line.text.len) 0 else line.text.len / line_work;
                 var out = syntax.Output.init(&scratch);
                 // A hunk starting on the next line starts in state 0.
                 const end = if (self.restartsAt(i + 1)) 0 else if (line.length > line.text.len) self.states.items[i] else self.tokenizer.tokenize(line.text, self.states.items[i], &out);
@@ -302,6 +314,10 @@ pub const Highlighter = struct {
         return .{ .tokens = result.tokens, .final = start.final };
     }
 };
+
+/// The bytes of a line `Highlighter.highlight` counts as one line of its
+/// budget: 64 lines of this length are 16 KB.
+pub const line_work = 256;
 
 fn lineHash(line: SourceLine) u64 {
     var hasher = std.hash.Wyhash.init(line.length);

@@ -409,9 +409,13 @@ const Editor = struct {
         self.code.field.prepare(self.code.field.bounds, self.code.field.parameters) catch {};
         if (self.window) |window| window.invalidate();
     }
-    /// Highlight by the file's name, or as Zig when it has no known one.
+    /// Highlight by the file's name, or else by the #! line the text opens
+    /// with, or as Zig when neither tells.
     fn setLanguage(self: *Editor) void {
-        const language = syntax.forFile(self.fileName()) orelse &syntax.languages.zig;
+        var first: [256]u8 = undefined;
+        const document = self.code.document;
+        const count = document.read(.{ .start = 0, .end = @min(document.byteLength() catch 0, first.len) }, &first) catch 0;
+        const language = syntax.forText(self.fileName(), first[0..count]) orelse &syntax.languages.zig;
         self.highlighting.setLanguage(language);
         self.cursors.setSyntax(language, &self.highlighting.highlighter);
     }

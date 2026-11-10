@@ -118,6 +118,9 @@ jobs:
       # with room for a cold one.
       ZIGGURAT_CI_CACHE_MAX_MB: 24576
       ZIGGURAT_CI_CACHE_MIN_FREE_MB: 28672
+      # Pull request core checks keep their own Zig cache, which the full
+      # suite's much larger one is trimmed before (scripts/ci-zig-cache.sh).
+      ZIGGURAT_CI_CACHE_TIER: ${{ needs.changes.outputs.full == 'true' && 'full' || 'core' }}
     defaults:
       run:
         shell: pwsh
@@ -227,6 +230,9 @@ jobs:
       # cold. The runner keeps them on its 60 GB data disk; the free space
       # floor in scripts/ci-zig-cache.sh still applies.
       ZIGGURAT_CI_CACHE_MAX_MB: 40960
+      # Pull request core checks keep their own Zig cache, which the full
+      # suite's much larger one is trimmed before (scripts/ci-zig-cache.sh).
+      ZIGGURAT_CI_CACHE_TIER: ${{ needs.changes.outputs.full == 'true' && 'full' || 'core' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -390,7 +396,7 @@ jobs:
         if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
         run: |
           sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11
-          xvfb-run -a -s '-screen 0 1280x800x24' zig build test-webkit-dmabuf smoke-webview-content-rules smoke-webview-scroll-linux smoke-webview-media-linux smoke-webview-regions-linux smoke-webview-overlay-linux -Dwebview=true -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build test-webkit-dmabuf smoke-webview-content-rules smoke-webview-scroll-linux smoke-webview-media-linux smoke-webview-regions-linux smoke-webview-overlay-linux smoke-webview-forced-appearance -Dwebview=true -Doptimize=${{ matrix.optimize }}
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-overlay-linux -Dwebview=true -Daccessibility=true -Doptimize=${{ matrix.optimize }}
       - name: Capture Cairo submission and idle evidence
         if: matrix.optimize == 'ReleaseSafe'
@@ -419,6 +425,7 @@ jobs:
     env:
       # See the linux job.
       ZIGGURAT_CI_CACHE_MAX_MB: 40960
+      ZIGGURAT_CI_CACHE_TIER: full
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -493,7 +500,7 @@ jobs:
         timeout-minutes: 15
         run: |
           zig build check -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
-          zig build build-smoke-webview-macos build-smoke-webview-content-rules build-smoke-webview-local-macos build-smoke-webview-remote-macos build-smoke-webview-find-macos build-smoke-webview-capture-macos build-smoke-webview-profile-macos build-smoke-webview-cookies-macos build-smoke-webview-initializers-macos build-smoke-webview-permissions-macos build-smoke-webview-files-macos build-smoke-webview-regions-macos build-smoke-webview-downloads-macos build-smoke-webview-session-state build-smoke-webview-context-menu -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build build-smoke-webview-macos build-smoke-webview-content-rules build-smoke-webview-local-macos build-smoke-webview-remote-macos build-smoke-webview-find-macos build-smoke-webview-capture-macos build-smoke-webview-profile-macos build-smoke-webview-cookies-macos build-smoke-webview-initializers-macos build-smoke-webview-permissions-macos build-smoke-webview-files-macos build-smoke-webview-regions-macos build-smoke-webview-downloads-macos build-smoke-webview-session-state build-smoke-webview-context-menu build-smoke-webview-forced-appearance -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-content-rules
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-local-macos
@@ -509,6 +516,7 @@ jobs:
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-session-state
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-files-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-context-menu
+          sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-forced-appearance
           zig build build-smoke-webview-overlay-macos -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-overlay-macos
           zig build build-smoke-webview-overlay-macos -Dwebview=true -Daccessibility=true -Doptimize=${{ matrix.optimize }} --summary failures
@@ -520,6 +528,11 @@ jobs:
     # Also needs Node.js and an installed WebView2 Runtime on the runner.
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 90
+    env:
+      # See the windows job.
+      ZIGGURAT_CI_CACHE_MAX_MB: 24576
+      ZIGGURAT_CI_CACHE_MIN_FREE_MB: 28672
+      ZIGGURAT_CI_CACHE_TIER: webview
     defaults:
       run:
         shell: pwsh
@@ -561,14 +574,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          zig build "-j$env:NUMBER_OF_PROCESSORS" test-webview test-remote-origin smoke-page-host smoke-page-authorization build-smoke-webview build-smoke-composition-webview build-smoke-page-session build-smoke-webview-policy build-smoke-page build-smoke-page-remote build-smoke-script build-smoke-browser-tools build-smoke-request-policy build-smoke-resource-async build-smoke-resource-file build-smoke-scheme build-smoke-resource-producer build-smoke-permission build-smoke-download build-smoke-browser-policy build-smoke-ipc build-smoke-assets build-smoke-page-runtime build-smoke-plugin-fetch build-smoke-plugin-watch build-smoke-plugin-sqlite build-smoke-plugin-websocket build-smoke-embedded-webview build-smoke-webview-content-rules build-smoke-webview-page-facts build-smoke-webview-http-auth build-smoke-webview-context-menu build-smoke-webview-page-options build-smoke-webview-session-state build-smoke-webview-picture-in-picture build-smoke-webview-cookies-windows -Dwebview=true -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test-webview test-remote-origin smoke-page-host smoke-page-authorization build-smoke-webview build-smoke-composition-webview build-smoke-page-session build-smoke-webview-policy build-smoke-page build-smoke-page-remote build-smoke-script build-smoke-browser-tools build-smoke-request-policy build-smoke-resource-async build-smoke-resource-file build-smoke-scheme build-smoke-resource-producer build-smoke-permission build-smoke-download build-smoke-browser-policy build-smoke-ipc build-smoke-assets build-smoke-page-runtime build-smoke-plugin-fetch build-smoke-plugin-watch build-smoke-plugin-sqlite build-smoke-plugin-websocket build-smoke-embedded-webview build-smoke-webview-content-rules build-smoke-webview-page-facts build-smoke-webview-http-auth build-smoke-webview-context-menu build-smoke-webview-page-options build-smoke-webview-session-state build-smoke-webview-picture-in-picture build-smoke-webview-cookies-windows build-smoke-webview-forced-appearance -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Real WebView2 Runtime lifecycle and policy checks, one at a time
         if: success() || failure()
         run: |
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
           # Each starts and waits out real browser processes: they run alone, after the compiles.
-          ./scripts/ci-webview-checks.ps1 -Options '-Dwebview=true', '-Doptimize=ReleaseSafe' -Steps smoke-webview, smoke-composition-webview, smoke-page-session, smoke-webview-policy, smoke-page, smoke-page-remote, smoke-script, smoke-browser-tools, smoke-request-policy, smoke-resource-async, smoke-resource-file, smoke-scheme, smoke-resource-producer, smoke-permission, smoke-download, smoke-browser-policy, smoke-ipc, smoke-assets, smoke-page-runtime, smoke-plugin-fetch, smoke-plugin-watch, smoke-plugin-sqlite, smoke-plugin-websocket, smoke-embedded-webview, smoke-webview-content-rules, smoke-webview-page-facts, smoke-webview-http-auth, smoke-webview-context-menu, smoke-webview-page-options, smoke-webview-session-state, smoke-webview-picture-in-picture, smoke-webview-cookies-windows
+          ./scripts/ci-webview-checks.ps1 -Options '-Dwebview=true', '-Doptimize=ReleaseSafe' -Steps smoke-webview, smoke-composition-webview, smoke-page-session, smoke-webview-policy, smoke-page, smoke-page-remote, smoke-script, smoke-browser-tools, smoke-request-policy, smoke-resource-async, smoke-resource-file, smoke-scheme, smoke-resource-producer, smoke-permission, smoke-download, smoke-browser-policy, smoke-ipc, smoke-assets, smoke-page-runtime, smoke-plugin-fetch, smoke-plugin-watch, smoke-plugin-sqlite, smoke-plugin-websocket, smoke-embedded-webview, smoke-webview-content-rules, smoke-webview-page-facts, smoke-webview-http-auth, smoke-webview-context-menu, smoke-webview-page-options, smoke-webview-session-state, smoke-webview-picture-in-picture, smoke-webview-cookies-windows, smoke-webview-forced-appearance
       - name: Standalone engine discovery without a page
         if: success() || failure()
         run: |

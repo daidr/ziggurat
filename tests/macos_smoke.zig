@@ -7,6 +7,7 @@ extern fn zlm_test_close(*anyopaque) void;
 extern fn zlm_test_commit(*anyopaque, [*:0]const u8) void;
 extern fn zlm_test_compose(*anyopaque, [*:0]const u8, usize) void;
 extern fn zlm_test_compose_key(*anyopaque, c_int) void;
+extern fn zlm_test_wait_miniaturized(*anyopaque, c_int) c_int;
 extern fn zlm_test_title_is(*anyopaque, [*:0]const u8) c_int;
 extern fn zlm_test_terminate() void;
 extern fn zlm_test_click(*anyopaque, f64, f64, c_int) void;
@@ -177,6 +178,22 @@ pub fn main() !void {
         try probe.attach(app);
         probe.window.show();
         try std.testing.expect((try probe.window.state()).visible);
+        if (cycle == 0) {
+            // A window in the Dock is still visible, as on Windows and
+            // Linux, until hide orders it out; show shows it again.
+            try probe.window.perform(.minimize);
+            try std.testing.expect(zlm_test_wait_miniaturized(probe.native(), 1) != 0);
+            const minimized = try probe.window.state();
+            try std.testing.expect(minimized.minimized and minimized.visible);
+            try probe.window.perform(.hide);
+            try std.testing.expect(!(try probe.window.state()).visible);
+            try probe.window.perform(.show);
+            try std.testing.expect((try probe.window.state()).visible);
+            try probe.window.perform(.restore);
+            try std.testing.expect(zlm_test_wait_miniaturized(probe.native(), 0) != 0);
+            const restored = try probe.window.state();
+            try std.testing.expect(!restored.minimized and restored.visible);
+        }
         // AppKit's terminate:, as the Dock menu's Quit sends it, asks the
         // windows, which may refuse, and never exits the process.
         probe.cancel = true;

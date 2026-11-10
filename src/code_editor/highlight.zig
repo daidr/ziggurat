@@ -90,6 +90,11 @@ pub const Highlighting = struct {
     pub fn setRestarts(self: *Highlighting, lines: []const usize) !void {
         try self.highlighter.setRestarts(lines);
     }
+    /// The lines `setRestarts` started in state 0, as the edits since have
+    /// moved them (`syntax.Highlighter.restartLines`).
+    pub fn restarts(self: *const Highlighting) []const usize {
+        return self.highlighter.restartLines();
+    }
     pub fn setTheme(self: *Highlighting, theme: syntax.Theme) void {
         self.theme = theme;
     }

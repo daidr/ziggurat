@@ -46,6 +46,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include "pacing.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -548,6 +549,12 @@ static int attach_layer(ZigMetalRenderer *s,NSWindow *window){
         CAMetalLayer *layer=[CAMetalLayer layer];
         layer.device=s->device;layer.pixelFormat=MTLPixelFormatBGRA8Unorm;layer.framebufferOnly=NO;
         layer.maximumDrawableCount=3;layer.allowsNextDrawableTimeout=YES;
+        /* Uncapped (ZIGGURAT_UNCAPPED), a drawable presents as soon as the
+           GPU has drawn it rather than at the display's next refresh, so
+           frames come as fast as they draw. The window server still
+           composites the window once a refresh, showing the newest frame
+           without tearing. */
+        if(zpacing_uncapped()){if(@available(macOS 10.13,*))layer.displaySyncEnabled=NO;}
         CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);layer.colorspace=space;CGColorSpaceRelease(space);
         layer.anchorPoint=CGPointZero;layer.hidden=YES;layer.needsDisplayOnBoundsChange=NO;
         layer.autoresizingMask=kCALayerWidthSizable|kCALayerHeightSizable;
