@@ -558,7 +558,7 @@ var installed_runs: std.ArrayList(*std.Build.Step.Run) = .empty;
 /// a smoke that hangs fails by name instead of holding the build.
 pub fn limitSmokeRuns(b: *std.Build, seconds: u32) void {
     if (seconds == 0) return;
-    const tool = b.addExecutable(.{ .name = "ziggurat-run-timeout", .root_module = b.createModule(.{ .root_source_file = b.path("tools/run_timeout.zig"), .target = b.graph.host, .optimize = .Debug }) });
+    const tool = b.addExecutable(.{ .name = "ziggurat-run-timeout", .root_module = b.createModule(.{ .root_source_file = b.path("tools/run_timeout.zig"), .target = b.graph.host, .optimize = .Debug }), .use_llvm = if (b.graph.host.result.os.tag == .windows) false else null });
     const limit = b.fmt("{d}", .{seconds});
     for (installed_runs.items) |run| {
         run.argv.insertSlice(b.allocator, 0, &.{ .{ .artifact = .{ .prefix = "", .suffix = "", .artifact = tool, .make_absolute = false } }, .{ .bytes = limit } }) catch @panic("OOM");
