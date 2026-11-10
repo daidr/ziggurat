@@ -679,17 +679,18 @@ pub fn addTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Co
     return b.addTest(with);
 }
 
-/// Without `ui_logic`, `test` leaves out the unit tests of modules built on
-/// the UI module that reach native code only through it: their checks run
-/// on the test backend and give the same results on every platform, so a
-/// pull request runs them on Linux and macOS, while Windows rebuilds only
-/// the tests that touch its native code (nightly and `full-ci` keep all).
-pub fn selectUiLogicTests(b: *std.Build, ui_logic: bool) void {
-    if (ui_logic) return;
+/// Without `portable`, `test` leaves out the tests whose results do not
+/// depend on the platform: the modules built on the UI module that reach
+/// native code only through it (their checks run on the test backend) and
+/// the pure computation in `portable_tests`. A pull request runs them on
+/// Linux and macOS, and Windows only rebuilds and checks the tests of code
+/// that touches its own system; nightly and `full-ci` runs keep them all.
+pub fn selectPortableTests(b: *std.Build, portable: bool) void {
+    if (portable) return;
     const top = &b.top_level_steps.get("test").?.step;
     var kept: usize = 0;
     for (top.dependencies.items) |dependency| {
-        if (!isUiLogicTest(dependency)) {
+        if (!isPortableTest(dependency)) {
             top.dependencies.items[kept] = dependency;
             kept += 1;
         }
@@ -697,20 +698,64 @@ pub fn selectUiLogicTests(b: *std.Build, ui_logic: bool) void {
     top.dependencies.shrinkRetainingCapacity(kept);
 }
 
-fn isUiLogicTest(step: *std.Build.Step) bool {
+fn isPortableTest(step: *std.Build.Step) bool {
     const run = step.cast(std.Build.Step.Run) orelse return false;
     const compile = run.producer orelse return false;
     if (compile.kind != .@"test") return false;
     const root = compile.root_module;
-    if (isUiRoot(root)) return false;
     const file = root.root_source_file orelse return false;
     if (file != .src_path) return false;
+    for (portable_tests) |path| if (samePath(file.src_path.sub_path, path)) return true;
+    if (isUiRoot(root)) return false;
     for (platform_specific_tests) |path| if (samePath(file.src_path.sub_path, path)) return false;
     // Code that links native libraries or C itself is tested where it runs.
     if (root.link_objects.items.len != 0 or root.link_libc == true) return false;
     for (root.getGraph().modules) |module| if (isUiRoot(module)) return true;
     return false;
 }
+
+/// Parsers, codecs, data structures and protocols: the same bytes in and
+/// out on every platform. Vector, SVG and shader tests stay, since Windows
+/// links its own math functions.
+const portable_tests = [_][]const u8{
+    "src/animation/root.zig",
+    "src/assets/root.zig",
+    "src/chart/root.zig",
+    "src/code_editor/syntax/root.zig",
+    "src/document/root.zig",
+    "src/document_diff/root.zig",
+    "src/document_editor/caret.zig",
+    "src/document_editor/prepared_hit.zig",
+    "src/http_response/root.zig",
+    "src/https_resources/root.zig",
+    "src/https_resources/site_routes.zig",
+    "src/i18n/root.zig",
+    "src/images/apng.zig",
+    "src/images/gif.zig",
+    "src/images/png.zig",
+    "src/ipc/root.zig",
+    "src/markdown/root.zig",
+    "src/page_runtime/root.zig",
+    "src/resource_stream/bridge.zig",
+    "src/resource_stream/root.zig",
+    "src/rich_text/root.zig",
+    "src/tls_pem/root.zig",
+    "src/ui/gaussian_resource.zig",
+    "src/ui/image_resource.zig",
+    "src/ui/shadow_resource.zig",
+    "src/webview/content_rules.zig",
+    "src/webview/cookies.zig",
+    "src/webview/profile_tls_policy.zig",
+    "src/webview/webkit_remote.zig",
+    "tests/i18n_generated_check.zig",
+    "tests/ipc_fixture_check.zig",
+    "tests/resource_producer_fixture_check.zig",
+    "tests/ui_affine.zig",
+    "tests/ui_affine_state.zig",
+    "tools/deb.zig",
+    "tools/rpm.zig",
+    "tools/setup_format.zig",
+};
 
 /// Modules above the UI whose own tests take a platform's native paths:
 /// local sockets, a pseudo console, accessibility providers, gamepads.

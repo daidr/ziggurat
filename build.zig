@@ -2025,7 +2025,7 @@ pub fn build(b: *std.Build) void {
     addExamples(b, target, optimize);
     shareCommonModules(b, target, optimize, check, test_step);
     helpers.configurePullRequestRuns(b.option(bool, "cache-smokes", "Run each smoke only when its executable changed (pull request checks)") orelse false);
-    helpers.selectUiLogicTests(b, b.option(bool, "ui-logic-tests", "Include the tests of modules built on the UI that reach native code only through it (default true)") orelse true);
+    helpers.selectPortableTests(b, b.option(bool, "portable-tests", "Include the tests whose results do not depend on the platform (default true)") orelse true);
     helpers.limitSmokeRuns(b, b.option(u32, "smoke-timeout", "End a smoke that runs longer than this many seconds (0, the default: no limit)") orelse 0);
     useWindowsSelfHostedBackend(b, b.option(bool, "windows-llvm", "Build Windows Debug artifacts with the LLVM backend instead of Zig's self-hosted backend") orelse false);
 }
