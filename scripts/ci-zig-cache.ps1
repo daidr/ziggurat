@@ -65,6 +65,19 @@ function Get-FreeMb {
 }
 function Test-Over { (Get-UsedMb) -gt $maxMb -or (Get-FreeMb) -lt $minFreeMb }
 
+# Test scripts work in ziggurat-* folders under the temporary directory and
+# remove them when they finish; a job that was cancelled or killed leaves
+# them behind (setup smokes hold whole installs). Only one job runs on a
+# runner at a time, so folders older than two hours belong to no live job.
+$temporary = [System.IO.Path]::GetTempPath()
+$stale = [DateTime]::UtcNow.AddHours(-2)
+foreach ($dir in @(Get-ChildItem -LiteralPath $temporary -Directory -Filter 'ziggurat-*' -Force -ErrorAction SilentlyContinue)) {
+    if ($dir.LastWriteTimeUtc -lt $stale) {
+        Write-Host "removing stale temporary folder $($dir.FullName)"
+        Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Get-ChildItem -LiteralPath $ci -Directory -Filter 'zig-*' | Where-Object { $_.Name -ne "zig-$version" } | ForEach-Object { Remove-Cache $_.FullName }
 $now = [DateTime]::UtcNow
 Get-ChildItem -LiteralPath $root -Directory -Filter 'local-*' | ForEach-Object {
