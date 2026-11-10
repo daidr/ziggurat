@@ -11,10 +11,19 @@ const folding = @import("folds.zig");
 const owner_commands = @import("owner_commands.zig");
 const line_backgrounds = @import("line_backgrounds.zig");
 const range_markers = @import("range_markers.zig");
+const inlay_set = @import("inlays.zig");
 const prepared_hit = @import("ziggurat_prepared_hit");
 const pointer_selection = @import("pointer_selection.zig");
 pub const RangeMarker = range_markers.Marker;
 pub const RangeMarkerKind = range_markers.Kind;
+pub const Inlay = inlay_set.Inlay;
+pub const InlayKind = inlay_set.Kind;
+pub const max_inlay_text = inlay_set.max_text;
+/// `version` names the published inlays; `current` is false when the editor
+/// changed after they were published, so they were stale at once.
+pub const InlayResult = struct { version: u64, current: bool };
+/// The inlay set and suggestion a layout was shaped with; 0 is none live.
+const InlayKey = struct { inlays: u64 = 0, suggestion: u64 = 0 };
 pub const RangeMarkerMark = struct { marker: usize, range: d.Range, kind: RangeMarkerKind, color: u32, rect: Rect };
 pub const RangeMarkerResult = struct { version: u64, current: bool };
 pub const PreparedRangeMarkers = struct { items: []const RangeMarkerMark, version: u64, text_version: u64, view_version: u64, projection_version: u64 };
@@ -61,10 +70,11 @@ pub const Limits = struct {
     line_backgrounds: usize = 4096,
     range_markers: usize = 4096,
     range_marker_work: usize = 1024 * 1024,
+    inlays: usize = 4096,
     prepared: t.PrepareLimits = .{ .pixels = 1024 * 1024, .bytes = 8 * 1024 * 1024 },
 };
 pub const Parameters = struct { font: t.Options = .{ .wrap = .word_character, .width = 1 }, scale: f32 = 1, version: u64 = 0, estimated_height: f32 = 20, caret_cells: bool = false };
-pub const Colors = struct { text: ui.Color = ui.Color.rgb(0x202020), selection: u32 = 0xc7ddff, composition: u32 = 0x385ca8, caret: u32 = 0x202020, caret_style: ?caret_visual.Style = null };
+pub const Colors = struct { text: ui.Color = ui.Color.rgb(0x202020), inlay: ui.Color = ui.Color.rgb(0x8a8f98), selection: u32 = 0xc7ddff, composition: u32 = 0x385ca8, caret: u32 = 0x202020, caret_style: ?caret_visual.Style = null };
 pub const EditResult = struct { changed: bool, index_required: bool };
 pub const PrepareResult = struct { changed: bool, shaped_batches: usize, shaped_bytes: usize, index_rebuilt: bool };
 /// Error returns precede ownership publication. Once published, foreign old
@@ -92,7 +102,7 @@ pub const FoldToken = struct { adapter: *Adapter, generation: u64 };
 /// Errors precede both fold publications. A returned value means ownership was
 /// committed even when foreign old-resource disposal invalidated current text.
 pub const FoldPairResult = struct { current: bool, post_publish_error: ?anyerror };
-pub const Status = struct { revision: u64, index_required: bool, folds_required: bool, fold_version: u64, layout_required: bool, last_layout_error: ?anyerror, projection_active: bool = false, line_backgrounds_required: bool = false, range_markers_required: bool = false };
+pub const Status = struct { revision: u64, index_required: bool, folds_required: bool, fold_version: u64, layout_required: bool, last_layout_error: ?anyerror, projection_active: bool = false, line_backgrounds_required: bool = false, range_markers_required: bool = false, inlays_required: bool = false };
 pub const Stats = struct { owned_bytes: usize, reserved_peak_bytes: usize, nodes: usize, paragraphs: usize, layouts: usize, shaped_batches: u64, shaped_bytes: u64, visited_nodes: u64, reclaimed_nodes: u64, scanned_rows: u64, folds: usize, fold_version: u64, visible_paragraphs: usize, estimated_extent: f64 };
 const Anchor = struct { line: usize = 0, id: u64 = 0, intra: f64 = 0 };
 const VisualCaret = struct { selected: d.Selection, affinity: t.Affinity = .downstream, preferred_x: ?f32 = null };
@@ -546,7 +556,7 @@ test "password fields shape placeholders, copy nothing, hide text from input ser
     const shaped = struct {
         fn text(adapter: *Adapter) ![]const u8 {
             const value = try adapter.state();
-            return value.view.?.blocks[0].entry.layout.text();
+            return value.view.?.blocks[0].entry.text().text();
         }
     };
     try std.testing.expectEqualStrings("o\xce\xbf", try shaped.text(field.adapter));
@@ -764,7 +774,9 @@ const View = struct {
     }
 };
 /// One clip of a run's text pass; a null color is the text color.
-const TextClip = struct { rect: Rect, color: ?u32, run: u32 };
+/// A clip of the text pass: in `color`, the inlay color when `inlay`, else
+/// the text color.
+const TextClip = struct { rect: Rect, color: ?u32, run: u32, inlay: bool = false };
 const VisualRun = struct {
     block: *const Block,
     range: d.Range,
@@ -787,12 +799,12 @@ const RunIterator = struct {
         if (self.at == view.count) return null;
         const block = &view.blocks[self.at];
         self.at += 1;
-        return .{ .block = block, .range = .{ .start = block.byte, .end = block.byte + (try block.entry.layout.text()).len }, .y = block.y, .clip = view.bounds, .last = self.at == view.count };
+        return .{ .block = block, .range = .{ .start = block.byte, .end = block.byte + (try block.entry.text().text()).len }, .y = block.y, .clip = view.bounds, .last = self.at == view.count };
     }
 };
 fn rangeInRun(run: VisualRun, range: d.Range) !?t.ByteRange {
     if (range.start >= run.range.end or range.end <= run.range.start or range.start == range.end) return null;
-    return .{ .start = try cache.snap(run.block.entry.layout, @max(range.start, run.range.start) - run.block.byte, false), .end = try cache.snap(run.block.entry.layout, @min(range.end, run.range.end) - run.block.byte, true) };
+    return .{ .start = try cache.snap(run.block.entry.text(), @max(range.start, run.range.start) - run.block.byte, false), .end = try cache.snap(run.block.entry.text(), @min(range.end, run.range.end) - run.block.byte, true) };
 }
 fn rangeRect(view: *const View, scroll_x: f64, run: VisualRun, item: t.Rect) Rect {
     return ui.layout.intersect(.{ .x = @floatCast(@as(f64, view.bounds.x) + item.x - scroll_x), .y = @floatCast(@as(f64, view.bounds.y) + run.y + item.y), .width = item.width, .height = item.height }, run.clip);
@@ -804,7 +816,7 @@ fn preparedRangeRects(view: *const View, scroll_x: f64, range: d.Range, destinat
     while (try runs.next()) |run| {
         const block = run.block;
         const local = try rangeInRun(run, range) orelse continue;
-        const needed = try block.entry.layout.selectionRectCount(local);
+        const needed = try block.entry.text().selectionRectCount(local);
         if (needed > destination.len -| count) return error.RectangleCapacityExceeded;
         count += needed;
     }
@@ -813,7 +825,7 @@ fn preparedRangeRects(view: *const View, scroll_x: f64, range: d.Range, destinat
     while (try runs.next()) |run| {
         const block = run.block;
         const local = try rangeInRun(run, range) orelse continue;
-        for (try block.entry.layout.selectionRects(local, destination[at..])) |item| {
+        for (try block.entry.text().selectionRects(local, destination[at..])) |item| {
             const clipped = rangeRect(view, scroll_x, run, item);
             if (clipped.width > 0 and clipped.height > 0) {
                 destination[at] = .{ .x = clipped.x, .y = clipped.y, .width = clipped.width, .height = clipped.height };
@@ -831,7 +843,7 @@ fn preparedPositionRect(value: *State, view: *const View, root: *ix.Node, scroll
         if (run.paragraph) |line| {
             if (line != paragraphFor(value, root, position, affinity)) continue;
         } else if (position < run.range.start or position > run.range.end or (position == run.range.end and affinity == .downstream and !run.last)) continue;
-        const native = try block.entry.layout.caret(.{ .byte_offset = try cache.snap(block.entry.layout, position - block.byte, true), .affinity = affinity });
+        const native = try block.entry.text().caret(.{ .byte_offset = try cache.snap(block.entry.text(), position - block.byte, true), .affinity = affinity });
         const clipped = ui.layout.intersect(.{ .x = @floatCast(@as(f64, view.bounds.x) + native.x - scroll_x), .y = @floatCast(@as(f64, view.bounds.y) + run.y + native.y), .width = @max(1, native.width), .height = native.height }, run.clip);
         if (clipped.width > 0 and clipped.height > 0) return .{ .x = clipped.x, .y = clipped.y, .width = clipped.width, .height = clipped.height };
     }
@@ -844,7 +856,7 @@ fn copyPreparedGeometry(view: *const View, scroll_x: f64, options: GeometryOptio
         while (placement_start < view.placements.len and view.placements[placement_start].block < block_index) : (placement_start += 1) {}
         var placement_end = placement_start;
         while (placement_end < view.placements.len and view.placements[placement_end].block == block_index) : (placement_end += 1) {}
-        for (try block.entry.layout.advanceSpans()) |span| {
+        for (try block.entry.text().advanceSpans()) |span| {
             const range: d.Range = .{ .start = block.byte + span.start, .end = block.byte + span.end };
             var y = block.y;
             var clip = view.bounds;
@@ -889,7 +901,7 @@ fn copyPreparedCarets(value: *State, view: *const View, options: GeometryOptions
         while (placement_start < view.placements.len and view.placements[placement_start].block < block_index) : (placement_start += 1) {}
         var placement_end = placement_start;
         while (placement_end < view.placements.len and view.placements[placement_end].block == block_index) : (placement_end += 1) {}
-        const native_lines = try block.entry.layout.lines();
+        const native_lines = try block.entry.text().lines();
         var at: usize = 0;
         while (at < block.entry.stops.len) {
             const first = at;
@@ -991,6 +1003,19 @@ const State = struct {
     range_markers: []range_markers.Entry = &.{},
     marker_text_version: ?u64 = null,
     range_marker_version: u64 = 0,
+    /// Inlays, live while the committed text version is `inlay_text_version`.
+    inlays: inlay_set.Set = .{},
+    inlay_text_version: ?u64 = null,
+    inlay_version: u64 = 0,
+    /// A suggestion, live while the Document's revision (text and selection)
+    /// is `suggestion_revision`; `suggestion_shown` is what is drawn of it.
+    suggestion: []u8 = &.{},
+    suggestion_shown: []u8 = &.{},
+    suggestion_offset: usize = 0,
+    suggestion_revision: ?u64 = null,
+    suggestion_version: u64 = 0,
+    /// The inlays the committed view was shaped with.
+    inlay_shaped: InlayKey = .{},
     busy: bool = false,
     clients: usize = 0,
     index_required: bool = false,
@@ -1276,6 +1301,50 @@ const State = struct {
         if (self.folds != null or candidate != null) self.fold_version += 1;
         folding.release(self.folds);
         self.folds = candidate;
+    }
+    /// The inlays shown now: none while masked or composing, inlays at the
+    /// text version they were set for, a suggestion at the revision.
+    fn inlayKey(self: *State) !InlayKey {
+        try self.followInlays();
+        if (self.masked or try self.document.composition() != null) return .{};
+        const live_inlays = self.inlays.entries.len != 0 and self.inlay_text_version == try self.document.committedTextVersion();
+        return .{ .inlays = if (live_inlays) self.inlay_version else 0, .suggestion = if (try self.suggestionLive()) self.suggestion_version else 0 };
+    }
+    fn suggestionLive(self: *State) !bool {
+        const revision = self.suggestion_revision orelse return false;
+        return revision == try self.document.version();
+    }
+    fn dropSuggestion(self: *State) void {
+        self.allocator().free(self.suggestion);
+        self.allocator().free(self.suggestion_shown);
+        self.suggestion = &.{};
+        self.suggestion_shown = &.{};
+        if (self.suggestion_revision != null) self.layout_required = true;
+        self.suggestion_revision = null;
+    }
+    /// Insert the live suggestion when the only selection is an empty caret
+    /// at its offset, as Tab does.
+    fn acceptSuggestion(self: *State) !bool {
+        if (!try self.suggestionLive() or self.masked or try self.document.composition() != null) return false;
+        if (try self.document.selectionCount() != 1) return false;
+        const selected = try self.document.selection();
+        if (selected.anchor != selected.caret or selected.caret != self.suggestion_offset) return false;
+        const text = self.suggestion;
+        self.suggestion = &.{};
+        defer self.allocator().free(text);
+        self.dropSuggestion();
+        _ = try self.replaceSelections(text, false);
+        return true;
+    }
+    /// Move the inlays through the Document's changes since the text version
+    /// they are of, by whoever made them; when its journal no longer reaches
+    /// that version they stay stale until set again.
+    fn followInlays(self: *State) !void {
+        const since = self.inlay_text_version orelse return;
+        const now = try self.document.committedTextVersion();
+        if (since == now or self.inlays.entries.len == 0 or !try self.document.canMapFrom(since)) return;
+        for (self.inlays.entries) |*entry| entry.offset = try self.document.mapOffset(since, entry.offset, .right);
+        self.inlay_text_version = now;
     }
     fn validateRange(self: *State, range: d.Range) !void {
         if (range.start > range.end) return error.InvalidRange;
@@ -1731,6 +1800,9 @@ pub const Adapter = opaque {
         value.allocator().free(value.visual);
         value.allocator().free(value.line_backgrounds);
         value.allocator().free(value.range_markers);
+        value.inlays.free(value.allocator());
+        value.allocator().free(value.suggestion);
+        value.allocator().free(value.suggestion_shown);
         value.document.releaseClient() catch unreachable;
         value.allocator().destroy(value);
         std.debug.assert(budget.live == @sizeOf(memory.Budget) and budget.external == 0);
@@ -1954,6 +2026,86 @@ pub const Adapter = opaque {
         guard.check() catch return .{ .version = version, .current = false };
         return .{ .version = version, .current = true };
     }
+    /// Replace the inlays: hints and trailing text at committed source bytes
+    /// of text version `expected_text_version`, ascending by offset. They
+    /// move with every later change the Document's journal remembers, and
+    /// those of an older version move to the text now; when the journal no
+    /// longer reaches their version they stay stale until set again
+    /// (`status().inlays_required`). An empty list clears them.
+    pub fn setInlays(self: *Adapter, expected_text_version: u64, definitions: []const Inlay) !InlayResult {
+        const value = try self.state();
+        const window: ?z.Window = if (value.token) |token| token.window else if (value.native_input) |input| input.window else null;
+        const scope = if (window) |bound| bound.beginCallback() orelse return error.Closed else null;
+        defer if (scope) |pin| pin.end();
+        value.busy = true;
+        defer value.busy = false;
+        // Inlays of an older text version, as a language server's that come
+        // late, move through the changes since to the text now.
+        if (!try value.document.canMapFrom(expected_text_version)) return error.StaleRevision;
+        const guard: RangeMarkerGuard = .{ .state = value, .window = window, .token = value.token, .text_version = try value.document.committedTextVersion() };
+        try guard.check();
+        if (value.inlay_version == std.math.maxInt(u64)) return error.IdExhausted;
+        var candidate = inlay_set.capture(value.allocator(), definitions, value.limits.inlays) catch |err| return value.budget.normalize(err);
+        var published = false;
+        errdefer if (!published) candidate.free(value.allocator());
+        try guard.check();
+        for (candidate.entries) |*entry| {
+            entry.offset = try value.document.mapOffset(expected_text_version, entry.offset, .right);
+            try value.validateRange(.{ .start = entry.offset, .end = entry.offset });
+        }
+        var old = value.inlays;
+        value.inlays = candidate;
+        value.inlay_text_version = guard.text_version;
+        value.inlay_version += 1;
+        const version = value.inlay_version;
+        value.layout_required = true;
+        published = true;
+        old.free(value.allocator());
+        guard.check() catch return .{ .version = version, .current = false };
+        return .{ .version = version, .current = true };
+    }
+    /// Show `text` at committed byte `offset`, muted after the caret, as a
+    /// completion a model proposes: its first line, with " …" when it has
+    /// more. It is live while the Document's revision (text and selections)
+    /// is `expected_revision`, so any edit or move of a caret drops it; Tab
+    /// with one empty caret at `offset` inserts all of it. Empty text clears.
+    pub fn setSuggestion(self: *Adapter, expected_revision: u64, offset: usize, text: []const u8) !void {
+        const value = try self.state();
+        value.busy = true;
+        defer value.busy = false;
+        if (text.len == 0) return value.dropSuggestion();
+        if (try value.document.version() != expected_revision) return error.StaleRevision;
+        if (try value.document.composition() != null) return error.CompositionActive;
+        if (text.len > value.limits.paragraph_bytes) return error.InvalidInlay;
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+        try value.validateRange(.{ .start = offset, .end = offset });
+        if (value.suggestion_version == std.math.maxInt(u64)) return error.IdExhausted;
+        var buffer: [inlay_set.max_text + 8]u8 = undefined;
+        const shown = inlay_set.suggestionShown(text, &buffer);
+        const owned = value.allocator().dupe(u8, text) catch |err| return value.budget.normalize(err);
+        errdefer value.allocator().free(owned);
+        const owned_shown = value.allocator().dupe(u8, shown) catch |err| return value.budget.normalize(err);
+        value.dropSuggestion();
+        value.suggestion = owned;
+        value.suggestion_shown = owned_shown;
+        value.suggestion_offset = offset;
+        value.suggestion_revision = expected_revision;
+        value.suggestion_version += 1;
+        value.layout_required = true;
+    }
+    /// The live suggestion's full text, or null.
+    pub fn suggestion(self: *const Adapter) !?[]const u8 {
+        const value = try self.state();
+        return if (try value.suggestionLive()) value.suggestion else null;
+    }
+    /// Insert the live suggestion as Tab would; false when there is none at
+    /// the only, empty caret.
+    pub fn acceptSuggestion(self: *Adapter) !bool {
+        const value = try self.state();
+        value.busy = true;
+        defer value.busy = false;
+        return value.acceptSuggestion() catch |err| return value.budget.normalize(err);
+    }
     /// Copy the current prepared decorations in layout DIP. Metadata, text,
     /// view and projection identities are explicit; marker indices identify
     /// only this complete metadata version, never a persistent text anchor.
@@ -2043,7 +2195,7 @@ pub const Adapter = opaque {
     pub fn status(self: *const Adapter) !Status {
         const value = try self.state();
         const revision = try value.document.version();
-        return .{ .revision = revision, .index_required = value.index_required or revision != value.observed, .folds_required = value.folds_required or value.pending_fold_restore or (revision != value.observed and value.folds != null), .fold_version = value.fold_version, .layout_required = value.layout_required or revision != value.observed, .last_layout_error = value.last_layout_error, .projection_active = if (value.view) |*view| view.projected and !value.layout_required and revision == value.observed else false, .line_backgrounds_required = value.line_backgrounds.len != 0 and value.background_text_version != try value.document.committedTextVersion(), .range_markers_required = value.range_markers.len != 0 and value.marker_text_version != try value.document.committedTextVersion() };
+        return .{ .revision = revision, .index_required = value.index_required or revision != value.observed, .folds_required = value.folds_required or value.pending_fold_restore or (revision != value.observed and value.folds != null), .fold_version = value.fold_version, .layout_required = value.layout_required or revision != value.observed, .last_layout_error = value.last_layout_error, .projection_active = if (value.view) |*view| view.projected and !value.layout_required and revision == value.observed else false, .line_backgrounds_required = value.line_backgrounds.len != 0 and value.background_text_version != try value.document.committedTextVersion(), .range_markers_required = value.range_markers.len != 0 and value.marker_text_version != try value.document.committedTextVersion(), .inlays_required = value.inlays.entries.len != 0 and !try value.document.canMapFrom(value.inlay_text_version.?) };
     }
     /// Optional composing adapters retain only lifetime, never text authority.
     pub fn retainClient(self: *Adapter) !void {
@@ -2156,7 +2308,7 @@ pub const Adapter = opaque {
         if (value.mask_shaped) {
             try drawMasked(value, view, frame, bounds, colors.text);
         } else if (view.text_clips.len != 0) {
-            try drawClippedText(value, view, frame, bounds, colors.text);
+            try drawClippedText(value, view, frame, bounds, colors.text, colors.inlay);
         } else if (view.projected) {
             var runs: RunIterator = .{ .view = view };
             while (try runs.next()) |run| {
@@ -2189,7 +2341,7 @@ pub const Adapter = opaque {
     fn drawMasked(value: *State, view: *const View, frame: *ui.Frame, bounds: Rect, color: ui.Color) !void {
         const size = value.font.get().size;
         for (view.blocks[0..view.count]) |block| {
-            for (try block.entry.layout.advanceSpans()) |span| {
+            for (try block.entry.text().advanceSpans()) |span| {
                 if (span.rect.width <= 0 or span.rect.height <= 0) continue;
                 const radius = @min(size * 0.18, span.rect.width * 0.4);
                 const x = bounds.x - @as(f32, @floatCast(value.scroll_x)) + span.rect.x + span.rect.width / 2;
@@ -2735,7 +2887,7 @@ fn resolveHit(self: *State, block: Block, input: t.Caret, ordinary: bool) !t.Car
     if (ordinary) {
         const root = try self.currentIndex();
         if (ix.get(&self.storage, root, ix.lineAt(&self.storage, root, position.byte_offset)).hidden) {
-            position.byte_offset = block.byte + try block.entry.layout.graphemeByte(try block.entry.layout.graphemeCount() - 1);
+            position.byte_offset = block.byte + try block.entry.text().graphemeByte(try block.entry.text().graphemeCount() - 1);
             position.affinity = .upstream;
         }
     }
@@ -2773,7 +2925,7 @@ const LiveHitReader = struct {
     }
     fn nativeLines(self: *LiveHitReader, at: usize) ![]const t.Line {
         if (self.cached_block != at) {
-            self.cached_lines = try self.view.blocks[at].entry.layout.lines();
+            self.cached_lines = try self.view.blocks[at].entry.text().lines();
             self.cached_block = at;
         }
         return self.cached_lines;
@@ -2805,7 +2957,7 @@ fn copyPreparedHit(value: *State, view: *const View, destination: ?PreparedHitBu
     var counts: HitCounts = .{};
     for (view.blocks[0..view.count], 0..) |block, bi| {
         try work.take(1);
-        const native_lines = try block.entry.layout.lines();
+        const native_lines = try block.entry.text().lines();
         if (native_lines.len == 0) return error.InvalidParagraphMetrics;
         var exported_block = reader.block(bi);
         exported_block.first = @intCast(counts.lines);
@@ -3203,7 +3355,7 @@ fn pointerUnit(self: *State, target: t.Caret, count: u8) !pointer_selection.Rang
     if (count == 3) return .{ .start = start, .end = start + row.bytes };
     const current = try probe(self, line);
     defer current.close();
-    const text = try current.entry.layout.text();
+    const text = try current.entry.text().text();
     var end = start + row.bytes;
     // Index rows include LF and its preceding CR. Neither belongs to a word
     // unit, even when a multi-row native nonword span crosses both newlines.
@@ -3216,7 +3368,7 @@ fn pointerUnit(self: *State, target: t.Caret, count: u8) !pointer_selection.Rang
     caret.byte_offset = std.math.clamp(caret.byte_offset, start, end);
     if (caret.byte_offset == start) caret.affinity = .downstream else if (caret.byte_offset == end) caret.affinity = .upstream;
     caret.byte_offset -= current.byte;
-    const word = try current.entry.layout.wordRangeAt(caret);
+    const word = try current.entry.text().wordRangeAt(caret);
     return .{ .start = @max(start, current.byte + word.start), .end = @min(end, current.byte + word.end) };
 }
 fn pointerProcess(self: *State, owner: *PointerOwner, window: z.Window, event: z.Event, bounds: Rect, parameters: Parameters, semantic: bool, result: *PointerResult) !void {
@@ -3372,7 +3524,7 @@ const Probe = struct {
     }
 };
 fn probe(self: *State, line: usize) !Probe {
-    var work: Working = .{ .state = self, .allow_hidden = true, .folds = folding.retain(if (self.overlay != null) self.overlay_folds else self.folds), .root = ix.retain(try self.currentIndex()).?, .anchor = self.anchor, .view = .{ .bounds = self.bounds, .scale = self.scale, .revision = self.observed }, .generation = self.generation, .font = self.font.get(), .parameters = savedParameters(self) };
+    var work: Working = .{ .state = self, .allow_hidden = true, .folds = folding.retain(if (self.overlay != null) self.overlay_folds else self.folds), .root = ix.retain(try self.currentIndex()).?, .anchor = self.anchor, .view = .{ .bounds = self.bounds, .scale = self.scale, .revision = self.observed }, .generation = self.generation, .font = self.font.get(), .parameters = savedParameters(self), .inlays = self.inlay_shaped };
     defer work.close();
     const loaded = try work.load(line, true);
     return .{ .entry = loaded.entry.retain(), .first = loaded.first, .byte = ix.prefix(&self.storage, work.root, loaded.first).bytes };
@@ -3384,7 +3536,7 @@ fn paragraphFor(self: *State, root: *ix.Node, byte: usize, affinity: t.Affinity)
     const line = ix.lineAt(&self.storage, root, byte);
     return if (line > 0 and affinity == .upstream and ix.prefix(&self.storage, root, line).bytes == byte and !ix.get(&self.storage, root, line - 1).hidden) line - 1 else line;
 }
-fn graphemeIndex(layout: *const t.Layout, byte: usize) !usize {
+fn graphemeIndex(layout: cache.Text, byte: usize) !usize {
     var low: usize = 0;
     var high = try layout.graphemeCount();
     while (low < high) {
@@ -3394,16 +3546,18 @@ fn graphemeIndex(layout: *const t.Layout, byte: usize) !usize {
     return low;
 }
 fn visualStep(entry: *cache.Entry, current: t.Caret, rect: t.Rect, forwards: bool, has_previous: bool) !?t.Caret {
-    const line = cache.lineAt(try entry.layout.lines(), rect.y + rect.height * 0.5);
+    const line = cache.lineAt(try entry.text().lines(), rect.y + rect.height * 0.5);
+    // The stops in an inlay's text are all the byte it is at: a step leaves it.
+    const skip: ?usize = if (entry.inserts().len != 0) current.byte_offset else null;
     if (forwards) {
-        for (entry.stops) |stop| if (stop.line == line and stop.rect.x > rect.x) return try cache.hitTest(entry, .{ .x = stop.rect.x, .y = stop.rect.y + stop.rect.height * 0.5 }, has_previous);
+        for (entry.stops) |stop| if (stop.line == line and stop.rect.x > rect.x and stop.caret.byte_offset != skip) return try cache.hitTest(entry, .{ .x = stop.rect.x, .y = stop.rect.y + stop.rect.height * 0.5 }, has_previous);
         for (entry.stops) |stop| if (stop.line > line) return try cache.hitTest(entry, .{ .x = stop.rect.x, .y = stop.rect.y + stop.rect.height * 0.5 }, has_previous);
     } else {
         var at = entry.stops.len;
         while (at > 0) {
             at -= 1;
             const stop = entry.stops[at];
-            if (stop.line == line and stop.rect.x < rect.x) return try cache.hitTest(entry, .{ .x = stop.rect.x, .y = stop.rect.y + stop.rect.height * 0.5 }, has_previous);
+            if (stop.line == line and stop.rect.x < rect.x and stop.caret.byte_offset != skip) return try cache.hitTest(entry, .{ .x = stop.rect.x, .y = stop.rect.y + stop.rect.height * 0.5 }, has_previous);
         }
         at = entry.stops.len;
         while (at > 0) {
@@ -3411,7 +3565,6 @@ fn visualStep(entry: *cache.Entry, current: t.Caret, rect: t.Rect, forwards: boo
             if (entry.stops[at].line < line) return try cache.hitTest(entry, .{ .x = entry.stops[at].rect.x, .y = entry.stops[at].rect.y + entry.stops[at].rect.height * 0.5 }, has_previous);
         }
     }
-    _ = current;
     return null;
 }
 fn neighbor(self: *State, current: Probe, backwards: bool, x: f32) !t.Caret {
@@ -3420,12 +3573,12 @@ fn neighbor(self: *State, current: Probe, backwards: bool, x: f32) !t.Caret {
     const next_line = next orelse {
         if (backwards) return .{ .byte_offset = 0 };
         if (!ix.get(&self.storage, root, root.sum.rows - 1).hidden) return .{ .byte_offset = root.sum.bytes };
-        const count = try current.entry.layout.graphemeCount();
-        return .{ .byte_offset = current.byte + try current.entry.layout.graphemeByte(count - 1), .affinity = .upstream };
+        const count = try current.entry.text().graphemeCount();
+        return .{ .byte_offset = current.byte + try current.entry.text().graphemeByte(count - 1), .affinity = .upstream };
     };
     const other = try probe(self, next_line);
     defer other.close();
-    const lines = try other.entry.layout.lines();
+    const lines = try other.entry.text().lines();
     var line: usize = 0;
     if (backwards) {
         const last = next_line - other.first;
@@ -3452,23 +3605,23 @@ fn deleteSelections(self: *State, backwards: bool) !void {
             defer first.close();
             const last = try probe(self, ix.lineAt(&self.storage, root, range.end));
             defer last.close();
-            range.start = first.byte + try cache.snap(first.entry.layout, range.start - first.byte, false);
-            range.end = last.byte + try cache.snap(last.entry.layout, range.end - last.byte, true);
+            range.start = first.byte + try cache.snap(first.entry.text(), range.start - first.byte, false);
+            range.end = last.byte + try cache.snap(last.entry.text(), range.end - last.byte, true);
         } else {
             const affinity = self.affinityAt(selection_index, selected.primary);
             var line = ix.lineAt(&self.storage, root, item.caret);
             if (affinity == .upstream and line > 0 and ix.prefix(&self.storage, root, line).bytes == item.caret and !ix.get(&self.storage, root, line - 1).hidden) line -= 1;
             const current = try probe(self, line);
             defer current.close();
-            const local = try cache.snap(current.entry.layout, item.caret - current.byte, true);
-            const gi = try graphemeIndex(current.entry.layout, local);
+            const local = try cache.snap(current.entry.text(), item.caret - current.byte, true);
+            const gi = try graphemeIndex(current.entry.text(), local);
             if (backwards) {
-                if (gi > 0) range.start = current.byte + try current.entry.layout.graphemeByte(gi - 1) else if (current.first > 0) {
+                if (gi > 0) range.start = current.byte + try current.entry.text().graphemeByte(gi - 1) else if (current.first > 0) {
                     const previous = try probe(self, current.first - 1);
                     defer previous.close();
-                    range.start = previous.byte + try previous.entry.layout.graphemeByte(try graphemeIndex(previous.entry.layout, item.caret - previous.byte) - 1);
+                    range.start = previous.byte + try previous.entry.text().graphemeByte(try graphemeIndex(previous.entry.text(), item.caret - previous.byte) - 1);
                 }
-            } else if (gi < try current.entry.layout.graphemeCount()) range.end = current.byte + try current.entry.layout.graphemeByte(gi + 1);
+            } else if (gi < try current.entry.text().graphemeCount()) range.end = current.byte + try current.entry.text().graphemeByte(gi + 1);
         }
         if (self.total_bytes - shape_start > self.limits.shaped_bytes) return error.ShapeBudgetExceeded;
         if (range.start == range.end) continue;
@@ -3507,7 +3660,7 @@ fn verticalTarget(self: *State, initial: Probe, x: f32, y: f64, shape_start: u64
         const before = local_y < 0;
         const next = if (before) ix.previousVisible(&self.storage, root, current.first) else ix.nextVisible(&self.storage, root, current.first + current.entry.row_count);
         if (next == null) {
-            const lines = try current.entry.layout.lines();
+            const lines = try current.entry.text().lines();
             const line = cache.lineAt(lines, @floatCast(if (before) @as(f64, 0) else bottom - current.entry.heights[last] * 0.5));
             var target = try cache.hitTest(current.entry, .{ .x = x, .y = lines[line].y + lines[line].height * 0.5 }, current.byte != 0);
             target.byte_offset += current.byte;
@@ -3545,7 +3698,7 @@ fn projectedPageTarget(self: *State, current: Probe, source_line: usize, rect: t
     if (relative_y <= 0 or relative_y >= height) {
         const before = relative_y <= 0;
         var found = false;
-        for (try loaded.entry.layout.lines()) |native_line| {
+        for (try loaded.entry.text().lines()) |native_line| {
             const center = @as(f64, native_line.y) + @as(f64, native_line.height) * 0.5;
             if (center < native_top or center >= native_top + height) continue;
             native_y = @floatCast(center);
@@ -3564,9 +3717,9 @@ fn moveOne(self: *State, selected: d.Selection, affinity: t.Affinity, preferred:
     if (affinity == .upstream and line > 0 and ix.prefix(&self.storage, root, line).bytes == selected.caret and !ix.get(&self.storage, root, line - 1).hidden) line -= 1;
     const current = try probe(self, line);
     defer current.close();
-    const local = try cache.snap(current.entry.layout, selected.caret - current.byte, true);
+    const local = try cache.snap(current.entry.text(), selected.caret - current.byte, true);
     const caret: t.Caret = .{ .byte_offset = local, .affinity = affinity };
-    const rect = try current.entry.layout.caret(caret);
+    const rect = try current.entry.text().caret(caret);
     var target: t.Caret = .{ .byte_offset = selected.caret, .affinity = affinity };
     var preferred_x = preferred;
     switch (input.key) {
@@ -3577,8 +3730,8 @@ fn moveOne(self: *State, selected: d.Selection, affinity: t.Affinity, preferred:
                 const a_line = ix.lineAt(&self.storage, root, range.start);
                 const b_line = ix.lineAt(&self.storage, root, range.end);
                 if (a_line != b_line) target = .{ .byte_offset = if (input.key == .left) range.start else range.end } else {
-                    const a = try current.entry.layout.caret(.{ .byte_offset = try cache.snap(current.entry.layout, range.start - current.byte, false) });
-                    const b = try current.entry.layout.caret(.{ .byte_offset = try cache.snap(current.entry.layout, range.end - current.byte, true), .affinity = .upstream });
+                    const a = try current.entry.text().caret(.{ .byte_offset = try cache.snap(current.entry.text(), range.start - current.byte, false) });
+                    const b = try current.entry.text().caret(.{ .byte_offset = try cache.snap(current.entry.text(), range.end - current.byte, true), .affinity = .upstream });
                     target = .{ .byte_offset = if ((a.y < b.y or (a.y == b.y and a.x < b.x)) == (input.key == .left)) range.start else range.end };
                 }
             } else if (try visualStep(current.entry, caret, rect, input.key == .right, current.byte != 0)) |next| {
@@ -3588,7 +3741,7 @@ fn moveOne(self: *State, selected: d.Selection, affinity: t.Affinity, preferred:
         },
         .home, .end => {
             preferred_x = null;
-            const native_line = cache.lineAt(try current.entry.layout.lines(), rect.y + rect.height * 0.5);
+            const native_line = cache.lineAt(try current.entry.text().lines(), rect.y + rect.height * 0.5);
             var found = false;
             for (current.entry.stops) |stop| {
                 if (stop.line != native_line or (current.byte != 0 and stop.caret.byte_offset == 0 and stop.caret.affinity == .upstream)) continue;
@@ -3609,7 +3762,7 @@ fn moveOne(self: *State, selected: d.Selection, affinity: t.Affinity, preferred:
         else => unreachable,
     }
     if (ix.get(&self.storage, root, ix.lineAt(&self.storage, root, target.byte_offset)).hidden and (input.key == .home or input.key == .end)) {
-        target = .{ .byte_offset = current.byte + try current.entry.layout.graphemeByte(try current.entry.layout.graphemeCount() - 1), .affinity = .upstream };
+        target = .{ .byte_offset = current.byte + try current.entry.text().graphemeByte(try current.entry.text().graphemeCount() - 1), .affinity = .upstream };
     } else if (ix.get(&self.storage, root, ix.lineAt(&self.storage, root, target.byte_offset)).hidden) {
         const backwards = input.key == .left or input.key == .up or input.key == .page_up or input.key == .home;
         target = try neighbor(self, current, backwards, if (backwards) 1000000 else -1000000);
@@ -3668,6 +3821,10 @@ fn keyInput(self: *State, window: z.Window, input: z.KeyInput, bounds: Rect, par
     switch (key) {
         .enter, .tab => {
             if (key == .tab and input.modifiers.shift) return false;
+            if (key == .tab and try self.acceptSuggestion()) {
+                try updateAfterInput(self, window, bounds, parameters);
+                return true;
+            }
             _ = try self.replaceSelections(if (key == .enter) "\n" else "\t", false);
             try updateAfterInput(self, window, bounds, parameters);
             return true;
@@ -3700,9 +3857,9 @@ fn keyInput(self: *State, window: z.Window, input: z.KeyInput, bounds: Rect, par
     const line = caretLine(self, root, selected.caret);
     const current = try probe(self, line);
     defer current.close();
-    const local = try cache.snap(current.entry.layout, selected.caret - current.byte, true);
+    const local = try cache.snap(current.entry.text(), selected.caret - current.byte, true);
     const caret: t.Caret = .{ .byte_offset = local, .affinity = self.affinity };
-    const rect = try current.entry.layout.caret(caret);
+    const rect = try current.entry.text().caret(caret);
     var target: t.Caret = .{ .byte_offset = selected.caret, .affinity = self.affinity };
     if (key == .backspace or key == .delete) {
         var range = selected.range();
@@ -3710,18 +3867,18 @@ fn keyInput(self: *State, window: z.Window, input: z.KeyInput, bounds: Rect, par
         defer first.close();
         const last = try probe(self, ix.lineAt(&self.storage, root, range.end));
         defer last.close();
-        range.start = first.byte + try cache.snap(first.entry.layout, range.start - first.byte, false);
-        range.end = last.byte + try cache.snap(last.entry.layout, range.end - last.byte, true);
+        range.start = first.byte + try cache.snap(first.entry.text(), range.start - first.byte, false);
+        range.end = last.byte + try cache.snap(last.entry.text(), range.end - last.byte, true);
         if (range.start == range.end) {
-            const at = try graphemeIndex(current.entry.layout, local);
+            const at = try graphemeIndex(current.entry.text(), local);
             if (key == .backspace) {
-                if (at > 0) range.start = current.byte + try current.entry.layout.graphemeByte(at - 1) else if (current.first != 0) {
+                if (at > 0) range.start = current.byte + try current.entry.text().graphemeByte(at - 1) else if (current.first != 0) {
                     const previous = try probe(self, current.first - 1);
                     defer previous.close();
-                    const previous_end = try graphemeIndex(previous.entry.layout, selected.caret - previous.byte);
-                    range.start = previous.byte + try previous.entry.layout.graphemeByte(previous_end - 1);
+                    const previous_end = try graphemeIndex(previous.entry.text(), selected.caret - previous.byte);
+                    range.start = previous.byte + try previous.entry.text().graphemeByte(previous_end - 1);
                 }
-            } else if (at < try current.entry.layout.graphemeCount()) range.end = current.byte + try current.entry.layout.graphemeByte(at + 1);
+            } else if (at < try current.entry.text().graphemeCount()) range.end = current.byte + try current.entry.text().graphemeByte(at + 1);
         }
         if (range.start != range.end) _ = try self.replace(range, "", false);
         self.preferred_x = null;
@@ -3736,8 +3893,8 @@ fn keyInput(self: *State, window: z.Window, input: z.KeyInput, bounds: Rect, par
                     if (a_line != b_line) {
                         target = .{ .byte_offset = if (key == .left) range.start else range.end };
                     } else {
-                        const a = try current.entry.layout.caret(.{ .byte_offset = try cache.snap(current.entry.layout, range.start - current.byte, false) });
-                        const b = try current.entry.layout.caret(.{ .byte_offset = try cache.snap(current.entry.layout, range.end - current.byte, true), .affinity = .upstream });
+                        const a = try current.entry.text().caret(.{ .byte_offset = try cache.snap(current.entry.text(), range.start - current.byte, false) });
+                        const b = try current.entry.text().caret(.{ .byte_offset = try cache.snap(current.entry.text(), range.end - current.byte, true), .affinity = .upstream });
                         target = .{ .byte_offset = if ((a.y < b.y or (a.y == b.y and a.x < b.x)) == (key == .left)) range.start else range.end };
                     }
                 } else if (try visualStep(current.entry, caret, rect, key == .right, current.byte != 0)) |next| {
@@ -3747,7 +3904,7 @@ fn keyInput(self: *State, window: z.Window, input: z.KeyInput, bounds: Rect, par
             },
             .home, .end => {
                 self.preferred_x = null;
-                const native_line = cache.lineAt(try current.entry.layout.lines(), rect.y + rect.height * 0.5);
+                const native_line = cache.lineAt(try current.entry.text().lines(), rect.y + rect.height * 0.5);
                 if (key == .home) {
                     for (current.entry.stops) |stop| if (stop.line == native_line) {
                         target = try cache.hitTest(current.entry, .{ .x = stop.rect.x, .y = stop.rect.y + stop.rect.height * 0.5 }, current.byte != 0);
@@ -3860,6 +4017,8 @@ const Working = struct {
     projected: ?projection.Geometry = null,
     projected_intra: u128 = 0,
     reveal: bool = false,
+    /// The inlays shaped into this generation's batches.
+    inlays: InlayKey = .{},
     fn close(self: *Working) void {
         self.view.close(self.state.allocator());
         for (self.entries[0..self.count]) |entry| entry.?.release();
@@ -3915,7 +4074,11 @@ const Working = struct {
             defer state.allocator().free(text);
             const start = ix.prefix(&state.storage, self.root, first).bytes;
             try state.readDisplay(.{ .start = start, .end = start + bytes }, text);
-            entry = try cache.create(state.budget, state.engine, text, rows[0..count], self.font, self.generation, state.limits.visual_stops);
+            var inlays: std.ArrayList(cache.Inlay) = .empty;
+            defer inlays.deinit(state.allocator());
+            const suggestion: ?inlay_set.Shown = if (self.inlays.suggestion != 0) .{ .offset = state.suggestion_offset, .text = state.suggestion_shown } else null;
+            if (self.inlays.inlays != 0 or suggestion != null) try inlay_set.select(state.allocator(), &inlays, if (self.inlays.inlays != 0) &state.inlays else null, suggestion, start, start + bytes, first + count == self.root.sum.rows);
+            entry = try cache.create(state.budget, state.engine, text, rows[0..count], self.font, self.generation, state.limits.visual_stops, inlays.items);
             self.bytes += bytes;
             self.shaped += 1;
             state.total_batches +|= 1;
@@ -3966,7 +4129,7 @@ const Working = struct {
         return cache.prepare(state.budget, entry, self.parameters.scale, viewport, state.limits.prepared);
     }
 };
-fn appendMarks(self: *State, marks: *std.ArrayList(Mark), layout: *const t.Layout, range: d.Range, origin: Point, bounds: Rect, kind: @FieldType(Mark, "kind")) !void {
+fn appendMarks(self: *State, marks: *std.ArrayList(Mark), layout: cache.Text, range: d.Range, origin: Point, bounds: Rect, kind: @FieldType(Mark, "kind")) !void {
     if (range.start == range.end) return;
     const selected: t.ByteRange = .{ .start = try cache.snap(layout, range.start, false), .end = try cache.snap(layout, range.end, true) };
     const count = try layout.selectionRectCount(selected);
@@ -4000,21 +4163,21 @@ fn geometry(work: *Working) !void {
         const origin: Point = .{ .x = work.view.bounds.x - @as(f32, @floatCast(work.scroll_x)), .y = @floatCast(@as(f64, work.view.bounds.y) + run.y) };
         for (selected.items, 0..) |item, selection_index| {
             const range = item.range();
-            if (range.start < run.range.end and range.end > run.range.start) try appendMarks(state, &marks, block.entry.layout, .{ .start = @max(range.start, run.range.start) - block.byte, .end = @min(range.end, run.range.end) - block.byte }, origin, run.clip, .selection);
+            if (range.start < run.range.end and range.end > run.range.start) try appendMarks(state, &marks, block.entry.text(), .{ .start = @max(range.start, run.range.start) - block.byte, .end = @min(range.end, run.range.end) - block.byte }, origin, run.clip, .selection);
             const affinity = state.affinityAt(selection_index, selected.primary);
             if (!caretInRun(work, run, item.caret, affinity)) continue;
             const mask = @as(u64, 1) << @intCast(selection_index % 64);
             if (seen[selection_index / 64] & mask != 0) continue;
             seen[selection_index / 64] |= mask;
-            const byte = try cache.snap(block.entry.layout, item.caret - block.byte, true);
-            const native = try block.entry.layout.caret(.{ .byte_offset = byte, .affinity = affinity });
+            const byte = try cache.snap(block.entry.text(), item.caret - block.byte, true);
+            const native = try block.entry.text().caret(.{ .byte_offset = byte, .affinity = affinity });
             const rect: Rect = .{ .x = @floatCast(@as(f64, work.view.bounds.x) + native.x - work.scroll_x), .y = origin.y + native.y, .width = @max(1, native.width), .height = native.height };
             if (selection_index == selected.primary) work.view.caret = rect;
             if (ui.layout.intersect(rect, run.clip).width > 0 and ui.layout.intersect(rect, run.clip).height > 0) try carets.append(state.allocator(), .{ .selection = selection_index, .primary = selection_index == selected.primary, .rect = rect });
         }
         if (composition) |value| {
             const marked: d.Range = .{ .start = value.range.start, .end = value.range.start + value.text.len };
-            if (marked.start < run.range.end and marked.end > run.range.start) try appendMarks(state, &marks, block.entry.layout, .{ .start = @max(marked.start, run.range.start) - block.byte, .end = @min(marked.end, run.range.end) - block.byte }, origin, run.clip, .composition);
+            if (marked.start < run.range.end and marked.end > run.range.start) try appendMarks(state, &marks, block.entry.text(), .{ .start = @max(marked.start, run.range.start) - block.byte, .end = @min(marked.end, run.range.end) - block.byte }, origin, run.clip, .composition);
         }
     }
     runs.at = 0;
@@ -4073,17 +4236,17 @@ fn prepareCaretCells(work: *Working) !void {
             if (seen[selection_index / 64] & mask != 0) continue;
             seen[selection_index / 64] |= mask;
             try cell_work.take(1);
-            const byte = try cache.snap(block.entry.layout, item.caret - block.byte, true);
-            const native = try block.entry.layout.caret(.{ .byte_offset = byte, .affinity = affinity });
+            const byte = try cache.snap(block.entry.text(), item.caret - block.byte, true);
+            const native = try block.entry.text().caret(.{ .byte_offset = byte, .affinity = affinity });
             const insertion: Rect = .{ .x = @floatCast(@as(f64, work.view.bounds.x) + native.x - work.scroll_x), .y = origin.y + native.y, .width = @max(1, native.width), .height = native.height };
             var slot: usize = 0;
             while (work.view.blocks[slot].entry != block.entry) : (slot += 1) {}
-            const spans = try block.entry.layout.advanceSpans();
+            const spans = try block.entry.text().advanceSpans();
             if (indexes[slot] == null) indexes[slot] = try caret_visual.Index.init(state.allocator(), spans, &cell_work);
             const first = cells.items.len;
-            const gi = try graphemeIndex(block.entry.layout, byte);
-            if (gi < try block.entry.layout.graphemeCount()) {
-                var query = try indexes[slot].?.query(spans, byte, try block.entry.layout.graphemeByte(gi + 1), cache.lineAt(try block.entry.layout.lines(), native.y + native.height * 0.5), native.x, &cell_work);
+            const gi = try graphemeIndex(block.entry.text(), byte);
+            if (gi < try block.entry.text().graphemeCount()) {
+                var query = try indexes[slot].?.query(spans, byte, try block.entry.text().graphemeByte(gi + 1), cache.lineAt(try block.entry.text().lines(), native.y + native.height * 0.5), native.x, &cell_work);
                 while (try query.next(spans, &cell_work)) |cell| {
                     if (cells.items.len == state.limits.rectangles) return error.RectangleCapacityExceeded;
                     try cells.append(state.allocator(), .{ .x = origin.x + cell.x, .y = origin.y + cell.y, .width = cell.width, .height = cell.height });
@@ -4142,7 +4305,13 @@ fn prepareLineBackgrounds(work: *Working) !void {
 fn prepareRangeMarkers(work: *Working) !void {
     const state = work.state;
     work.view.range_marker_version = state.range_marker_version;
-    if (state.range_markers.len == 0 or state.marker_text_version != try state.document.committedTextVersion() or try state.document.composition() != null) return;
+    const markers_live = state.range_markers.len != 0 and state.marker_text_version == try state.document.committedTextVersion() and try state.document.composition() == null;
+    var inlays_live = false;
+    for (work.view.blocks[0..work.view.count]) |block| if (block.entry.inserts().len != 0) {
+        inlays_live = true;
+        break;
+    };
+    if (!markers_live and !inlays_live) return;
     var effort: range_markers.Work = .{ .remaining = state.limits.range_marker_work };
     var marks: std.ArrayList(RangeMarkerMark) = .empty;
     defer marks.deinit(state.allocator());
@@ -4150,8 +4319,10 @@ fn prepareRangeMarkers(work: *Working) !void {
     defer scratch.deinit(state.allocator());
     var clips: std.ArrayList(TextClip) = .empty;
     defer clips.deinit(state.allocator());
+    var muted: std.ArrayList(Rect) = .empty;
+    defer muted.deinit(state.allocator());
     var foreground = false;
-    for (state.range_markers) |entry| if (entry.marker.kind == .foreground) {
+    if (markers_live) for (state.range_markers) |entry| if (entry.marker.kind == .foreground) {
         foreground = true;
         break;
     };
@@ -4159,6 +4330,27 @@ fn prepareRangeMarkers(work: *Working) !void {
     var run_marks: usize = 0;
     var runs: RunIterator = .{ .view = &work.view };
     while (try runs.next()) |run| {
+        // Inlay text is drawn in the inlay color: the rectangles of its
+        // shaped bytes, which no source range reaches.
+        muted.clearRetainingCapacity();
+        for (run.block.entry.inserts()) |insert| {
+            const at = run.block.byte + insert.at;
+            if (at < run.range.start or at > run.range.end) continue;
+            const shaped = run.block.entry.layout;
+            const range: t.ByteRange = .{ .start = insert.display, .end = insert.display + insert.len };
+            const needed = try shaped.selectionRectCount(range);
+            if (needed > state.limits.rectangles -| muted.items.len) return error.RectangleCapacityExceeded;
+            try scratch.resize(state.allocator(), needed);
+            for (try shaped.selectionRects(range, scratch.items)) |item| {
+                const rect = rangeRect(&work.view, work.scroll_x, run, item);
+                if (rect.width > 0 and rect.height > 0) try muted.append(state.allocator(), rect);
+            }
+        }
+        if (!markers_live) {
+            if (muted.items.len != 0) try appendTextClips(state, &clips, run, run_index, &.{}, muted.items);
+            run_index += 1;
+            continue;
+        }
         // Charge a conservative binary-search upper bound, even when this run
         // has no overlap. Default empty metadata never enters this function.
         try effort.take(1 + std.math.log2_int(usize, state.range_markers.len));
@@ -4167,7 +4359,7 @@ fn prepareRangeMarkers(work: *Working) !void {
             try effort.take(1);
             const marker = state.range_markers[at].marker;
             const local = try rangeInRun(run, marker.range) orelse continue;
-            const layout = run.block.entry.layout;
+            const layout = run.block.entry.text();
             // selectionRectCount scans cached spans once; selectionRects scans
             // them twice (capacity + output). No native query is performed.
             try effort.take(3 * (try layout.advanceSpans()).len);
@@ -4189,7 +4381,7 @@ fn prepareRangeMarkers(work: *Working) !void {
                 try marks.append(state.allocator(), .{ .marker = at, .range = marker.range, .kind = marker.kind, .color = marker.color, .rect = rect });
             }
         }
-        if (foreground) try appendTextClips(state, &clips, run, run_index, marks.items[run_marks..]);
+        if (foreground or muted.items.len != 0) try appendTextClips(state, &clips, run, run_index, marks.items[run_marks..], muted.items);
         run_index += 1;
         run_marks = marks.items.len;
     }
@@ -4202,7 +4394,7 @@ fn prepareRangeMarkers(work: *Working) !void {
 /// The clips of one run's text pass: each foreground marker rectangle in its
 /// color, and the rest of the run, cut into strips between the rectangles'
 /// edges, in the text color. Prepared once per layout so paint only replays.
-fn appendTextClips(state: *State, clips: *std.ArrayList(TextClip), run: VisualRun, run_index: u32, marks: []const RangeMarkerMark) !void {
+fn appendTextClips(state: *State, clips: *std.ArrayList(TextClip), run: VisualRun, run_index: u32, marks: []const RangeMarkerMark, muted: []const Rect) !void {
     const allocator = state.allocator();
     const area = run.clip;
     if (area.width <= 0 or area.height <= 0) return;
@@ -4210,13 +4402,18 @@ fn appendTextClips(state: *State, clips: *std.ArrayList(TextClip), run: VisualRu
     defer edges.deinit(allocator);
     var spans: std.ArrayList([2]f32) = .empty;
     defer spans.deinit(allocator);
+    // Every colored rectangle: the foreground markers, then the inlays.
+    var colored: std.ArrayList(TextClip) = .empty;
+    defer colored.deinit(allocator);
+    for (marks) |mark| if (mark.kind == .foreground) try colored.append(allocator, .{ .rect = mark.rect, .color = mark.color, .run = run_index });
+    for (muted) |rect| try colored.append(allocator, .{ .rect = rect, .color = null, .run = run_index, .inlay = true });
     try edges.append(allocator, area.y);
     try edges.append(allocator, area.y + area.height);
-    for (marks) |mark| if (mark.kind == .foreground) {
-        try clips.append(allocator, .{ .rect = mark.rect, .color = mark.color, .run = run_index });
-        try edges.append(allocator, std.math.clamp(mark.rect.y, area.y, area.y + area.height));
-        try edges.append(allocator, std.math.clamp(mark.rect.y + mark.rect.height, area.y, area.y + area.height));
-    };
+    for (colored.items) |clip| {
+        try clips.append(allocator, clip);
+        try edges.append(allocator, std.math.clamp(clip.rect.y, area.y, area.y + area.height));
+        try edges.append(allocator, std.math.clamp(clip.rect.y + clip.rect.height, area.y, area.y + area.height));
+    }
     std.mem.sort(f32, edges.items, {}, std.sort.asc(f32));
     var at: usize = 0;
     while (at + 1 < edges.items.len) : (at += 1) {
@@ -4225,8 +4422,8 @@ fn appendTextClips(state: *State, clips: *std.ArrayList(TextClip), run: VisualRu
         if (bottom <= top) continue;
         // Horizontal extents of the markers covering this whole strip.
         spans.clearRetainingCapacity();
-        for (marks) |mark| if (mark.kind == .foreground and mark.rect.y <= top and mark.rect.y + mark.rect.height >= bottom and mark.rect.width > 0) {
-            try spans.append(allocator, .{ mark.rect.x, mark.rect.x + mark.rect.width });
+        for (colored.items) |clip| if (clip.rect.y <= top and clip.rect.y + clip.rect.height >= bottom and clip.rect.width > 0) {
+            try spans.append(allocator, .{ clip.rect.x, clip.rect.x + clip.rect.width });
         };
         std.mem.sort([2]f32, spans.items, {}, struct {
             fn less(_: void, a: [2]f32, b: [2]f32) bool {
@@ -4247,7 +4444,7 @@ fn appendTextClips(state: *State, clips: *std.ArrayList(TextClip), run: VisualRu
 
 /// The text pass with foreground markers: each run's prepared text once per
 /// clip, in the clip's color.
-fn drawClippedText(state: *State, view: *const View, frame: *ui.Frame, bounds: Rect, text: ui.Color) !void {
+fn drawClippedText(state: *State, view: *const View, frame: *ui.Frame, bounds: Rect, text: ui.Color, inlay: ui.Color) !void {
     var runs: RunIterator = .{ .view = view };
     var index: u32 = 0;
     var at: usize = 0;
@@ -4262,7 +4459,7 @@ fn drawClippedText(state: *State, view: *const View, frame: *ui.Frame, bounds: R
             defer frame.popClip() catch |err| {
                 frame.failure = frame.failure orelse err;
             };
-            try frame.preparedText(origin, prepared, if (clip.color) |rgb| ui.Color.rgb(rgb) else text);
+            try frame.preparedText(origin, prepared, if (clip.inlay) inlay else if (clip.color) |rgb| ui.Color.rgb(rgb) else text);
         }
         if (frame.context.window) |window| if (window.isClosed()) return error.Closed;
     }
@@ -4392,6 +4589,7 @@ const LayoutCandidate = struct {
         state.font = self.font;
         state.generation = work.generation;
         state.mask_shaped = state.masked;
+        state.inlay_shaped = work.inlays;
         state.view_version = self.view_version;
         state.projection_version = self.projection_version;
         state.parameters_version = work.parameters.version;
@@ -4798,7 +4996,8 @@ fn constructView(candidate: *LayoutCandidate, bounds: Rect, parameters: Paramete
     if (self.folds_required) return error.FoldIndexRequired;
     var font = parameters.font;
     if (font.wrap != .none) font.width = bounds.width;
-    const same = self.configured and parameters.version == self.parameters_version and fontEqual(font, self.font.get()) and self.mask_shaped == self.masked;
+    const inlays = try self.inlayKey();
+    const same = self.configured and parameters.version == self.parameters_version and fontEqual(font, self.font.get()) and self.mask_shaped == self.masked and std.meta.eql(self.inlay_shaped, inlays);
     candidate.revision = self.observed;
     const want_projected = if (self.projected_plan) |plan| !candidate.suppress_projection and try plan.current() and try self.document.composition() == null else false;
     if (self.view) |*view| try view.ensureUnused();
@@ -4814,7 +5013,7 @@ fn constructView(candidate: *LayoutCandidate, bounds: Rect, parameters: Paramete
     candidate.font.set(font);
     const source_root = if (self.overlay != null) self.overlay.? else if (candidate.fold_override) |value| value.root orelse self.committed.? else try self.currentIndex();
     const source_folds = if (self.overlay != null) self.overlay_folds else if (candidate.fold_override) |value| if (value.root != null) value.folds else self.folds else self.folds;
-    candidate.work = .{ .state = self, .folds = folding.retain(source_folds), .root = ix.retain(source_root).?, .anchor = self.anchor, .scroll_x = self.scroll_x, .view = .{ .bounds = bounds, .scale = parameters.scale, .revision = self.observed }, .generation = generation, .font = candidate.font.get(), .parameters = parameters, .reveal = self.reveal };
+    candidate.work = .{ .state = self, .folds = folding.retain(source_folds), .root = ix.retain(source_root).?, .anchor = self.anchor, .scroll_x = self.scroll_x, .view = .{ .bounds = bounds, .scale = parameters.scale, .revision = self.observed }, .generation = generation, .font = candidate.font.get(), .parameters = parameters, .reveal = self.reveal, .inlays = inlays };
     const work = &candidate.work.?;
     if (self.fold_owner != null) {
         if (self.overlay != null) {
@@ -4876,7 +5075,7 @@ fn completeView(candidate: *LayoutCandidate) !PrepareResult {
             const target_line = caretLine(self, work.root, selected.caret);
             const loaded = try work.load(target_line, true);
             const start = ix.prefix(&self.storage, work.root, loaded.first).bytes;
-            const caret = try loaded.entry.layout.caret(.{ .byte_offset = try cache.snap(loaded.entry.layout, selected.caret - start, true), .affinity = self.affinity });
+            const caret = try loaded.entry.text().caret(.{ .byte_offset = try cache.snap(loaded.entry.text(), selected.caret - start, true), .affinity = self.affinity });
             if (caret.height > bounds.height) return error.ViewportTooShort;
             if (@max(1, caret.width) > bounds.width) return error.ViewportTooNarrow;
             const right = bounds.width - @max(1, caret.width);
@@ -4952,6 +5151,7 @@ test {
     _ = owner_commands;
     _ = line_backgrounds;
     _ = range_markers;
+    _ = inlay_set;
     _ = @import("field.zig");
 }
 
@@ -4960,7 +5160,7 @@ test "complete Prepared hit is allocation free transactional and agrees with the
     // reads the real system cache independently of both new reader adapters.
     const Reference = struct {
         fn cached(entry: *const cache.Entry, point: t.Point, previous: bool) !t.Caret {
-            const native_lines = try entry.layout.lines();
+            const native_lines = try entry.text().lines();
             var li: usize = 0;
             while (li + 1 < native_lines.len and point.y >= native_lines[li].y + native_lines[li].height) : (li += 1) {}
             var first: usize = 0;
@@ -4999,7 +5199,7 @@ test "complete Prepared hit is allocation free transactional and agrees with the
                 native_y = @floatCast(item.native_top + local_y - item.y);
                 if (local_y <= item.y or local_y >= item.y + item.height) {
                     var found = false;
-                    for (try view.blocks[chosen].entry.layout.lines()) |line| {
+                    for (try view.blocks[chosen].entry.text().lines()) |line| {
                         const center = @as(f64, line.y) + @as(f64, line.height) * 0.5;
                         if (center < item.native_top or center >= item.native_top + item.height) continue;
                         native_y = @floatCast(center);
@@ -5024,7 +5224,7 @@ test "complete Prepared hit is allocation free transactional and agrees with the
             if (!view.projected) {
                 const root = try state.currentIndex();
                 if (ix.get(&state.storage, root, ix.lineAt(&state.storage, root, result.byte_offset)).hidden) {
-                    result.byte_offset = block.byte + try block.entry.layout.graphemeByte(try block.entry.layout.graphemeCount() - 1);
+                    result.byte_offset = block.byte + try block.entry.text().graphemeByte(try block.entry.text().graphemeCount() - 1);
                     result.affinity = .upstream;
                 }
             }

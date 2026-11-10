@@ -13,6 +13,13 @@ pub const Range = selection_state.Range;
 pub const Selection = selection_state.Selection;
 pub const SelectionList = selection_state.View;
 pub const Replacement = selection_state.Replacement;
+/// Where a position at a change's edge goes: `left` stays before text
+/// inserted there, `right` goes after it.
+pub const Bias = enum { left, right };
+/// One replacement of a committed text change: bytes `start..end` of the text
+/// before became `new_start..new_end` of the text after. A change's
+/// replacements ascend and do not overlap.
+const Change = struct { version: u64 = 0, start: usize, end: usize, new_start: usize, new_end: usize };
 /// Transient publication gate. validate runs owner-thread with Document Busy,
 /// after candidate preparation and immediately before the no-foreign commit.
 /// It must not allocate, mutate this Document, end its scope, or free context.
@@ -42,6 +49,10 @@ pub const Limits = struct {
     selections: usize = 64,
     batch_edits: usize = 4096,
     readers_per_snapshot: usize = 8,
+    /// Replacements remembered across the latest committed text changes, so
+    /// positions of an older text version map to the current one
+    /// (`mapOffset`). 0 remembers none.
+    change_journal: usize = 1024,
 };
 pub const Stats = struct {
     owned_bytes: usize,
@@ -63,7 +74,8 @@ const Arena = struct {
     snapshots: usize = 0,
 };
 const Version = struct { root: ?*tree.Node, selected: selection_state.Set };
-const Edit = struct { before: Version, after: Version };
+/// `changes` is null when the edit's replacements are unknown (a restore).
+const Edit = struct { before: Version, after: Version, changes: ?[]Change = null };
 const State = struct {
     arena: *Arena,
     root: ?*tree.Node = null,
@@ -82,6 +94,13 @@ const State = struct {
     preedit_len: usize = 0,
     preedit_range: ?Range = null,
     preedit_selection: Selection = .{},
+    /// A ring of the replacements of the latest text changes, each tagged with
+    /// the text version it made; positions of versions from `journal_floor`
+    /// on can be mapped to the current text.
+    journal: []Change,
+    journal_start: usize = 0,
+    journal_len: usize = 0,
+    journal_floor: u64 = 0,
 
     fn historyAt(self: *State, index: usize) *Edit {
         return &self.history[(self.history_start + index) % self.history.len];
@@ -91,16 +110,48 @@ const State = struct {
         tree.release(&self.arena.memory, value.after.root);
         value.before.selected.release(&self.arena.memory);
         value.after.selected.release(&self.arena.memory);
+        if (value.changes) |changes| self.arena.memory.free(Change, changes);
+    }
+    fn journalAt(self: *const State, index: usize) *Change {
+        return &self.journal[(self.journal_start + index) % self.journal.len];
+    }
+    /// Remember the replacements that made text version `version`, or forget
+    /// all when they are unknown or more than the journal holds.
+    fn record(self: *State, version: u64, changes: ?[]const Change, inverse: bool) void {
+        const items = changes orelse return self.forget(version);
+        if (items.len > self.journal.len) return self.forget(version);
+        // Whole changes leave from the oldest end until these fit.
+        while (self.journal.len - self.journal_len < items.len) {
+            const oldest = self.journalAt(0).version;
+            while (self.journal_len != 0 and self.journalAt(0).version == oldest) {
+                self.journal_start = (self.journal_start + 1) % self.journal.len;
+                self.journal_len -= 1;
+            }
+            self.journal_floor = oldest;
+        }
+        for (items) |item| {
+            self.journalAt(self.journal_len).* = if (inverse) .{ .version = version, .start = item.new_start, .end = item.new_end, .new_start = item.start, .new_end = item.end } else .{ .version = version, .start = item.start, .end = item.end, .new_start = item.new_start, .new_end = item.new_end };
+            self.journal_len += 1;
+        }
+    }
+    fn forget(self: *State, version: u64) void {
+        self.journal_start = 0;
+        self.journal_len = 0;
+        self.journal_floor = version;
     }
     fn validateCommit(self: *State) !void {
         std.debug.assert(self.busy);
         if (self.commit_guard) |guard| try guard.validate(guard.context);
     }
-    fn publish(self: *State, candidate: ?*tree.Node, selected: selection_state.Set) !void {
+    fn publish(self: *State, candidate: ?*tree.Node, selected: selection_state.Set, changes: ?[]const Change) !void {
+        // The history keeps its own copy of the replacements, made first.
+        const owned: ?[]Change = if (self.history.len != 0) if (changes) |items| try self.arena.memory.alloc(Change, items.len) else null else null;
+        errdefer if (owned) |items| self.arena.memory.free(Change, items);
+        if (owned) |items| @memcpy(items, changes.?);
         // No allocation/free/native call occurs between this final gate and
         // root/selection/version publication. Foreign reclamation follows it.
         try self.validateCommit();
-        const entry: ?Edit = if (self.history.len != 0) .{ .before = .{ .root = tree.retain(self.root), .selected = self.selected.retain() }, .after = .{ .root = tree.retain(candidate), .selected = selected.retain() } } else null;
+        const entry: ?Edit = if (self.history.len != 0) .{ .before = .{ .root = tree.retain(self.root), .selected = self.selected.retain() }, .after = .{ .root = tree.retain(candidate), .selected = selected.retain() }, .changes = owned } else null;
         const old = self.root;
         const old_selected = self.selected;
         self.root = candidate;
@@ -109,6 +160,7 @@ const State = struct {
         self.text_version += 1;
         self.preedit_range = null;
         self.preedit_len = 0;
+        self.record(self.text_version, changes, false);
         if (entry) |history_entry| {
             while (self.history_len > self.history_cursor) {
                 self.history_len -= 1;
@@ -155,7 +207,8 @@ const State = struct {
         const candidate = try tree.concat(&self.arena.memory, left, second.right);
         errdefer tree.release(&self.arena.memory, candidate);
         const after = range.start + inserted.len;
-        try self.publish(candidate, .{ .single = .{ .anchor = after, .caret = after } });
+        const change = [_]Change{.{ .start = range.start, .end = range.end, .new_start = range.start, .new_end = after }};
+        try self.publish(candidate, .{ .single = .{ .anchor = after, .caret = after } }, &change);
     }
     fn splice(self: *State, root: ?*tree.Node, range: Range, inserted: []const u8) !?*tree.Node {
         const a = try tree.split(&self.arena.memory, root, range.start);
@@ -209,6 +262,9 @@ const State = struct {
             ends[at] = new_end;
             old_end = edit.range.end;
         }
+        const changes = try self.arena.memory.alloc(Change, edits.len);
+        defer self.arena.memory.free(Change, changes);
+        for (changes, edits, ends) |*change, edit, end| change.* = .{ .start = edit.range.start, .end = edit.range.end, .new_start = end - edit.text.len, .new_end = end };
         var candidate = tree.retain(self.root);
         errdefer tree.release(&self.arena.memory, candidate);
         var at = edits.len;
@@ -222,7 +278,7 @@ const State = struct {
             for (selection.items) |item| try validateSelection(self.arena, candidate, item);
             const selected = try selection_state.normalized(&self.arena.memory, selection.items, selection.primary, self.arena.limits.selections);
             errdefer selected.release(&self.arena.memory);
-            try self.publish(candidate, selected);
+            try self.publish(candidate, selected, changes);
             return;
         }
         const count = if (collapse) edits.len else self.selected.count();
@@ -239,7 +295,7 @@ const State = struct {
         }
         const selected = try selection_state.normalized(&self.arena.memory, output, self.selected.primaryIndex(), self.arena.limits.selections);
         errdefer selected.release(&self.arena.memory);
-        try self.publish(candidate, selected);
+        try self.publish(candidate, selected, changes);
     }
     fn replaceSelections(self: *State, inserted: []const u8) !void {
         if (self.selected == .single) return self.replace(self.selected.single.range(), inserted);
@@ -252,6 +308,22 @@ const State = struct {
     }
 };
 const SnapshotState = struct { arena: *Arena, root: ?*tree.Node, selected: selection_state.Set, revision: u64, text_version: u64, busy: bool = false, reader_slots: []reader.Slot = &.{}, active_readers: std.atomic.Value(usize) = .init(0) };
+
+/// Map `offset` through one change: journal entries `first..end`.
+fn mapThrough(value: *const State, first: usize, end: usize, offset: usize, bias: Bias) usize {
+    // The last replacement starting at or before offset.
+    var low = first;
+    var high = end;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        if (value.journalAt(middle).start <= offset) low = middle + 1 else high = middle;
+    }
+    if (low == first) return offset;
+    const change = value.journalAt(low - 1).*;
+    if (offset > change.end or (offset == change.end and change.end > change.start)) return change.new_end + (offset - change.end);
+    if (bias == .left) return change.new_start;
+    return change.new_end;
+}
 
 fn releaseArena(arena: *Arena) void {
     arena.refs -= 1;
@@ -324,7 +396,7 @@ pub const Document = opaque {
     }
     pub fn create(allocator: std.mem.Allocator, owner: std.Thread.Id, initial: []const u8, limits: Limits) !*Document {
         if (std.Thread.getCurrentId() != owner) return error.WrongThread;
-        if (limits.document_bytes == 0 or limits.document_bytes > 1024 * 1024 * 1024 or limits.nodes == 0 or limits.nodes > 1024 * 1024 or limits.live_bytes > std.math.maxInt(usize) / 2 or limits.candidate_bytes > limits.live_bytes or limits.history_entries > 4096 or limits.snapshots > 4096 or limits.composition_bytes > 64 * 1024 or limits.selections == 0 or limits.selections > 4096 or limits.batch_edits == 0 or limits.batch_edits > 65536 or limits.readers_per_snapshot > 64) return error.InvalidLimits;
+        if (limits.document_bytes == 0 or limits.document_bytes > 1024 * 1024 * 1024 or limits.nodes == 0 or limits.nodes > 1024 * 1024 or limits.live_bytes > std.math.maxInt(usize) / 2 or limits.candidate_bytes > limits.live_bytes or limits.history_entries > 4096 or limits.snapshots > 4096 or limits.composition_bytes > 64 * 1024 or limits.selections == 0 or limits.selections > 4096 or limits.batch_edits == 0 or limits.batch_edits > 65536 or limits.readers_per_snapshot > 64 or limits.change_journal > 65536) return error.InvalidLimits;
         if (initial.len > limits.document_bytes) return error.CapacityExceeded;
         if (!std.unicode.utf8ValidateSlice(initial)) return error.InvalidUtf8;
         if (limits.live_bytes < @sizeOf(Arena)) return error.CapacityExceeded;
@@ -337,10 +409,12 @@ pub const Document = opaque {
         errdefer arena.memory.free(Edit, history);
         const preedit = try arena.memory.alloc(u8, limits.composition_bytes);
         errdefer arena.memory.free(u8, preedit);
+        const journal = try arena.memory.alloc(Change, limits.change_journal);
+        errdefer arena.memory.free(Change, journal);
         // Initial construction is an explicit full-document allocation. The
         // candidate allowance applies to later edits above their current size.
         const root = try tree.build(&arena.memory, initial);
-        value.* = .{ .arena = arena, .root = root, .history = history, .preedit = preedit, .selected = .{ .single = .{ .anchor = initial.len, .caret = initial.len } } };
+        value.* = .{ .arena = arena, .root = root, .history = history, .preedit = preedit, .journal = journal, .selected = .{ .single = .{ .anchor = initial.len, .caret = initial.len } } };
         return @ptrCast(value);
     }
     pub fn close(self: *Document) !void {
@@ -354,6 +428,7 @@ pub const Document = opaque {
         for (0..value.history_len) |index| value.dropEdit(value.historyAt(index).*);
         arena.memory.free(Edit, value.history);
         arena.memory.free(u8, value.preedit);
+        arena.memory.free(Change, value.journal);
         arena.memory.destroy(State, value);
         releaseArena(arena);
     }
@@ -387,6 +462,39 @@ pub const Document = opaque {
     /// resulting bytes happen to be equal. Exhaustion rejects text mutations.
     pub fn committedTextVersion(self: *const Document) !u64 {
         return (try self.state()).text_version;
+    }
+    /// Map byte `offset` of committed text version `since` to the current
+    /// text through the changes since, as a position an edit moves: past the
+    /// changes before it, to the end (`right`) or start (`left`) of text that
+    /// replaced it, and after (`right`) or before (`left`) text inserted at
+    /// it. `ChangesUnavailable` when the journal no longer reaches `since`
+    /// (`Limits.change_journal`, a restore) or `since` is a future version.
+    pub fn mapOffset(self: *const Document, since: u64, offset: usize, bias: Bias) !usize {
+        const value = try self.state();
+        if (since == value.text_version) return offset;
+        if (since < value.journal_floor or since > value.text_version) return error.ChangesUnavailable;
+        // The first change made after `since`.
+        var low: usize = 0;
+        var high = value.journal_len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (value.journalAt(middle).version <= since) low = middle + 1 else high = middle;
+        }
+        var result = offset;
+        var at = low;
+        while (at < value.journal_len) {
+            var end = at;
+            const made = value.journalAt(at).version;
+            while (end < value.journal_len and value.journalAt(end).version == made) end += 1;
+            result = mapThrough(value, at, end, result, bias);
+            at = end;
+        }
+        return result;
+    }
+    /// Whether positions of text version `since` can be mapped to now.
+    pub fn canMapFrom(self: *const Document, since: u64) !bool {
+        const value = try self.state();
+        return since == value.text_version or (since >= value.journal_floor and since <= value.text_version);
     }
     pub fn read(self: *const Document, range: Range, destination: []u8) !usize {
         const value = try self.state();
@@ -528,7 +636,8 @@ pub const Document = opaque {
         value.busy = true;
         defer value.busy = false;
         try value.validateCommit();
-        const before = value.historyAt(value.history_cursor - 1).before;
+        const undone = value.historyAt(value.history_cursor - 1).*;
+        const before = undone.before;
         const old = value.root;
         value.root = tree.retain(before.root);
         const old_selected = value.selected;
@@ -536,6 +645,7 @@ pub const Document = opaque {
         value.history_cursor -= 1;
         value.revision += 1;
         value.text_version += 1;
+        value.record(value.text_version, undone.changes, true);
         old_selected.release(&value.arena.memory);
         tree.release(&value.arena.memory, old);
         return true;
@@ -548,7 +658,8 @@ pub const Document = opaque {
         value.busy = true;
         defer value.busy = false;
         try value.validateCommit();
-        const after = value.historyAt(value.history_cursor).after;
+        const redone = value.historyAt(value.history_cursor).*;
+        const after = redone.after;
         const old = value.root;
         value.root = tree.retain(after.root);
         const old_selected = value.selected;
@@ -556,6 +667,7 @@ pub const Document = opaque {
         value.history_cursor += 1;
         value.revision += 1;
         value.text_version += 1;
+        value.record(value.text_version, redone.changes, false);
         old_selected.release(&value.arena.memory);
         tree.release(&value.arena.memory, old);
         return true;
@@ -577,7 +689,7 @@ pub const Document = opaque {
         errdefer tree.release(&value.arena.memory, candidate);
         const selected = saved.selected.retain();
         errdefer selected.release(&value.arena.memory);
-        try value.publish(candidate, selected);
+        try value.publish(candidate, selected, null);
     }
     pub fn setComposition(self: *Document, text: []const u8, selected: Selection) !void {
         const value = try self.state();
@@ -884,4 +996,41 @@ test "exhausted virtual composition cannot prevent native revoke or final docume
     try std.testing.expectEqual(std.math.maxInt(u64), try document.version());
     try std.testing.expectEqualStrings("文", (try document.composition()).?.text);
     // The defer succeeds: cancellation failure never leaves a lifetime pin.
+}
+test "positions of older text versions map through edits, undo and redo until the journal forgets" {
+    const doc = try Document.create(std.testing.allocator, std.Thread.getCurrentId(), "abcdef", .{ .change_journal = 6 });
+    defer doc.close() catch unreachable;
+    const v0 = try doc.committedTextVersion();
+    try std.testing.expectEqual(@as(usize, 3), try doc.mapOffset(v0, 3, .right));
+    try doc.replace(.{ .start = 2, .end = 2 }, "XY"); // abXYcdef
+    try std.testing.expectEqual(@as(usize, 4), try doc.mapOffset(v0, 2, .right));
+    try std.testing.expectEqual(@as(usize, 2), try doc.mapOffset(v0, 2, .left));
+    try std.testing.expectEqual(@as(usize, 1), try doc.mapOffset(v0, 1, .right));
+    try std.testing.expectEqual(@as(usize, 7), try doc.mapOffset(v0, 5, .left));
+    // Replaced text goes to the replacement's end (right) or start (left).
+    try doc.replaceMany(try doc.version(), &.{ .{ .range = .{ .start = 0, .end = 1 }, .text = "" }, .{ .range = .{ .start = 4, .end = 6 }, .text = "1234" } }); // bXY1234ef
+    try std.testing.expectEqual(@as(usize, 7), try doc.mapOffset(v0, 3, .right));
+    try std.testing.expectEqual(@as(usize, 3), try doc.mapOffset(v0, 3, .left));
+    try std.testing.expectEqual(@as(usize, 8), try doc.mapOffset(v0, 5, .right));
+    const v2 = try doc.committedTextVersion();
+    _ = try doc.undo(); // abXYcdef
+    try std.testing.expectEqual(@as(usize, 7), try doc.mapOffset(v2, 8, .right));
+    // Through the replacement of "cd" and back: at its end.
+    try std.testing.expectEqual(@as(usize, 6), try doc.mapOffset(v0, 2, .right));
+    // The journal holds 6 replacements: the redo's make it forget the first
+    // edit's.
+    _ = try doc.redo();
+    try std.testing.expectEqual(@as(usize, 8), try doc.mapOffset(v2, 8, .right));
+    try std.testing.expectError(error.ChangesUnavailable, doc.mapOffset(v0, 0, .right));
+    try std.testing.expect(!try doc.canMapFrom(v0));
+    try doc.replace(.{ .start = 0, .end = 0 }, "-");
+    try std.testing.expectEqual(@as(usize, 9), try doc.mapOffset(v2, 8, .right));
+    try std.testing.expectError(error.ChangesUnavailable, doc.mapOffset(try doc.committedTextVersion() + 1, 0, .right));
+    // A restore's changes are unknown.
+    const saved = try doc.snapshot();
+    defer saved.close() catch unreachable;
+    const v4 = try doc.committedTextVersion();
+    try doc.replace(.{ .start = 0, .end = 1 }, "");
+    try doc.restore(saved);
+    try std.testing.expectError(error.ChangesUnavailable, doc.mapOffset(v4, 0, .right));
 }
