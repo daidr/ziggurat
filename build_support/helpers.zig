@@ -639,7 +639,8 @@ pub fn configurePullRequestRuns(cache_smokes: bool) void {
 /// b.addTest with build_support/macos_test_runner.zig on macOS targets.
 pub fn addTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
     var with = options;
-    // Named after the root file, so the build summary says which tests ran.
+    // Named after the root file (test-ui-widgets), so the build summary
+    // says which tests ran.
     if (std.mem.eql(u8, with.name, "test")) if (with.root_module.root_source_file) |root| switch (root) {
         .src_path => |source| {
             const path = @constCast(b.dupe(source.sub_path));
