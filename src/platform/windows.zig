@@ -273,6 +273,11 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
 pub fn titleBar(window: *core.WindowRecord) core.TitleBar {
     return caption.titleBar(window);
 }
+/// The window that brings the snap layouts over the content's own maximize
+/// button.
+pub fn setMaximizeButton(window: *core.WindowRecord, rect: ?core.Rect) void {
+    caption.setMaximizeButton(window, rect);
+}
 const dwm_cloak = 13;
 /// The window's timer that shows a window still cloaked when no frame came.
 const uncloak_timer: usize = 0x5a43;

@@ -52,6 +52,12 @@ const Probe = struct {
                 try std.testing.expectEqual(bar, try self.window.titleBar());
                 if (self.expect == .hidden_buttons) {
                     try std.testing.expectEqual(z.TitleBar{}, bar);
+                    // The content's own maximize button brings the snap
+                    // layouts on Windows; elsewhere it is ignored.
+                    try std.testing.expectError(error.InvalidGeometry, self.window.setMaximizeButton(.{ .x = std.math.nan(f32), .y = 0, .width = 46, .height = 32 }));
+                    try self.window.setMaximizeButton(.{ .x = 388, .y = 0, .width = 46, .height = 32 });
+                    try self.window.setMaximizeButton(.{ .x = 388, .y = 0, .width = 46, .height = 32 });
+                    try self.window.setMaximizeButton(null);
                     return self.finish();
                 }
                 // Linux shows the buttons the desktop's layout names, here

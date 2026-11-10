@@ -2052,6 +2052,20 @@ pub const Window = struct {
     }
     /// Keeps the window's pixels out of screenshots and screen recordings
     /// where the system honors the request.
+    /// Where the content draws the window's maximize button, in DIPs, in a
+    /// window with a hidden title bar without the system's buttons
+    /// (`WindowOptions.hide_window_buttons`); null for nowhere. On Windows
+    /// 11 resting the pointer over it shows the snap layouts, as over the
+    /// system's button; the pointer's moves and presses there still reach
+    /// the content, which hovers and clicks the button as any other. Other
+    /// platforms have no snap layouts and ignore it. The view sets it for
+    /// an area marked `maximize_button`.
+    pub fn setMaximizeButton(self: Window, rect: ?Rect) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        if (rect) |r| if (!std.math.isFinite(r.x) or !std.math.isFinite(r.y) or !std.math.isFinite(r.width) or !std.math.isFinite(r.height) or r.width < 0 or r.height < 0) return error.InvalidGeometry;
+        if (@hasDecl(backend, "setMaximizeButton")) backend.setMaximizeButton(scope.record, rect);
+    }
     pub fn setContentProtection(self: Window, enabled: bool) !void {
         const scope = try self.beginUpdate();
         defer endUpdate(scope);

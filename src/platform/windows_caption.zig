@@ -69,6 +69,12 @@ pub const Caption = struct {
     /// The font is Segoe Fluent Icons, Windows 11's; Windows 10 has Segoe
     /// MDL2 Assets.
     fluent: bool = false,
+    /// A window over the maximize button the content draws itself
+    /// (`setMaximizeButton`), null until it says where; `snap_rect` is
+    /// where, in DIPs.
+    snap: c.HWND = null,
+    snap_rect: ?core.Rect = null,
+    snap_tracking: bool = false,
 };
 
 var class_registered = false;
@@ -167,6 +173,7 @@ fn px(value: u32, dpi: u32) c_int {
 /// size, state, style or DPI, and when a child window appears.
 pub fn layout(window: *core.WindowRecord) void {
     const caption = &window.native.caption;
+    layoutSnap(window);
     const buttons = caption.buttons orelse return;
     const parent = window.native.hwnd;
     if (c.IsIconic(parent) != 0) return; // no room to lay out in
@@ -189,12 +196,12 @@ pub fn layout(window: *core.WindowRecord) void {
 /// Runs for the window's own messages, before it handles them.
 pub fn parentMessage(window: *core.WindowRecord, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) void {
     const caption = &window.native.caption;
-    if (caption.buttons == null) return;
+    if (caption.buttons == null and caption.snap == null) return;
     switch (message) {
         c.WM_SIZE => if (wp != c.SIZE_MINIMIZED) layout(window),
         c.WM_DPICHANGED, c.WM_STYLECHANGED => layout(window),
         // A child window the content made, a page, goes under the buttons.
-        c.WM_PARENTNOTIFY => if (wp & 0xffff == c.WM_CREATE and @as(c.HWND, @ptrFromInt(@as(usize, @bitCast(lp)))) != caption.buttons) layout(window),
+        c.WM_PARENTNOTIFY => if (wp & 0xffff == c.WM_CREATE and @as(c.HWND, @ptrFromInt(@as(usize, @bitCast(lp)))) != caption.buttons and @as(c.HWND, @ptrFromInt(@as(usize, @bitCast(lp)))) != caption.snap) layout(window),
         c.WM_NCACTIVATE => {
             const active = wp != 0;
             if (caption.active != active) {
@@ -256,6 +263,7 @@ fn captionProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callco
     const stored: usize = @bitCast(c.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA));
     if (stored == 0) return c.DefWindowProcW(hwnd, message, wp, lp);
     const window: *core.WindowRecord = @ptrFromInt(stored);
+    if (hwnd != null and window.native.caption.snap == hwnd) return snapMessage(window, hwnd, message, wp, lp);
     if (window.native.caption.buttons != hwnd) return c.DefWindowProcW(hwnd, message, wp, lp);
     const caption = &window.native.caption;
     var buffer: [3]Button = undefined;
@@ -302,6 +310,95 @@ fn captionProc(hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) callco
             caption.pressed = -1;
             paint(window);
             if (index >= 0 and index == pressed) click(window, shown(window, &buffer)[@intCast(index)]);
+            return 0;
+        },
+        c.WM_NCRBUTTONDOWN, c.WM_NCRBUTTONUP, c.WM_NCRBUTTONDBLCLK => return 0,
+        else => {},
+    }
+    return c.DefWindowProcW(hwnd, message, wp, lp);
+}
+
+// The maximize button that the content draws, in a window without the
+// system's buttons (`hide_window_buttons`), gets Windows 11's snap layouts
+// as the system's does: a window over it, layered without pixels, answers
+// HTMAXBUTTON, and the default procedure shows them as the pointer rests
+// there. The pointer's moves and presses over it, which come as non-client
+// messages, go on to the window as client ones, so the content hovers and
+// clicks its button as any other.
+
+/// Puts the window that brings the snap layouts over the content's
+/// maximize button, or hides it for null.
+pub fn setMaximizeButton(window: *core.WindowRecord, rect: ?core.Rect) void {
+    const caption = &window.native.caption;
+    if (window.options.title_bar == .default) return;
+    if (std.meta.eql(caption.snap_rect, rect)) return;
+    caption.snap_rect = rect;
+    if (caption.snap == null and rect != null) {
+        if (!registerClass()) return;
+        caption.snap = c.CreateWindowExW(c.WS_EX_LAYERED | ws_ex_no_redirection_bitmap, class_name, null, c.WS_CHILD | c.WS_CLIPSIBLINGS, 0, 0, 0, 0, window.native.hwnd, null, c.GetModuleHandleW(null), window);
+        const snap = caption.snap orelse return;
+        _ = c.SetLayeredWindowAttributes(snap, 0, 255, c.LWA_ALPHA);
+    }
+    layoutSnap(window);
+}
+
+fn layoutSnap(window: *core.WindowRecord) void {
+    const caption = &window.native.caption;
+    const snap = caption.snap orelse return;
+    const parent = window.native.hwnd;
+    const dpi: f32 = @floatFromInt(c.GetDpiForWindow(parent));
+    const r = caption.snap_rect orelse core.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    const scale = dpi / 96;
+    const x0: c_int = @intFromFloat(@round(r.x * scale));
+    const y0: c_int = @intFromFloat(@round(r.y * scale));
+    const x1: c_int = @intFromFloat(@round((r.x + r.width) * scale));
+    const y1: c_int = @intFromFloat(@round((r.y + r.height) * scale));
+    const hidden = window.native.fullscreen or x1 <= x0 or y1 <= y0 or styleBits(window) & c.WS_MAXIMIZEBOX == 0;
+    const show: c.UINT = if (hidden) c.SWP_HIDEWINDOW else c.SWP_SHOWWINDOW;
+    // HWND_TOP: above the content's child windows.
+    _ = c.SetWindowPos(snap, null, x0, y0, @max(x1 - x0, 0), @max(y1 - y0, 0), @as(c.UINT, c.SWP_NOACTIVATE) | show);
+}
+
+/// Gives the window a client mouse message at the screen position of a
+/// non-client one.
+fn toContent(window: *core.WindowRecord, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) void {
+    const bits: usize = @bitCast(lp);
+    var at: c.POINT = .{ .x = @as(i16, @bitCast(@as(u16, @truncate(bits)))), .y = @as(i16, @bitCast(@as(u16, @truncate(bits >> 16)))) };
+    const parent = window.native.hwnd;
+    if (c.ScreenToClient(parent, &at) == 0) return;
+    const x: u16 = @bitCast(@as(i16, @truncate(at.x)));
+    const y: u16 = @bitCast(@as(i16, @truncate(at.y)));
+    _ = c.SendMessageW(parent, message, wp, @bitCast(@as(usize, x) | (@as(usize, y) << 16)));
+}
+
+fn snapMessage(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM) c.LRESULT {
+    const caption = &window.native.caption;
+    switch (message) {
+        c.WM_NCHITTEST => return c.HTMAXBUTTON,
+        c.WM_NCMOUSEMOVE => {
+            if (!caption.snap_tracking) {
+                var track: c.TRACKMOUSEEVENT = .{ .cbSize = @sizeOf(c.TRACKMOUSEEVENT), .dwFlags = c.TME_LEAVE | c.TME_NONCLIENT, .hwndTrack = hwnd, .dwHoverTime = 0 };
+                _ = c.TrackMouseEvent(&track);
+                caption.snap_tracking = true;
+            }
+            toContent(window, c.WM_MOUSEMOVE, 0, lp);
+            // The default procedure brings the snap layouts over
+            // HTMAXBUTTON.
+            return c.DefWindowProcW(hwnd, message, wp, lp);
+        },
+        c.WM_NCMOUSELEAVE, c.WM_MOUSELEAVE => {
+            caption.snap_tracking = false;
+            return 0;
+        },
+        // Not the default procedure, which would maximize the window
+        // itself: the content takes the press, and with it the capture
+        // that brings it the release.
+        c.WM_NCLBUTTONDOWN, c.WM_NCLBUTTONDBLCLK => {
+            toContent(window, c.WM_LBUTTONDOWN, c.MK_LBUTTON, lp);
+            return 0;
+        },
+        c.WM_NCLBUTTONUP => {
+            toContent(window, c.WM_LBUTTONUP, 0, lp);
             return 0;
         },
         c.WM_NCRBUTTONDOWN, c.WM_NCRBUTTONUP, c.WM_NCRBUTTONDBLCLK => return 0,
