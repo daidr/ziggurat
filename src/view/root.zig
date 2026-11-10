@@ -1377,6 +1377,12 @@ pub const Embed = struct {
     /// bounds; keys arrive while it holds focus. True consumes the input and
     /// repaints the window. Runs on the main thread outside paint.
     input: ?*const fn (*anyopaque, u64, EmbedInput) bool = null,
+    /// A secondary press at a point local to the leaf, before the context
+    /// menu of an anchor over it opens, as a text editor puts its caret
+    /// there outside the selection: true gives the leaf the focus, which
+    /// the menu then gives back as it closes. Runs on the main thread
+    /// outside paint.
+    secondary_press: ?*const fn (*anyopaque, u64, Point) bool = null,
     /// The pointer's shape at a point local to the leaf, such as a resize
     /// arrow over a column edge, or null for the shape around it. Runs on
     /// the main thread outside paint; it must not allocate or block.
@@ -4987,6 +4993,13 @@ pub const View = struct {
         self.embed_hover = if (target) |entry| entry.id else null;
         if (target) |entry| repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_move = local(entry, point.?) }) or repaint;
         return repaint;
+    }
+    /// A secondary press at `point` reaches the leaf under it that asks for
+    /// one (`Embed.secondary_press`); its id when the leaf takes the focus.
+    pub fn embedSecondary(self: *View, point: Point) ?u64 {
+        const entry = self.embedAt(point) orelse return null;
+        const press = entry.embed.secondary_press orelse return null;
+        return if (press(entry.embed.context, entry.id, local(entry, point))) entry.id else null;
     }
     /// A primary press at `point`, routed after `pointerDown`. The leaf
     /// under it sees `pointer_down`; one that takes it captures the pointer
@@ -9135,6 +9148,14 @@ pub const Host = struct {
                         self.invalidate();
                         return true;
                     }
+                    // A leaf that asks sees a secondary press first, and
+                    // may take the focus, which a menu opened there gives
+                    // back as it closes.
+                    if (press.button == .secondary) if (self.view.embedSecondary(point)) |id| {
+                        if (self.context.input_state.focused != id) self.focus(id);
+                        self.view.focus = id;
+                        self.invalidate();
+                    };
                     // A secondary press opens the menu of the innermost
                     // menu anchor under it, over any control there.
                     if (press.button == .secondary and self.view.openMenuAt(point)) {

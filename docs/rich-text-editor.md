@@ -86,6 +86,10 @@ try doc.identifyParagraphs(.{ .context = &ids, .name = Ids.name });
 - 输入法：编辑器注册为 Context 的文本字段，预编辑文字在光标处显示并带下划线，候选窗口跟随光标。快照中的偏移是 UTF-16 码元，`units`/`runeOfUnits` 负责换算。
 - 无障碍：叶子是 `.text_box`，值为有界的纯文本。
 - `Editor.runCommand` 供工具栏与菜单调用；`takeChanged` 报告用户是否改过文本，`Options.on_change` 在每次用户编辑后调用。
+- 右键菜单：`Options.menu`（`MenuBuilder{ context, build }`）给编辑器一个上下文菜单，右键或菜单键打开，`build(context, v, editor)` 往菜单里加项；没有它编辑器没有菜单。`Editor.editItems(v)` 加入剪切、复制、粘贴与全选，按当前选区与只读状态启用，选中后在编辑器上执行；`editEntries()` 只给出这些项，供应用自己摆放。右键按下时，若不在选区内，光标先移到按下处（与文本框一致），编辑器取得焦点，菜单关闭后焦点回到编辑器，菜单项因此作用在右键处。视图层的叶子用 `Embed.secondary_press` 得到这次按下。
+- `Options.on_key`（`KeyFilter`）在编辑器处理每个按键之前被询问，返回 true 即拿走该键，编辑器不再处理，例如文字上方的补全列表接管方向键、回车和 Escape。
+- `Options.span_styler`（`SpanStyler`）拿到一个段落将要绘制的 spans，追加想要的 spans：拆分、着色或换字体，文字必须相同且顺序不变（文字不同时忽略），例如按语言给代码块着色。它的行为变化时改 `Options.spans_version`，段落会重新排版。
+- `Editor.caretRect()` 给出本帧光标的位置（相对编辑器叶子左上角、已计入滚动，单位 DIP）以及是否在可见范围内，供应用把弹出框放在光标旁。读取时排版可见部分；之后的绘制发现光标位置与读到的不同时会再请求一帧，所以弹出框跟随输入、滚动和宽度变化。编辑器尚未排版时返回 null 并请求一帧。
 
 ## 段落间隔与首行缩进
 

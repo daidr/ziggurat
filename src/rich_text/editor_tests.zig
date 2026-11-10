@@ -729,3 +729,112 @@ test "an attachment's link opens from anywhere on its box, and a drag opens none
     _ = e.handle(.{ .pointer_up = .{ .position = .{ .x = left.?[0] + 6, .y = left.?[1] } } });
     try testing.expectEqual(@as(usize, 2), opened.n);
 }
+
+const Taker = struct {
+    taken: usize = 0,
+    fn key(ptr: ?*anyopaque, _: *Editor, k: z.KeyCode, _: z.KeyModifiers) bool {
+        const self: *Taker = @ptrCast(@alignCast(ptr.?));
+        if (k != .enter and k != .down) return false;
+        self.taken += 1;
+        return true;
+    }
+};
+
+test "a key filter takes keys before the editor acts on them" {
+    var doc = try Document.initString(gpa, "one");
+    defer doc.deinit();
+    var taker: Taker = .{};
+    var e = try tester(&doc, .{ .on_key = .{ .context = &taker, .key = Taker.key } });
+    defer e.deinit();
+    press(&e, .enter);
+    press(&e, .down);
+    try testing.expectEqual(@as(usize, 2), taker.taken);
+    try expectString(&doc, "one");
+    press(&e, .left);
+    try testing.expectEqual(@as(u32, 2), doc.selection().caret);
+}
+
+const Sizer = struct {
+    size: f32 = 40,
+    other_text: bool = false,
+    calls: usize = 0,
+    fn spans(ptr: ?*anyopaque, allocator: std.mem.Allocator, _: usize, _: rt.ParagraphStyle, given: []const ed.Span, out: *std.ArrayList(ed.Span)) anyerror!void {
+        const self: *Sizer = @ptrCast(@alignCast(ptr.?));
+        self.calls += 1;
+        for (given) |span| {
+            // Each rune a span of its own, in the size asked.
+            var it = std.unicode.Utf8View.initUnchecked(span.text).iterator();
+            while (it.nextCodepointSlice()) |rune| {
+                var style = span.style;
+                style.font.size = self.size;
+                try out.append(allocator, .{ .text = if (self.other_text) "x" else rune, .style = style });
+            }
+        }
+    }
+};
+
+test "a span styler draws the paragraphs' spans, laid out again as its version changes" {
+    var doc = try Document.initString(gpa, "abc");
+    defer doc.deinit();
+    var plain = try tester(&doc, .{});
+    defer plain.deinit();
+    const before = plain.paras.items[0].h;
+    var sizer: Sizer = .{};
+    var e = try tester(&doc, .{ .span_styler = .{ .context = &sizer, .spans = Sizer.spans } });
+    defer e.deinit();
+    const big = e.paras.items[0].h;
+    try testing.expect(big > before * 2);
+    try e.layoutNow();
+    try testing.expectEqual(big, e.paras.items[0].h);
+    sizer.size = 80;
+    e.options.spans_version = 1;
+    try e.layoutNow();
+    try testing.expect(e.paras.items[0].h > big);
+    // Spans of another text are not drawn.
+    sizer.other_text = true;
+    e.options.spans_version = 2;
+    try e.layoutNow();
+    try testing.expectEqual(before, e.paras.items[0].h);
+}
+
+test "a secondary press puts the caret there outside the selection, and keeps a selection it is in" {
+    var doc = try Document.initString(gpa, "one two three");
+    defer doc.deinit();
+    var e = try tester(&doc, .{ .frame = false });
+    defer e.deinit();
+    const embed = e.embed();
+    try select(&e, &doc, 5, 5);
+    const inside = e.caretRect().?.rect;
+    try select(&e, &doc, 1, 1);
+    const outside = e.caretRect().?.rect;
+    try select(&e, &doc, 4, 7);
+    try testing.expect(embed.secondary_press.?(&e, 0, .{ .x = inside.x, .y = inside.y + inside.height / 2 }));
+    try testing.expectEqual(@as(u32, 4), doc.selection().anchor);
+    try testing.expectEqual(@as(u32, 7), doc.selection().caret);
+    try testing.expect(embed.secondary_press.?(&e, 0, .{ .x = outside.x, .y = outside.y + outside.height / 2 }));
+    try testing.expectEqual(@as(u32, 1), doc.selection().anchor);
+    try testing.expectEqual(@as(u32, 1), doc.selection().caret);
+}
+
+test "the caret's rectangle follows what is typed, and the edit items follow the selection" {
+    var doc = try Document.initString(gpa, "one");
+    defer doc.deinit();
+    var e = try tester(&doc, .{ .frame = false });
+    defer e.deinit();
+    const first = e.caretRect().?;
+    try testing.expect(first.visible);
+    typeText(&e, "s");
+    const after = e.caretRect().?;
+    try testing.expect(after.rect.x > first.rect.x);
+    try testing.expectEqual(first.rect.y, after.rect.y);
+    var entries = e.editEntries();
+    try testing.expectEqual(ed.Command.cut, entries[0].command);
+    try testing.expect(!entries[0].enabled and !entries[1].enabled and !entries[2].enabled and entries[3].enabled);
+    try select(&e, &doc, 0, 2);
+    entries = e.editEntries();
+    try testing.expect(entries[0].enabled and entries[1].enabled);
+    var shown = try tester(&doc, .{ .read_only = true });
+    defer shown.deinit();
+    entries = shown.editEntries();
+    try testing.expect(!entries[0].enabled and entries[1].enabled);
+}

@@ -771,3 +771,45 @@ test "a split button runs right to left with its arrow at its start" {
     try h.render();
     try testing.expectEqualStrings("Save", h.focused().?.text);
 }
+
+/// A leaf standing in for a text editor, which a secondary press tells
+/// where it is before its context menu opens.
+const Secondary = struct {
+    at: ?view.Point = null,
+    chosen: usize = 0,
+    fn measure(_: *anyopaque, _: view.Theme) view.layout.Measurement {
+        return .{ .minimum = .{ .width = 40, .height = 24 }, .preferred = .{ .width = 200, .height = 80 } };
+    }
+    fn paint(_: *anyopaque, _: *ui.Frame, _: u64, _: view.Rect) anyerror!void {}
+    fn input(_: *anyopaque, _: u64, _: view.EmbedInput) bool {
+        return false;
+    }
+    fn secondary(ptr: *anyopaque, _: u64, point: view.Point) bool {
+        const self: *Secondary = @ptrCast(@alignCast(ptr));
+        self.at = point;
+        return true;
+    }
+    fn build(self: *Secondary, v: *View) anyerror!void {
+        _ = try v.button("Before", .{});
+        try v.embed(.{ .context = self, .measure = measure, .paint = paint, .input = input, .secondary_press = secondary, .focusable = true }, .{ .name = "Editor" });
+        if (try v.popoverMenu(.{ .name = "Edit" })) {
+            if (try v.menuItem("Select All", .{}, .{})) self.chosen += 1;
+        }
+        try v.end();
+    }
+};
+
+test "a secondary press tells the leaf under it where, which takes the focus the menu gives back" {
+    var storage: Storage = .{};
+    var app: Secondary = .{};
+    var h = Harness.init(&app, Secondary.build, storage.buffers(), .{});
+    try h.render();
+    try h.focus(.{ .text = "Before" });
+    const area = try h.boundsOf(.{ .kind = .embed });
+    try testing.expect(try h.clickButtonAt(area.x + 30, area.y + 12, .secondary, .{}));
+    try testing.expectApproxEqAbs(@as(f32, 30), app.at.?.x, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 12), app.at.?.y, 0.01);
+    try h.click(.{ .text = "Select All" });
+    try testing.expectEqual(@as(usize, 1), app.chosen);
+    try testing.expectEqual(view.Kind.embed, h.focused().?.kind);
+}
