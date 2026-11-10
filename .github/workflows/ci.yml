@@ -146,8 +146,14 @@ jobs:
         run: |
           zig fmt --check build.zig build_support src examples tests tools
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          zig build "-j$env:NUMBER_OF_PROCESSORS" test smoke smoke-lifecycle smoke-composition smoke-key-input smoke-pointer-clicks smoke-text-layout smoke-drawing smoke-images smoke-widgets smoke-view smoke-window-hidden smoke-document-editor smoke-system smoke-clipboard -Daccessibility=true -Doptimize=${{ matrix.optimize }}
+          $t = Get-Date
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test -Daccessibility=true -Doptimize=${{ matrix.optimize }} --summary all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output "TIMING test: $(((Get-Date) - $t).TotalSeconds) s"
+          $t = Get-Date
+          zig build "-j$env:NUMBER_OF_PROCESSORS" smoke smoke-lifecycle smoke-composition smoke-key-input smoke-pointer-clicks smoke-text-layout smoke-drawing smoke-images smoke-widgets smoke-view smoke-window-hidden smoke-document-editor smoke-system smoke-clipboard -Daccessibility=true -Doptimize=${{ matrix.optimize }} --summary all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output "TIMING smokes: $(((Get-Date) - $t).TotalSeconds) s"
       - name: Format, compile, unit and native integration checks
         if: needs.changes.outputs.full == 'true'
         run: |
