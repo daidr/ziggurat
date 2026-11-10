@@ -333,6 +333,8 @@ const html_markup = lexers.Markup{ .html = true, .script = js_lexer.tokenizer(),
 pub const html = Language{ .name = "HTML", .extensions = &.{ ".html", ".htm", ".xhtml", ".vue" }, .block_comment = .{ "<!--", "-->" }, .brackets = &html_brackets, .auto_close = &auto_dq_sq, .word_chars = "-", .tab_size = 2, .tokenizer = html_markup.tokenizer() };
 /// ERB, as Rails' views and generators' .tt templates: HTML with Ruby in
 /// <% %>, <%= %> and <%- -%>, comments in <%# %>, and <%% a literal <%.
+// ERB's text is HTML, unless its name says otherwise: `forFile` gives
+// "config.json.erb" JSON text, and "notice.text.erb" plain text.
 const erb_template = lexers.Template{ .host = html_markup.tokenizer(), .code = ruby_lexer.tokenizer(), .tags = &.{ .{ .open = "<%#", .close = "%>", .comment = true }, .{ .open = "<%", .close = "%>" } }, .marks = "=-", .trims = "-", .escape = "<%%" };
 pub const erb = Language{ .name = "ERB", .extensions = &.{ ".erb", ".rhtml", ".tt" }, .block_comment = .{ "<!--", "-->" }, .brackets = &html_brackets, .auto_close = &auto_dq_sq, .word_chars = "-", .tab_size = 2, .tokenizer = erb_template.tokenizer() };
 /// Svelte: HTML whose {expressions} and {#blocks} lex as JavaScript, and
@@ -384,8 +386,9 @@ const nix_lexer = Lexer{ .line_comments = &hash_comments, .block_comments = &c_b
 }), .ident_chars = "-", .assign_keys = true, .operators = "+-*/=<>!&|?:@" };
 // Jinja, as Ansible's .j2 templates: expressions in {{ }}, statements in
 // {% %} with their - and + whitespace control, and comments in {# #}. Its
-// text is plain: a template's name, as nginx.conf.j2, says what it makes,
-// but the tags may cut its syntax anywhere.
+// text is plain, unless its name says what it makes: `forFile` gives
+// "compose.yaml.j2" YAML text. The tags may cut that text's syntax
+// anywhere, and the text resumes after a tag as it was before.
 const jinja_code = Lexer{ .strings = &.{ cString("\""), cString("'") }, .words = words(.{
     .keyword,  "for in if elif else endif endfor set endset macro endmacro call endcall block endblock extends include import from as with endwith without context filter endfilter raw endraw autoescape endautoescape trans endtrans pluralize do continue break and or not is recursive scoped required ignore missing",
     .constant, "true false none True False None",
@@ -407,19 +410,78 @@ pub const nix = Language{ .name = "Nix", .extensions = &.{".nix"}, .line_comment
 pub const all = [_]*const Language{ &go, &javascript, &typescript, &json, &python, &rust, &c, &cpp, &java, &kotlin, &scala, &swift, &dart, &csharp, &shell, &yaml, &toml, &sql, &r, &ruby, &lua, &php, &css, &html, &erb, &svelte, &xml, &markdown, &diff, &dockerfile, &makefile, &protobuf, &graphql, &zig, &nix, &jinja, &hcl };
 
 /// The language of a file by its name, as "main.go" or "Makefile", or null.
-/// A full file name match wins over an extension.
+/// A full file name match wins over an extension. A template's text is in
+/// the language its name gives before the template's extension:
+/// "compose.yaml.j2" is Jinja in YAML and "notice.text.erb" ERB in plain
+/// text; without one, as "show.erb", it is in the template's own, HTML for
+/// ERB and plain text for Jinja. The same name gives the same Language.
 pub fn forFile(filename: []const u8) ?*const Language {
     var start: usize = 0;
     for (filename, 0..) |ch, i| if (ch == '/' or ch == '\\') {
         start = i + 1;
     };
     const base = filename[start..];
+    const language = forBase(base) orelse return null;
+    const t = templateIndex(language) orelse return language;
+    const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return language;
+    const inner = base[0..dot];
+    const host = forBase(inner);
+    if (host == null and std.mem.lastIndexOfScalar(u8, inner, '.') == null) return language;
+    var index: usize = all.len;
+    if (host) |h| {
+        if (templateIndex(h) != null) return language;
+        if (h.tokenizer != null) index = indexOf(h);
+    }
+    if (index == template_own[t]) return language;
+    return &template_languages[t][index];
+}
+
+/// The language of a file named base, by its full name or else its
+/// extension.
+fn forBase(base: []const u8) ?*const Language {
     for (all) |language| for (language.filenames) |name| if (std.mem.eql(u8, name, base)) return language;
     const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return null;
     const extension = base[dot..];
     for (all) |language| for (language.extensions) |candidate| if (std.ascii.eqlIgnoreCase(candidate, extension)) return language;
     return null;
 }
+
+/// The templates whose text `forFile` sets by the name before their
+/// extension, their lexers, and the index in `all` of the text language
+/// each has of its own (`all.len` for plain text).
+const templates = [_]*const Language{ &erb, &jinja };
+const template_lexers = [_]*const lexers.Template{ &erb_template, &jinja_template };
+const template_own = [_]usize{ indexOf(&html), all.len };
+
+fn templateIndex(language: *const Language) ?usize {
+    for (templates, 0..) |template, i| if (template == language) return i;
+    return null;
+}
+fn indexOf(language: *const Language) usize {
+    for (all, 0..) |candidate, i| if (candidate == language) return i;
+    unreachable;
+}
+
+/// Each template's lexer with its text in each language of `all`, and last
+/// in plain text: one for each pair, made once.
+const template_hosts = blk: {
+    @setEvalBranchQuota(100_000);
+    var out: [templates.len][all.len + 1]lexers.Template = undefined;
+    for (template_lexers, 0..) |lexer, t| for (0..all.len + 1) |i| {
+        out[t][i] = lexer.*;
+        out[t][i].host = if (i == all.len) null else all[i].tokenizer;
+    };
+    break :blk out;
+};
+const template_languages = blk: {
+    @setEvalBranchQuota(100_000);
+    var out: [templates.len][all.len + 1]Language = undefined;
+    for (templates, 0..) |template, t| for (0..all.len + 1) |i| {
+        out[t][i] = template.*;
+        out[t][i].tokenizer = template_hosts[t][i].tokenizer();
+    };
+    break :blk out;
+};
 
 /// The language of a file by its name, as `forFile`, or else by the
 /// interpreter its text's #! line runs, as "#!/usr/bin/env ruby" or

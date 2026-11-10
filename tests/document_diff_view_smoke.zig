@@ -454,6 +454,29 @@ fn run(allocator: std.mem.Allocator) !void {
     // Each side numbers its lines in a gutter before its text.
     const numbered_x = (try state.view.rowInfo(&rows))[0].a_content.?.x;
     try std.testing.expect(numbered_x > bounds.x + 8);
+    // Both texts end without a newline: their last lines end with a
+    // muted mark after their text, a side a patch says ends with one
+    // marks none, and an empty mark none at all.
+    const last_row = for (try state.view.rowInfo(&rows)) |row| {
+        if (row.a == 4) break row;
+    } else return error.TestUnexpectedResult;
+    for (last_row.marks, [_]?ui.Rect{ last_row.a_content, last_row.b_content }) |mark, content| {
+        try std.testing.expect(mark.?.x > content.?.x and mark.?.x < content.?.x + content.?.width);
+        try std.testing.expect(mark.?.y >= content.?.y);
+    }
+    for (try state.view.rowInfo(&rows)) |row| if (row.a != 4) try std.testing.expect(row.marks[0] == null and row.marks[1] == null);
+    state.parameters.no_newline = .{ false, true };
+    try state.view.prepare(bounds, state.parameters);
+    try state.paint();
+    for (try state.view.rowInfo(&rows)) |row| if (row.a == 4) try std.testing.expect(row.marks[0] == null and row.marks[1] != null);
+    state.parameters.no_newline = null;
+    state.parameters.no_newline_mark = "";
+    try state.view.prepare(bounds, state.parameters);
+    try state.paint();
+    for (try state.view.rowInfo(&rows)) |row| try std.testing.expect(row.marks[0] == null and row.marks[1] == null);
+    state.parameters.no_newline_mark = viewing.presentation.noNewlineMark("zh-CN");
+    try state.view.prepare(bounds, state.parameters);
+    try state.paint();
     // Parts of files, as a patch's hunks, number their lines as the files'
     // lines, whose larger numbers take a wider gutter.
     const segments: viewing.Segments = .{ .a_starts = &.{ 0, 2 }, .b_starts = &.{ 0, 2 }, .a_lines = &.{ 99, 499 }, .b_lines = &.{ 99, 499 } };

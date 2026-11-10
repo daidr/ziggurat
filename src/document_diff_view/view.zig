@@ -35,7 +35,32 @@ pub const Parameters = struct {
     /// (`Segments`); null numbers the records from 1 in order. Its context
     /// must stay valid while the View draws with these parameters.
     numbering: ?gutters.Numbering = null,
+    /// Marks the last line of a side whose text ends without a newline,
+    /// muted after its text, as git diff's "\ No newline at end of file";
+    /// `noNewlineMark` gives it in a locale's language, and empty marks
+    /// none. At most 128 bytes, copied.
+    no_newline_mark: []const u8 = english_mark,
+    /// Which sides' files end without a newline when the Documents hold
+    /// parts of them, as a patch's hunks, whose texts end without one
+    /// either way (`code_editor.patch.Partial.no_newline`); null reads it
+    /// from each side's text.
+    no_newline: ?[2]bool = null,
 };
+const english_mark = "No newline at end of file";
+/// The mark of a last line without a newline in the language of `locale`,
+/// as "zh-TW" or "ja_JP": Japanese, Simplified or Traditional Chinese by
+/// the script or region, and English otherwise.
+pub fn noNewlineMark(locale: []const u8) []const u8 {
+    const end = std.mem.indexOfAny(u8, locale, "-_.@") orelse locale.len;
+    const primary = locale[0..end];
+    if (std.ascii.eqlIgnoreCase(primary, "ja")) return "ファイル末尾に改行がありません";
+    if (std.ascii.eqlIgnoreCase(primary, "zh")) {
+        const rest = locale[end..];
+        for ([_][]const u8{ "hant", "tw", "hk", "mo" }) |needle| if (std.ascii.findIgnoreCase(rest, needle) != null) return "檔案結尾沒有換行字元";
+        return "文件末尾没有换行符";
+    }
+    return english_mark;
+}
 pub const Colors = struct {
     text: ui.Color = ui.Color.rgb(0x202020),
     deleted: u32 = 0xffe9e9,
@@ -56,7 +81,9 @@ pub const Colors = struct {
 };
 pub const Direction = enum { a_to_b, b_to_a };
 pub const Side = enum(u1) { a, b };
-pub const RowInfo = struct { row: usize, a: ?usize, b: ?usize, hunk: ?usize, bounds: ui.Rect, a_content: ?ui.Rect, b_content: ?ui.Rect };
+/// `marks` are where each side's "No newline at end of file" shows on the
+/// row, if it does.
+pub const RowInfo = struct { row: usize, a: ?usize, b: ?usize, hunk: ?usize, bounds: ui.Rect, a_content: ?ui.Rect, b_content: ?ui.Rect, marks: [2]?ui.Rect = @splat(null) };
 pub const Info = struct { serial: u64, selected_hunk: ?usize, rows: usize, total_rows: usize, estimated_extent: f64, anchor_row: usize, revert_button: ui.Rect };
 pub const Stats = struct { reserved_bytes: usize, peak_reserved_bytes: usize, shaped_batches: u64, shaped_bytes: u64, indexed_rows: usize, header_layouts: u64, header_prepared: u64, header_reuses: u64 };
 const Ref = struct { plane: usize, part: usize };
@@ -104,6 +131,10 @@ const Snapshot = struct {
     /// comparison counts no lines of them, so their one line shows no
     /// number.
     empty: [2]bool = @splat(false),
+    /// The last record of each side that ends without a newline, which
+    /// the View's mark follows, in a font of `mark_size`.
+    marked: [2]?usize = @splat(null),
+    mark_size: f32 = 0,
     button: ui.Rect,
     scale: f32,
     rows: [max_rows]RenderRow = undefined,
@@ -173,6 +204,9 @@ pub const View = struct {
     version: u64 = 0,
     numbering: ?gutters.Numbering = null,
     line_numbers: bool = true,
+    no_newline: ?[2]bool = null,
+    mark: [128]u8 = undefined,
+    mark_len: usize = 0,
     estimated_height: f32 = 20,
     shaped_batches: u64 = 0,
     shaped_bytes: u64 = 0,
@@ -240,7 +274,7 @@ pub const View = struct {
         return self.prepareInner(bounds, parameters);
     }
     fn prepareInner(self: *View, bounds: ui.Rect, parameters: Parameters) !void {
-        if (!ui.layout.validRect(bounds) or bounds.width < 80 or bounds.height < 40 or bounds.width > 1000000 or bounds.height > 1000000 or !std.math.isFinite(parameters.scale) or parameters.scale <= 0 or parameters.scale > 16 or parameters.font.family.len > 255 or parameters.font.locale.len > 127) return error.InvalidGeometry;
+        if (!ui.layout.validRect(bounds) or bounds.width < 80 or bounds.height < 40 or bounds.width > 1000000 or bounds.height > 1000000 or !std.math.isFinite(parameters.scale) or parameters.scale <= 0 or parameters.scale > 16 or parameters.font.family.len > 255 or parameters.font.locale.len > 127 or parameters.no_newline_mark.len > 128) return error.InvalidGeometry;
         _ = try ix.ticks(parameters.estimated_height);
         if (self.snapshot) |*snapshot| try snapshot.ensureUnused();
         errdefer self.required = true;
@@ -259,6 +293,18 @@ pub const View = struct {
             const source = if (side == .a) display.a else display.b;
             empty[@backingInt(side)] = try source.byteLength() == 0;
         }
+        // A side's last line without a newline: a patch's sides say, as
+        // their texts end without one either way.
+        var marked: [2]?usize = @splat(null);
+        if (parameters.no_newline_mark.len > 0) for ([_]Side{ .a, .b }) |side| {
+            if (empty[@backingInt(side)]) continue;
+            if (parameters.no_newline) |sides| if (!sides[@backingInt(side)]) continue;
+            const source = if (side == .a) display.a else display.b;
+            const length = try source.byteLength();
+            var last: [1]u8 = undefined;
+            _ = try source.read(.{ .start = length - 1, .end = length }, &last);
+            if (last[0] != '\n') marked[@backingInt(side)] = try source.lineCount() - 1;
+        };
         if (parameters.line_numbers) {
             var largest: usize = 0;
             for ([_]Side{ .a, .b }) |side| {
@@ -278,7 +324,7 @@ pub const View = struct {
         var font = parameters.font;
         font.width = width;
         if (font.wrap == .none) font.width = 0;
-        const same = self.configured and parameters.version == self.version and fontEqual(font, self.font.get()) and std.meta.eql(parameters.numbering, self.numbering) and parameters.line_numbers == self.line_numbers;
+        const same = self.configured and parameters.version == self.version and fontEqual(font, self.font.get()) and std.meta.eql(parameters.numbering, self.numbering) and parameters.line_numbers == self.line_numbers and std.meta.eql(parameters.no_newline, self.no_newline) and std.mem.eql(u8, parameters.no_newline_mark, self.mark[0..self.mark_len]);
         const generation = if (same) self.generation else std.math.add(u64, self.generation, 1) catch return error.IdExhausted;
         const same_estimate = self.configured and parameters.estimated_height == self.estimated_height;
         if (!self.required and same and same_estimate) if (self.snapshot) |*snapshot| if (snapshot.serial == display.serial and std.meta.eql(snapshot.bounds, bounds) and snapshot.scale == parameters.scale) {
@@ -304,7 +350,7 @@ pub const View = struct {
             anchor.row = @min(anchor.row, index.heights.len - 1);
             anchor.inset = @min(anchor.inset, index.heights[anchor.row] - 1);
         }
-        var candidate: Snapshot = .{ .serial = display.serial, .generation = generation, .a_revision = revision_a, .b_revision = revision_b, .bounds = bounds, .columns = columns, .gutters = gutter_rects, .number_size = parameters.font.size * 0.85, .numbering = parameters.numbering, .empty = empty, .button = .{ .x = bounds.x + bounds.width - 136, .y = bounds.y, .width = 136, .height = header_height }, .scale = parameters.scale };
+        var candidate: Snapshot = .{ .serial = display.serial, .generation = generation, .a_revision = revision_a, .b_revision = revision_b, .bounds = bounds, .columns = columns, .gutters = gutter_rects, .number_size = parameters.font.size * 0.85, .numbering = parameters.numbering, .empty = empty, .marked = marked, .mark_size = parameters.font.size, .button = .{ .x = bounds.x + bounds.width - 136, .y = bounds.y, .width = 136, .height = header_height }, .scale = parameters.scale };
         defer candidate.close();
         var row = anchor.row;
         var y = -@as(f32, @floatCast(ix.dip(anchor.inset)));
@@ -400,6 +446,9 @@ pub const View = struct {
         self.version = parameters.version;
         self.numbering = parameters.numbering;
         self.line_numbers = parameters.line_numbers;
+        self.no_newline = parameters.no_newline;
+        @memcpy(self.mark[0..parameters.no_newline_mark.len], parameters.no_newline_mark);
+        self.mark_len = parameters.no_newline_mark.len;
         self.estimated_height = parameters.estimated_height;
         self.configured = true;
         self.required = false;
@@ -571,11 +620,29 @@ pub const View = struct {
                             try frame.preparedText(.{ .x = column.x, .y = text_y - part.top }, try prepared.view(), colors.text);
                         }
                     }
+                    if (markRect(snapshot, side, part, column, text_y)) |mark| {
+                        const clip = ui.layout.intersect(mark, rectangle);
+                        if (clip.width > 0 and clip.height > 0) {
+                            try frame.pushClip(clip);
+                            defer frame.popClip() catch |err| {
+                                frame.failure = frame.failure orelse err;
+                            };
+                            frame.labelFont(mark, self.mark[0..self.mark_len], colors.line_number, .{ .size = snapshot.mark_size });
+                        }
+                    }
                 }
             }
         }
         for (snapshot.headers[0..snapshot.header_count]) |item| try frame.preparedText(item.origin, try item.resource.prepared.view(), colors.text);
         if (frame.failure) |err| return @as(anyerror!void, err);
+    }
+    /// Where the mark of no newline at the end goes after part `part` of
+    /// `side` in `column`, its text at `text_y`: after the last line of a
+    /// side that ends without one, a space's width after its text.
+    fn markRect(snapshot: *const Snapshot, side: Side, part: cache.Part, column: ui.Rect, text_y: f32) ?ui.Rect {
+        if (snapshot.marked[@backingInt(side)] != part.line) return null;
+        const x = column.x + part.end.x + snapshot.mark_size * 0.75;
+        return .{ .x = x, .y = text_y - part.top + part.end.y, .width = @max(0, column.x + column.width - x), .height = @max(part.end.height, snapshot.mark_size * 1.2) };
     }
     /// The header of the segment row `row` starts, when it is the first of
     /// its segment, and the numbering has headers.
@@ -637,11 +704,14 @@ pub const View = struct {
         for (snapshot.rows[0..snapshot.row_count], destination[0..snapshot.row_count]) |row, *output| {
             const mapped = self.index.?.row(row.index);
             var content: [2]?ui.Rect = @splat(null);
+            var marks: [2]?ui.Rect = @splat(null);
             for (row.sides, 0..) |reference, side| if (reference) |ref| {
                 const part = snapshot.planes[ref.plane].entry.parts[ref.part];
-                content[side] = .{ .x = snapshot.columns[side].x, .y = snapshot.columns[side].y + row.y + row.band, .width = snapshot.columns[side].width, .height = part.height };
+                const text_y = snapshot.columns[side].y + row.y + row.band;
+                content[side] = .{ .x = snapshot.columns[side].x, .y = text_y, .width = snapshot.columns[side].width, .height = part.height };
+                marks[side] = markRect(snapshot, @fromBackingInt(@intCast(side)), part, snapshot.columns[side], text_y);
             };
-            output.* = .{ .row = row.index, .a = mapped.a, .b = mapped.b, .hunk = row.hunk, .bounds = .{ .x = snapshot.bounds.x, .y = snapshot.columns[0].y + row.y, .width = snapshot.bounds.width, .height = row.height }, .a_content = content[0], .b_content = content[1] };
+            output.* = .{ .row = row.index, .a = mapped.a, .b = mapped.b, .hunk = row.hunk, .bounds = .{ .x = snapshot.bounds.x, .y = snapshot.columns[0].y + row.y, .width = snapshot.bounds.width, .height = row.height }, .a_content = content[0], .b_content = content[1], .marks = marks };
         }
         return destination[0..snapshot.row_count];
     }
@@ -776,6 +846,14 @@ pub const View = struct {
         }
     }
 };
+test "the mark of no newline at the end is in the locale's language" {
+    try std.testing.expectEqualStrings("No newline at end of file", noNewlineMark("en-US"));
+    try std.testing.expectEqualStrings("No newline at end of file", noNewlineMark(""));
+    try std.testing.expectEqualStrings("ファイル末尾に改行がありません", noNewlineMark("ja_JP.UTF-8"));
+    try std.testing.expectEqualStrings("文件末尾没有换行符", noNewlineMark("zh-Hans-CN"));
+    try std.testing.expectEqualStrings("檔案結尾沒有換行字元", noNewlineMark("zh-TW"));
+    try std.testing.expectEqualStrings("檔案結尾沒有換行字元", noNewlineMark("zh_Hant"));
+}
 fn fontEqual(a: t.Options, b: t.Options) bool {
     return a.size == b.size and a.weight == b.weight and a.italic == b.italic and a.width == b.width and a.wrap == b.wrap and a.direction == b.direction and std.mem.eql(u8, a.family, b.family) and std.mem.eql(u8, a.locale, b.locale);
 }

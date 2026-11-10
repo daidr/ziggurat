@@ -2,7 +2,9 @@ const std = @import("std");
 const d = @import("ziggurat_document");
 const t = @import("ziggurat_text_layout");
 pub const max_parts = 32;
-pub const Part = struct { line: usize, range: d.Range, top: f32, height: f32 };
+/// `end` is the caret after a last line without a newline, where a mark
+/// of that goes; zero for a line that ends with one.
+pub const Part = struct { line: usize, range: d.Range, top: f32, height: f32, end: t.Rect = .{} };
 pub const Budget = struct {
     allocator: std.mem.Allocator,
     limit: usize,
@@ -77,7 +79,8 @@ pub const Entry = struct {
             const terminated = line + 1 < total;
             const height = (if (terminated) last.y else last.y + last.height) - first.y;
             if (!std.math.isFinite(height) or height <= 0 or height > 1000000) return error.InvalidParagraphMetrics;
-            self.parts[at] = .{ .line = line, .range = ranges[at], .top = first.y, .height = height };
+            const after: t.Rect = if (terminated) .{} else last;
+            self.parts[at] = .{ .line = line, .range = ranges[at], .top = first.y, .height = height, .end = after };
         }
         return self;
     }

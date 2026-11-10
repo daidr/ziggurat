@@ -354,13 +354,61 @@ test "ERB and Jinja templates lex their code in tags over the text around them" 
     state = try expectRuns(&languages.jinja, "{# a", state, &.{.{ "{# a", .comment }});
     state = try expectRuns(&languages.jinja, "b #}x{{ none }}", state, &.{ .{ "b #}", .comment }, .{ "x", .text }, .{ "{{", .meta }, .{ "none", .constant }, .{ "}}", .meta } });
     try std.testing.expectEqual(@as(u64, 0), state);
-    const files = [_]struct { []const u8, *const syntax.Language }{ .{ "show.html.erb", &languages.erb }, .{ "model.rb.tt", &languages.erb }, .{ "nginx.conf.j2", &languages.jinja }, .{ "page.jinja2", &languages.jinja } };
+    const files = [_]struct { []const u8, *const syntax.Language }{ .{ "show.html.erb", &languages.erb }, .{ "model.tt", &languages.erb }, .{ "page.jinja2", &languages.jinja } };
     for (files) |file| try std.testing.expectEqual(file[1], syntax.forFile(file[0]).?);
     const names = [_]struct { []const u8, *const syntax.Language }{ .{ "erb", &languages.erb }, .{ "ERB", &languages.erb }, .{ "eruby", &languages.erb }, .{ "jinja", &languages.jinja }, .{ "Jinja", &languages.jinja }, .{ "jinja2", &languages.jinja }, .{ "j2", &languages.jinja } };
     for (names) |name| try std.testing.expectEqual(name[1], syntax.named(name[0]).?);
     try std.testing.expectEqualStrings("", languages.jinja.line_comment);
     try std.testing.expectEqualStrings("{#", languages.jinja.block_comment[0]);
     try std.testing.expectEqualStrings("#}", languages.jinja.block_comment[1]);
+}
+
+/// The runs of a line, as "kind(text)" joined, skipping blank text.
+fn lexRuns(tokenizer: syntax.Tokenizer, line: []const u8, out: []u8) ![]const u8 {
+    var buffer: [128]Token = undefined;
+    const result = syntax.tokenizeLine(tokenizer, line, 0, &buffer);
+    var writer = std.Io.Writer.fixed(out);
+    var from: usize = 0;
+    for (result.tokens) |token| {
+        defer from = token.end;
+        const text = line[from..token.end];
+        if (token.kind == .text and std.mem.trim(u8, text, " \t").len == 0) continue;
+        try writer.print("{s}({s})", .{ @tagName(token.kind), text });
+    }
+    return writer.buffered();
+}
+
+test "a template's text is in the language the name before its extension gives" {
+    const cases = [_]struct { name: []const u8, host: ?*const syntax.Language, line: []const u8 }{
+        .{ .name = "compose.yaml.j2", .host = &languages.yaml, .line = "image: app # pinned" },
+        .{ .name = "config.json.erb", .host = &languages.json, .line = "{\"a\": [1, true]}" },
+        .{ .name = "Dockerfile.j2", .host = &languages.dockerfile, .line = "FROM ruby AS app" },
+        .{ .name = "show.html.erb", .host = &languages.html, .line = "<p class=\"x\">a</p>" },
+        .{ .name = "show.erb", .host = &languages.html, .line = "<p class=\"x\">a</p>" },
+        .{ .name = "welcome.text.erb", .host = null, .line = "<p class=\"x\">a: 1</p>" },
+        .{ .name = "nginx.conf.j2", .host = &languages.toml, .line = "listen = 80" },
+        .{ .name = "motd.j2", .host = null, .line = "[a] = 1 # b" },
+    };
+    for (cases) |case| {
+        const language = syntax.forFile(case.name).?;
+        var path: [64]u8 = undefined;
+        try std.testing.expectEqual(language, syntax.forFile(try std.fmt.bufPrint(&path, "x/{s}", .{case.name})).?);
+        var got: [512]u8 = undefined;
+        var want: [512]u8 = undefined;
+        const expected = if (case.host) |host| try lexRuns(host.tokenizer.?, case.line, &want) else try std.fmt.bufPrint(&want, "text({s})", .{case.line});
+        try std.testing.expectEqualStrings(expected, try lexRuns(language.tokenizer.?, case.line, &got));
+        const jinja = std.mem.eql(u8, language.name, "Jinja");
+        const tag = if (jinja) "{{ tag }}" else "<%= tag %>";
+        const tagged = if (jinja) "meta({{)variable(tag)meta(}})" else "meta(<%=)variable(tag)meta(%>)";
+        try std.testing.expectEqualStrings(tagged, try lexRuns(language.tokenizer.?, tag, &got));
+    }
+    // A template in its own text language is the template itself, and so
+    // is one inside another.
+    try std.testing.expectEqual(&languages.erb, syntax.forFile("show.html.erb").?);
+    try std.testing.expectEqual(&languages.jinja, syntax.forFile("motd.j2").?);
+    try std.testing.expectEqual(&languages.jinja, syntax.forFile("page.html.erb.j2").?);
+    try std.testing.expectEqual(&languages.erb, syntax.forFile("x.j2.erb").?);
+    try std.testing.expect(syntax.forFile("compose.yaml.j2").? != syntax.forFile("config.json.erb").?);
 }
 
 test "Svelte lexes expressions, blocks and TypeScript scripts in its markup" {
