@@ -1,5 +1,6 @@
 const std = @import("std");
 const windows_frame = @import("windows_frame.zig");
+const caption = @import("windows_caption.zig");
 const core = @import("../root.zig");
 const icons = @import("windows_icons.zig");
 const text_input = @import("windows_text.zig");
@@ -36,7 +37,7 @@ const PointerDispatch = struct {
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
 pub const AppData = struct { popup_shadow_class: c.ATOM = 0, taskbar_created: c.UINT = 0, taskbar: ?*TaskbarList = null, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
-pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, pen: PenState = .{}, held: HeldKeys = .{}, cloaked: bool = false, revealing: bool = false, reveal_frame: u64 = 0, reveal_start: u32 = 0, material: core.Vibrancy = .none, glass: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } };
+pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, pen: PenState = .{}, held: HeldKeys = .{}, cloaked: bool = false, revealing: bool = false, reveal_frame: u64 = 0, reveal_start: u32 = 0, material: core.Vibrancy = .none, glass: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 }, caption: caption.Caption = .{} };
 /// The pen or finger of the last WM_POINTER message, which the mouse messages
 /// Windows makes of it carry.
 const PenState = struct {
@@ -265,6 +266,12 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
         errdefer _ = c.DestroyWindow(window.native.hwnd);
         _ = try setTextInputMode(window, options.text_input_mode);
     }
+    if (options.title_bar != .default and !options.hide_window_buttons) caption.create(window);
+}
+/// The room the window controls take over the content of a window with a
+/// hidden title bar.
+pub fn titleBar(window: *core.WindowRecord) core.TitleBar {
+    return caption.titleBar(window);
 }
 const dwm_cloak = 13;
 /// The window's timer that shows a window still cloaked when no frame came.
@@ -825,6 +832,9 @@ pub fn setTraits(window: *core.WindowRecord, traits: core.WindowTraits) !void {
     // Graying SC_CLOSE disables the close button and Alt+F4 as well.
     if (c.GetSystemMenu(hwnd, c.FALSE)) |menu| _ = c.EnableMenuItem(menu, c.SC_CLOSE, @as(c.UINT, c.MF_BYCOMMAND) | @as(c.UINT, if (traits.closable) c.MF_ENABLED else c.MF_GRAYED));
     if (!sameWindow(window, hwnd)) return error.Closed;
+    // The buttons follow: close alone without minimize and maximize.
+    caption.layout(window);
+    window.emitState();
 }
 /// Layered while translucent, transparent to the pointer, or with an input
 /// region, which `transparent` (WS_EX_TRANSPARENT) follows the cursor in
@@ -1302,6 +1312,8 @@ pub fn setFullscreen(window: *core.WindowRecord, enabled: bool) !void {
         window.native.fullscreen = false;
         window.native.saved = null;
     }
+    // The buttons hide in full screen.
+    caption.layout(window);
 }
 pub fn setAlwaysOnTop(window: *core.WindowRecord, enabled: bool) !void {
     const hwnd = window.native.hwnd;
@@ -1710,6 +1722,7 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
     // KILLFOCUS can emit a synchronous composition-cancel callback. A closed
     // or replaced HWND must not reach the following native state queries.
     if (guarded_pointer and (!sameWindow(window, hwnd) or pointerOperation(window) != operation)) return 0;
+    caption.parentMessage(window, message, wp, lp);
     switch (message) {
         // What the frames leave transparent shows what is behind, without a
         // frame painted over it or an active border on activation.
@@ -1953,6 +1966,7 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
         },
         c.WM_NCDESTROY => {
             uncountPointer(window);
+            caption.destroy(window);
             if (window.native.background_brush) |brush| _ = c.DeleteObject(brush);
             window.native.background_brush = null;
             _ = c.RemovePropW(hwnd, identity_property);

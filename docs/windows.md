@@ -201,6 +201,14 @@ macOS 上任何窗口都能随时显示材质：内容视图里、绘制视图�
 
 macOS 上 `.borderless` 与 `.custom` 窗口保留标题栏样式（`NSWindowStyleMaskTitled` 加 `FullSizeContentView`），标题栏透明、标题与三个按钮隐藏，内容铺满整个窗口：窗口因此有系统阴影、圆角和缩放边缘，也能成为 key 窗口。隐藏标题栏里的按下交给内容，由命中回调决定是否拖动。`WindowOptions.corner_radius` 把这样的窗口连同材质裁成该半径的连续曲线圆角（玻璃自己按圆角画边缘），窗口改为非不透明（`isOpaque` 为 false）、背景 clear，阴影随圆角重新生成；不透明的帧仍画白底，只是四角被裁掉。Windows 11 上 `corner_radius` 大于 0 的无边框窗口改用系统自己的圆角（`DWMWA_WINDOW_CORNER_PREFERENCE`），与半径无关；其他平台忽略它。
 
+### 隐藏标题栏
+
+`WindowOptions.title_bar` 为 `.hidden` 或 `.hidden_inset` 时（只用于 `.custom`、非弹出窗口，否则 `InvalidWindowDecoration`；`title_bar_height` 与 `traffic_light_position` 超过 256 返回 `InvalidGeometry`），内容仍铺满窗口，系统窗口按钮留在内容之上。`Window.titleBar()`（等于 `state().title_bar`）报告 `TitleBar{height, left, right, bottom}`：标题栏高度、左右两侧按钮占的宽度、按钮下沿离顶边的距离，单位 DIP；`.default`、`hide_window_buttons`、全屏时全为 0，变化随 `Event.window_state` 通知。
+
+- macOS：按钮不再隐藏；`.hidden_inset` 给窗口一条不带项目、无分隔线的 `NSToolbar`，全屏时它随菜单栏自动隐藏。`traffic_light_position` 把关闭按钮左上角放到指定点，其余按钮按原间距排在后面，按钮所在的标题栏视图高度设为按钮高加上下两倍 y；AppKit 在窗口缩放、退出全屏、标题或外观变化时会重新布局标题栏，框架之后再摆一次。没有指定位置时 `height` 是窗口框架减去 `contentLayoutRect` 的高度，`left` 是缩放按钮右沿，`bottom` 是关闭按钮下沿。
+- Windows：没有系统标题栏，按钮由框架画在右上角的分层子窗口里（`UpdateLayeredWindow`，像素带 alpha，内容从按钮周围透出；没有重定向位图的窗口改用 DirectComposition 显示）。每个按钮 46 DIP 宽、与标题栏同高（默认 32，`title_bar_height` 可改），字形用 Segoe Fluent Icons（Windows 10 上 Segoe MDL2 Assets）；颜色跟 Windows 11 一致：悬停/按下时背板为字形色的 10%/20%，关闭按钮为红色（Windows 11 `#C42B1C`，10 上 `#E81123`），窗口失活或按钮禁用时字形变淡，深色由 `theme.setWindowDark` 设的深色框架或系统“应用使用深色”决定。子窗口对 `WM_NCHITTEST` 回答 `HTMINBUTTON`/`HTMAXBUTTON`/`HTCLOSE`，所以悬停最大化按钮出现 Windows 11 的贴靠布局；点击发送 `WM_SYSCOMMAND`。既不能最小化也不能最大化时只显示关闭按钮。全屏时按钮隐藏。
+- Linux：窗口内容放进 `GtkOverlay`，在其上按 `gtk-decoration-layout`（默认 `menu:close`）的左右两侧各放一个只含最小化/最大化/关闭的 `GtkHeaderBar`，背景清除，高度为 `title_bar_height` 或头栏的自然高度；`left`/`right` 是两侧按钮的宽度，`bottom` 等于 `height`。桌面改动布局时随之重排，全屏时隐藏。
+
 macOS 上拖动区（`.caption` 命中或按下处理中调用 `startMove`）优先交给窗口服务器（`performWindowDragWithEvent:`），它能把窗口带到别的 Space 并参与平铺；但指针在按下后已经移动时窗口服务器可能不开始拖动。因此按下之后的拖动事件先经过一个本地事件监视器：请求拖动时指针已移动 1 点以上，或者窗口服务器被请求后指针移动超过 3 点、窗口仍未动，就由框架自己移动窗口，让按下的点始终在指针下，窗口顶边不进入菜单栏；窗口服务器发出 `windowWillMove:` 或窗口位置偏离框架摆放处超过 2 点，就认为窗口服务器接手了。无论哪种，按下的拖动事件都属于窗口而不再交给内容。双击 `.caption` 按系统设置“连按窗口标题栏以”执行缩放、最小化或不操作。声明式视图的拖动把手（`AreaOptions.drag_window`）在按下时调用 `startMove`，双击调用 `Window.titleBarDoubleClick()`，同样按这项系统设置执行（`z.titleBarAction()` 读出它；其他平台总是最大化或还原）；把手设了 `window_double_click` 时双击交给应用，窗口不动，见[声明式视图](view.md#指针区域与指针形状)。
 
 GTK 没有材质。`transparent` 在屏幕提供 RGBA visual 时给窗口换上该 visual 并取消背景绘制，Cairo 渲染器每帧先清成透明再以 SOURCE 方式贴到窗口，留空处由合成器透出桌面；没有合成器时透明处显示为黑色。`capabilities().transparent` 为 true 时 `Paint.transparent` 也为 true，表示帧从透明开始。

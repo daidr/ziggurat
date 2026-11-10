@@ -53,6 +53,8 @@ extern fn zlm_window_cancel_composition(*anyopaque) void;
 extern fn zlm_window_text_mode(*anyopaque, c_int) void;
 extern fn zlm_window_cursor(*anyopaque, c_int) void;
 extern fn zlm_window_menu_activate(*anyopaque, [*]const [*:0]const u8, c_int) c_int;
+extern fn zlm_window_title_bar(*anyopaque, c_int, c_int, f64, f64) void;
+extern fn zlm_window_title_room(*anyopaque, *[4]f64) void;
 extern fn zlm_window_traits(*anyopaque, c_int, c_int, c_int, c_int, c_int) c_int;
 extern fn zlm_window_opacity(*anyopaque, f32) void;
 extern fn zlm_window_ignore_pointer(*anyopaque, c_int) void;
@@ -112,6 +114,10 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     var code: c_int = 0;
     const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
     record.native.native = zlm_window_create(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
+    if (options.title_bar != .default and !options.hide_window_buttons) {
+        const lights = options.traffic_light_position;
+        zlm_window_title_bar(record.native.native.?, if (options.title_bar == .hidden_inset) 2 else 1, @intFromBool(lights != null), if (lights) |p| p.x else 0, if (lights) |p| p.y else 0);
+    }
     if (options.transparent or options.corner_radius > 0) zlm_window_chrome(record.native.native.?, @intFromBool(options.transparent), options.corner_radius);
     if (options.vibrancy_tint) |tint| setVibrancyTint(record, tint, options.vibrancy_tint_dark);
     if (options.vibrancy != .none) setVibrancy(record, options.vibrancy);
@@ -246,6 +252,13 @@ pub fn setBackdrop(_: *core.WindowRecord, _: core.WindowBackdrop) !void {
 }
 extern fn zlmw_double_click_action() c_int;
 /// As System Settings sets a title bar's double click.
+/// The room the traffic lights take over the content of a window with a
+/// hidden title bar.
+pub fn titleBar(record: *core.WindowRecord) core.TitleBar {
+    var room: [4]f64 = undefined;
+    zlm_window_title_room(record.native.native.?, &room);
+    return .{ .height = @floatCast(room[0]), .left = @floatCast(room[1]), .right = @floatCast(room[2]), .bottom = @floatCast(room[3]) };
+}
 pub fn titleBarAction() core.TitleBarAction {
     return switch (zlmw_double_click_action()) {
         0 => .maximize,
