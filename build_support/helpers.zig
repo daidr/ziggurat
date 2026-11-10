@@ -604,6 +604,17 @@ pub fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
 /// b.addTest with build_support/macos_test_runner.zig on macOS targets.
 pub fn addTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
     var with = options;
+    // Named after the root file, so the build summary says which tests ran.
+    if (std.mem.eql(u8, with.name, "test")) if (with.root_module.root_source_file) |root| switch (root) {
+        .src_path => |source| {
+            var name = std.mem.trimEnd(u8, source.sub_path, ".zig");
+            if (std.mem.startsWith(u8, name, "src/")) name = name["src/".len..];
+            if (std.mem.endsWith(u8, name, "/root")) name = name[0 .. name.len - "/root".len];
+            with.name = b.fmt("test-{s}", .{name});
+            std.mem.replaceScalar(u8, @constCast(with.name), '/', '-');
+        },
+        else => {},
+    };
     if (with.test_runner == null) if (with.root_module.resolved_target) |target| if (target.result.os.tag == .macos) {
         with.test_runner = .{ .path = b.path("build_support/macos_test_runner.zig"), .mode = .server };
     };
