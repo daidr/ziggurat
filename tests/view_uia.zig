@@ -200,6 +200,10 @@ const Client = struct {
         var root: ?*c.IUIAutomationElement = null;
         try check(api.?.lpVtbl.*.ElementFromHandle.?(api.?, self.hwnd, &root));
         defer release(root.?);
+        // Assistive technology attaching turns semantics on for the frames
+        // after it: paint one before reading the tree, rather than count on
+        // a frame the window happens to draw meanwhile.
+        try self.synchronize();
         var condition: ?*c.IUIAutomationCondition = null;
         try check(api.?.lpVtbl.*.CreateTrueCondition.?(api.?, &condition));
         defer release(condition.?);
