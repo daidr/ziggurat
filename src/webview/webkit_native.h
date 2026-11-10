@@ -57,6 +57,13 @@ typedef void (*ZwkAuth)(void *,const char *,uint32_t,const char *,uint32_t,int,v
 /* A page's certificate error: URI, GTlsCertificateFlags and the DER
  * certificate. Nonzero allows the certificate for the URI's host. */
 typedef int (*ZwkCertificate)(void *,const char *,uint32_t,const uint8_t *,size_t);
+/* A certificate offered to a server that asks for a client certificate:
+ * its DER, and its subject, issuer and validity in unix seconds where the
+ * platform names them; a NULL issuer is read from the DER. */
+typedef struct ZwkClientCertificate { const uint8_t *der; size_t der_length; const char *subject,*issuer; int64_t valid_from,valid_to; } ZwkClientCertificate;
+/* A client certificate challenge: host, port, whether a proxy asks and the
+ * certificates offered. The index of the one to give, or -1 to refuse. */
+typedef int32_t (*ZwkClientCertificateOffer)(void *,const char *,uint32_t,int,const ZwkClientCertificate *,uint32_t);
 /* A page's context menu: what was clicked, the engine's top-level items
  * (WebKitContextMenuAction and its nick; flags 1 enabled, 2 checked) and
  * keep, one per item, which the app clears to leave one out.
@@ -104,6 +111,8 @@ typedef struct ZwkOptions {
     /* NULL cancels every sign-in and fails every certificate error. */
     ZwkAuth auth;
     ZwkCertificate certificate;
+    /* NULL refuses every client certificate challenge. */
+    ZwkClientCertificateOffer client_certificate;
     /* 0 no menu, 1 the engine's, 2 context_offer changes it. */
     uint32_t context_menu;
     ZwkContextMenu context_offer;

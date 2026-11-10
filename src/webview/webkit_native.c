@@ -68,6 +68,7 @@ struct ZwkState {
     gboolean autoplay;
     ZwkAuth auth;
     ZwkCertificate certificate;
+    ZwkClientCertificateOffer client_certificate;
     /* A page whose certificate the app allowed loads again once the failed
        load finished. */
     char *tls_retry;
@@ -370,10 +371,22 @@ int zwk_auth_answer(void *call_pointer,const char *user,const char *password) {
     call->answered=TRUE; return ZWK_OK;
 }
 /* Without the app's handler a sign-in is canceled, and its load with it.
-   The handler's no is a sign-in without credentials: the server's refusal. */
+   The handler's no is a sign-in without credentials: the server's refusal.
+   A client certificate challenge asks the app's handler when there is one;
+   WebKitGTK lists no certificates to offer, so it is canceled either way,
+   which ends the load as a cancellation (did-finish, not did-fail) and
+   never shows WebKitGTK's chooser. */
 static gboolean authentication(WebKitWebView *view,WebKitAuthenticationRequest *request,gpointer data) {
     (void)view; ZwkState *s=data; retain(s);
     const WebKitAuthenticationScheme scheme=webkit_authentication_request_get_scheme(request);
+    if (scheme==WEBKIT_AUTHENTICATION_SCHEME_CLIENT_CERTIFICATE_REQUESTED) {
+        if (live(s) && s->client_certificate) {
+            const char *host=webkit_authentication_request_get_host(request);
+            (void)s->client_certificate(s->owner,host?host:"",webkit_authentication_request_get_port(request),webkit_authentication_request_is_for_proxy(request)?1:0,NULL,0);
+        }
+        webkit_authentication_request_cancel(request);
+        release(s); return TRUE;
+    }
     const gboolean http=scheme==WEBKIT_AUTHENTICATION_SCHEME_DEFAULT || scheme==WEBKIT_AUTHENTICATION_SCHEME_HTTP_BASIC || scheme==WEBKIT_AUTHENTICATION_SCHEME_HTTP_DIGEST ||
         scheme==WEBKIT_AUTHENTICATION_SCHEME_NTLM || scheme==WEBKIT_AUTHENTICATION_SCHEME_NEGOTIATE;
     if (live(s) && s->auth && http) {
@@ -983,7 +996,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     strcpy(s->html,options->html);
     if (options->facts && !(s->facts=g_strdup(options->facts))) { zwk_close(s); return ZWK_OOM; }
     s->autoplay=options->autoplay!=0;
-    s->auth=options->auth; s->certificate=options->certificate;
+    s->auth=options->auth; s->certificate=options->certificate; s->client_certificate=options->client_certificate;
     s->context_policy=options->context_menu; s->context_offer=options->context_offer;
     s->owner=owner; s->notify=callback; s->page=page_callback; s->script=script_callback; s->deadline=deadline;
     s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags;

@@ -1,9 +1,10 @@
 """Loopback servers for the HTTP sign-in and certificate error smoke.
 
-An HTTP server asks for Basic credentials in two realms, and an HTTPS server
-presents the public, disposable fixture certificate that nothing trusts. The
-smoke runs with both origins and the certificate's path; its exit code is the
-host's, and the host checks what the servers saw.
+An HTTP server asks for Basic credentials in two realms, an HTTPS server
+presents the public, disposable fixture certificate that nothing trusts, and a
+second HTTPS server with that certificate requires a client certificate
+(mutual TLS). The smoke runs with the origins and the certificate's path; its
+exit code is the host's, and the host checks what the servers saw.
 """
 import argparse
 import base64
@@ -81,9 +82,15 @@ def main():
     fixtures = pathlib.Path(__file__).resolve().parent / "fixtures" / "profile-https"
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(fixtures / "server-cert.pem", fixtures / "server-key.pem")
-    plain, secure = Server(), Server(context)
+    mutual_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    mutual_context.load_cert_chain(fixtures / "server-cert.pem", fixtures / "server-key.pem")
+    # Only a certificate this fixture CA issued would pass; the smoke refuses
+    # to give any, so no request ever gets through.
+    mutual_context.load_verify_locations(fixtures / "other-cert.pem")
+    mutual_context.verify_mode = ssl.CERT_REQUIRED
+    plain, secure, mutual = Server(), Server(context), Server(mutual_context)
     try:
-        command = [arguments.exe, plain.origin, secure.origin, str(fixtures / "server-cert.pem")]
+        command = [arguments.exe, plain.origin, secure.origin, str(fixtures / "server-cert.pem"), mutual.origin]
         if arguments.extension:
             command.append(str(pathlib.Path(arguments.extension).resolve()))
         code = subprocess.run(command, timeout=120).returncode
@@ -91,10 +98,13 @@ def main():
         print("http auth smoke timed out", file=sys.stderr)
         return 1
     if code != 0:
-        with plain.lock, secure.lock:
-            print("http auth smoke failed; HTTP saw %r, HTTPS saw %r" % (plain.seen, secure.seen), file=sys.stderr)
+        with plain.lock, secure.lock, mutual.lock:
+            print("http auth smoke failed; HTTP saw %r, HTTPS saw %r, mutual TLS saw %r" % (plain.seen, secure.seen, mutual.seen), file=sys.stderr)
         return code
-    with plain.lock, secure.lock:
+    with plain.lock, secure.lock, mutual.lock:
+        if mutual.seen:
+            print("a request got through mutual TLS without a client certificate: %r" % mutual.seen, file=sys.stderr)
+            return 1
         if not any(path == "/private" and authorized for path, authorized in plain.seen):
             print("the server never saw the credentials: %r" % plain.seen, file=sys.stderr)
             return 1
