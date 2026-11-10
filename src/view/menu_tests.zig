@@ -654,3 +654,120 @@ test "the tip the focus brought to a menu button goes as the keys open its menu 
         try testing.expect(h.tooltip() == null);
     }
 }
+
+const Saver = struct {
+    saves: usize = 0,
+    saved_as: usize = 0,
+    dirty: bool = true,
+    enabled: bool = true,
+    fn build(self: *Saver, v: *View) anyerror!void {
+        try v.column(.{ .padding = .all(20), .gap = 8 });
+        _ = try v.button("Before", .{});
+        const save = try v.splitButton("Save", .{ .button_enabled = self.dirty }, .{ .enabled = self.enabled });
+        if (save.shown) {
+            if (try v.menuItem("Save As…", .{}, .{})) self.saved_as += 1;
+            _ = try v.menuItem("Save a Copy…", .{}, .{});
+        }
+        try v.end();
+        if (save.clicked) self.saves += 1;
+        _ = try v.button("After", .{});
+        try v.end();
+    }
+};
+
+test "a split button joins a button to an arrow opening a menu of related actions" {
+    var storage: Storage = .{};
+    var app: Saver = .{};
+    var h = Harness.init(&app, Saver.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    // The segments sit edge to edge, as high as a button.
+    const button = try h.boundsOf(.{ .text = "Save" });
+    const arrow = try h.boundsOf(.{ .name = "More options" });
+    try testing.expectApproxEqAbs(button.x + button.width, arrow.x, 0.01);
+    try testing.expectApproxEqAbs(button.height, arrow.height, 0.01);
+    try testing.expectApproxEqAbs((try h.boundsOf(.{ .text = "Before" })).height, button.height, 0.01);
+    // A click on the button does the action; one on the arrow opens the menu.
+    try h.click(.{ .text = "Save" });
+    try testing.expectEqual(@as(usize, 1), app.saves);
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Save As…" }));
+    try h.click(.{ .name = "More options" });
+    try testing.expect((try h.find(.{ .name = "More options" })).checked);
+    try h.click(.{ .text = "Save As…" });
+    try testing.expectEqual(@as(usize, 1), app.saved_as);
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Save As…" }));
+    try testing.expectEqual(@as(usize, 1), app.saves);
+
+    // One stop of Tab; Left and Right move between the segments.
+    try h.focus(.{ .text = "Before" });
+    try testing.expect(try h.key(.{ .key = .tab }));
+    try h.render();
+    try testing.expectEqualStrings("Save", h.focused().?.text);
+    try testing.expect(try h.key(.{ .key = .right }));
+    try h.render();
+    try testing.expectEqualStrings("More options", h.focused().?.style.name);
+    try testing.expect(try h.key(.{ .key = .left }));
+    try h.render();
+    try testing.expectEqualStrings("Save", h.focused().?.text);
+    // Enter clicks the button; Alt+Down opens the menu from it.
+    try testing.expect(try h.key(.{ .key = .enter }));
+    try h.render();
+    try testing.expectEqual(@as(usize, 2), app.saves);
+    try testing.expect(try h.key(.{ .key = .down, .modifiers = .{ .alt = true } }));
+    try h.render();
+    try testing.expectEqualStrings("Save As…", h.focused().?.text);
+    try testing.expect(try h.key(.{ .key = .escape }));
+    try h.render();
+    try testing.expectEqualStrings("More options", h.focused().?.style.name);
+    // Down on the arrow opens the menu too.
+    try testing.expect(try h.key(.{ .key = .down }));
+    try h.render();
+    try testing.expectEqualStrings("Save As…", h.focused().?.text);
+    try testing.expect(try h.key(.{ .key = .escape }));
+    try h.render();
+
+    // Without changes to save, the arrow still opens the menu.
+    app.dirty = false;
+    try h.render();
+    try testing.expectError(error.Disabled, h.click(.{ .text = "Save" }));
+    try h.click(.{ .name = "More options" });
+    try testing.expectEqual(@as(usize, 1), h.count(.{ .text = "Save As…" }));
+    try testing.expect(try h.key(.{ .key = .escape }));
+    try h.render();
+    // Disabled whole, neither segment takes a click.
+    app.enabled = false;
+    try h.render();
+    try testing.expectError(error.Disabled, h.click(.{ .name = "More options" }));
+}
+
+test "a split button's arrow is named in the view's language" {
+    try testing.expectEqualStrings("More options", view.menu.moreOptions(""));
+    try testing.expectEqualStrings("More options", view.menu.moreOptions("de-DE"));
+    try testing.expectEqualStrings("その他のオプション", view.menu.moreOptions("ja-JP"));
+    try testing.expectEqualStrings("更多选项", view.menu.moreOptions("zh-Hans-CN"));
+    try testing.expectEqualStrings("更多选项", view.menu.moreOptions("zh"));
+    try testing.expectEqualStrings("更多選項", view.menu.moreOptions("zh-Hant"));
+    try testing.expectEqualStrings("更多選項", view.menu.moreOptions("zh-TW"));
+}
+
+test "a split button runs right to left with its arrow at its start" {
+    var storage: Storage = .{};
+    var app: Saver = .{};
+    var h = Harness.init(&app, Saver.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.setDirection(.rtl);
+    const button = try h.boundsOf(.{ .text = "Save" });
+    const arrow = try h.boundsOf(.{ .name = "More options" });
+    try testing.expectApproxEqAbs(arrow.x + arrow.width, button.x, 0.01);
+    try h.focus(.{ .text = "Save" });
+    // Left goes to the arrow, at the left.
+    try testing.expect(try h.key(.{ .key = .left }));
+    try h.render();
+    try testing.expectEqualStrings("More options", h.focused().?.style.name);
+    try testing.expect(try h.key(.{ .key = .right }));
+    try h.render();
+    try testing.expectEqualStrings("Save", h.focused().?.text);
+}

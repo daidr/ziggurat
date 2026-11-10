@@ -66,6 +66,8 @@ const Files = struct {
     result: collections.Result = .{},
     submitted: ?usize = null,
     double: ?collections.CellRef = null,
+    clicked: ?collections.CellRef = null,
+    clicks: usize = 0,
     moved: ?collections.Move = null,
     changes: usize = 0,
     sorts: usize = 0,
@@ -73,6 +75,8 @@ const Files = struct {
     selecting: bool = false,
     missed: ?view.DragMiss = null,
     use_columns: []const collections.Column = &columns,
+    /// A menu anchored on the table.
+    menu: bool = false,
 
     fn init(self: *Files, mode: Selection.Mode) void {
         self.selection = Selection.init(mode, &self.storage);
@@ -98,12 +102,22 @@ const Files = struct {
         self.state.sort = &self.sort;
         self.state.sort_by = if (self.multi_sort) &self.sort_by else null;
         self.state.cells = if (self.options.cell_select) &self.cells else null;
+        if (self.menu) try v.column(.{ .grow = 1, .self_align = .stretch });
         const result = try collections.table(v, &self.state, self.use_columns, .{ .context = self, .count = self.count, .key = key, .label = label }, .{ .context = self, .call = cell }, self.options);
+        if (self.menu) {
+            if (try v.popoverMenu(.{ .name = "Row" })) _ = try v.menuItem("Open", .{}, .{});
+            try v.end();
+            try v.end();
+        }
         if (result.changed) self.changes += 1;
         if (result.sorted) self.sorts += 1;
         if (result.arranged) self.arranged += 1;
         if (result.submitted) |row| self.submitted = row;
         if (result.double_clicked) |at| self.double = at;
+        if (result.clicked) |at| {
+            self.clicked = at;
+            self.clicks += 1;
+        }
         if (result.moved) |move| self.moved = move;
         if (result.drag_missed) |miss| self.missed = miss;
         self.selecting = result.drag_selecting;
@@ -216,6 +230,82 @@ test "the wheel scrolls a table and a double click submits the row under it" {
     try testing.expectError(error.NotFound, f.h.wheel(b.x + 50, b.y + 100, .{ .x = 0, .y = -10 }));
 }
 
+test "a single click on a row reports the row and column it clicked" {
+    var app: Files = .{};
+    app.init(.multiple);
+    var f: Fixture = .{};
+    try f.start(&app);
+    const b = (try f.leaf()).bounds;
+    try f.click(50, Fixture.rowY(2), .{});
+    try testing.expectEqual(@as(usize, 1), app.clicks);
+    try testing.expectEqual(@as(usize, 2), app.clicked.?.row);
+    try testing.expectEqual(@as(usize, 0), app.clicked.?.column);
+    // The row already chosen reports its click too, with the column there.
+    try f.click(520, Fixture.rowY(2), .{});
+    try testing.expectEqual(@as(usize, 2), app.clicks);
+    try testing.expectEqual(@as(usize, 2), app.clicked.?.column);
+    // Shift- and Ctrl-clicks extend the choice and report no click.
+    try f.click(50, Fixture.rowY(4), .{ .shift = true });
+    try f.click(50, Fixture.rowY(6), .{ .control = true });
+    try testing.expectEqual(@as(usize, 2), app.clicks);
+    // Nor do the keys moving the choice.
+    try testing.expect(try f.h.key(press(.down)));
+    try testing.expectEqual(@as(usize, 2), app.clicks);
+    // A double click reports its first press here, its second as a double.
+    app.double = null;
+    try f.h.press(b.x + 50, b.y + Fixture.rowY(1), .{});
+    try f.h.release(b.x + 50, b.y + Fixture.rowY(1));
+    try f.h.press(b.x + 50, b.y + Fixture.rowY(1), .{});
+    try f.h.release(b.x + 50, b.y + Fixture.rowY(1));
+    try testing.expectEqual(@as(usize, 3), app.clicks);
+    try testing.expectEqual(@as(usize, 1), app.double.?.row);
+    try f.h.advance(std.time.ns_per_s);
+    // A release on another row is no click of either.
+    try f.h.press(b.x + 50, b.y + Fixture.rowY(3), .{});
+    try f.h.release(b.x + 50, b.y + Fixture.rowY(5));
+    try testing.expectEqual(@as(usize, 3), app.clicks);
+}
+
+test "the menu key opens a menu around a table below the chosen row" {
+    var app: Files = .{ .menu = true };
+    app.init(.single);
+    var f: Fixture = .{};
+    try f.start(&app);
+    const b = (try f.leaf()).bounds;
+    try f.click(50, Fixture.rowY(3), .{});
+    try testing.expect(try f.h.key(.{ .key = .context_menu }));
+    try f.h.render();
+    const panel = try f.h.boundsOf(.{ .kind = .menu });
+    try testing.expectApproxEqAbs(b.y + 28 + 4 * 28, panel.y, 0.01);
+    try testing.expectApproxEqAbs(b.x, panel.x, 0.01);
+    try testing.expect(try f.h.key(.{ .key = .escape }));
+    try f.h.render();
+    // With no row chosen, the menu opens below the table, as elsewhere.
+    app.selection.clear();
+    try f.h.render();
+    try testing.expect(try f.h.key(.{ .key = .context_menu }));
+    try f.h.render();
+    const below = try f.h.boundsOf(.{ .kind = .menu });
+    try testing.expect(@abs(below.y - panel.y) > 1);
+}
+
+test "the row a scroll brings under a resting pointer hovers in that frame" {
+    var app: Files = .{};
+    app.init(.single);
+    var f: Fixture = .{};
+    try f.start(&app);
+    const b = (try f.leaf()).bounds;
+    try f.h.hoverAt(b.x + 50, b.y + Fixture.rowY(2));
+    try testing.expectEqual(@as(?usize, 2), app.state.core.hover);
+    try f.h.wheel(b.x + 50, b.y + Fixture.rowY(2), .{ .x = 0, .y = 56 });
+    try testing.expectEqual(@as(?usize, 4), app.state.core.hover);
+    // Far past the rows laid out before, too.
+    try f.h.wheel(b.x + 50, b.y + Fixture.rowY(2), .{ .x = 0, .y = 2800 });
+    try testing.expectEqual(@as(?usize, 104), app.state.core.hover);
+    try f.h.leave();
+    try testing.expectEqual(@as(?usize, null), app.state.core.hover);
+}
+
 test "typing the first letters of a row chooses it" {
     var app: Files = .{};
     app.init(.single);
@@ -262,7 +352,18 @@ test "headers sort, resize, fit and move their columns" {
     // Name, which shared the room, keeps its width as Size grows.
     try testing.expectEqual(@as(f32, 372), layout[0].width);
     try testing.expectEqual(@as(f32, 140), layout[1].width);
-    try testing.expect(app.arranged > 0);
+    // Reported once, as the drag lets go, not at each move.
+    try testing.expectEqual(@as(usize, 1), app.arranged);
+    try f.h.advance(std.time.ns_per_s);
+    // An edge held and moved reports nothing until its release, and a
+    // drag ending where it began nothing at all.
+    try f.h.press(b.x + size_x + 140, b.y + 14, .{});
+    try f.h.moveTo(b.x + size_x + 170, b.y + 14);
+    try testing.expectEqual(@as(usize, 1), app.arranged);
+    try f.h.moveTo(b.x + size_x + 140, b.y + 14);
+    try f.h.release(b.x + size_x + 140, b.y + 14);
+    try testing.expectEqual(@as(usize, 1), app.arranged);
+    try testing.expectEqual(@as(f32, 140), app.state.layout(&saved)[1].width);
     try f.h.advance(std.time.ns_per_s);
 
     // A double click on the edge fits Size to its title and cells.
@@ -273,6 +374,7 @@ test "headers sort, resize, fit and move their columns" {
     try f.h.release(edge, b.y + 14);
     layout = app.state.layout(&saved);
     try testing.expect(layout[1].width < 140 and layout[1].width >= 40);
+    try testing.expectEqual(@as(usize, 2), app.arranged);
     try f.h.advance(std.time.ns_per_s);
 
     // Drag Kind's header over Name: it moves to the front.
@@ -281,6 +383,7 @@ test "headers sort, resize, fit and move their columns" {
     layout = app.state.layout(&saved);
     try testing.expectEqual(view.key("Kind"), layout[0].id);
     try testing.expectEqual(view.key("Name"), layout[1].id);
+    try testing.expectEqual(@as(usize, 3), app.arranged);
     // A move is not a sort.
     try testing.expectEqual(@as(usize, 2), app.sorts);
 

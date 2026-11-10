@@ -29,6 +29,7 @@ try v.text("zig build test", .{ .font = view.Font.code });
 | `navButton(direction, style) → bool` | 后退/前进/上/下箭头按钮 |
 | `toolbar(style)` … `end` | 一行工具控件，作为工具栏暴露给辅助技术 |
 | `popoverMenuButton(label, style) → bool` | 打开菜单的按钮，见 [菜单与浮层](#菜单与浮层) |
+| `splitButton(label, options, style) → SplitButton` | 按钮连着相关操作的菜单，见 [菜单与浮层](#菜单与浮层) |
 | `pointerArea(options, style)` … `end` | 自定义可点击区域：悬停、单击、双击、右击、拖动 |
 
 ```zig
