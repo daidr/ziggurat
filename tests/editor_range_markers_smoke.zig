@@ -501,6 +501,127 @@ fn foreground(allocator: std.mem.Allocator, engine: *t.Engine) !void {
     try host.paint();
     failing.fail_index = std.math.maxInt(usize);
 }
+/// Inlays: a hint, trailing text and a suggestion are shaped into the line
+/// and drawn muted, while carets, selections and hits stay on source bytes.
+fn inlays(allocator: std.mem.Allocator, engine: *t.Engine) !void {
+    const text = "let x = 1\nnext\n";
+    const wide: ui.Rect = .{ .x = 8, .y = 8, .width = 600, .height = 170 };
+    const document = try d.Document.create(allocator, std.Thread.getCurrentId(), text, .{});
+    defer document.close() catch unreachable;
+    const adapter = try editing.Adapter.create(allocator, document, engine, .{});
+    defer adapter.close() catch unreachable;
+    const muted: u32 = 0x8a8f98;
+    try std.testing.expect(std.meta.eql((editing.Colors{}).inlay, ui.Color.rgb(muted)));
+    var host: Host = .{ .adapter = adapter, .foreground = &.{muted} };
+    const app = try z.App.initWithOptions(allocator, .{ .diagnostics_sink = .{ .context = &host, .emit = Host.diagnostic } });
+    defer app.deinit();
+    host.window = try app.createWindow(.{ .width = 144, .height = 192 });
+    defer _ = host.window.destroy() catch unreachable;
+    host.scale = if (builtin.os.tag == .windows) @as(f32, @floatFromInt(c.GetDpiForWindow(host.window.nativeHandle()))) / 96 else @floatFromInt(gtk_widget_get_scale_factor(host.window.nativeHandle().?));
+    host.context = ui.Context.init(&host, Host.draw, Host.action);
+    try host.context.attach(host.window);
+    const parameters: editing.Parameters = .{ .font = .{ .size = 18, .wrap = .word_character }, .scale = host.scale };
+    var options = parameters.font;
+    options.width = wide.width;
+    // The text as shown: ": i32" after `x`, "  blame" at the line's end.
+    const shown = try engine.layout("let x: i32 = 1  blame\nnext\n", options);
+    defer shown.close() catch unreachable;
+    const plain = try engine.layout(text, options);
+    defer plain.close() catch unreachable;
+    const stamp = try document.committedTextVersion();
+    try std.testing.expectError(error.InvalidInlay, adapter.setInlays(stamp, &.{.{ .offset = 5, .text = "a\nb" }}));
+    try std.testing.expectError(error.InvalidOrder, adapter.setInlays(stamp, &.{ .{ .offset = 5, .text = "a" }, .{ .offset = 1, .text = "b" } }));
+    try std.testing.expectError(error.InvalidRange, adapter.setInlays(stamp, &.{.{ .offset = text.len + 1, .text = "a" }}));
+    const installed = try adapter.setInlays(stamp, &.{ .{ .offset = 5, .text = ": i32" }, .{ .offset = 9, .text = "  blame", .kind = .trailing } });
+    try std.testing.expect(installed.current);
+    _ = try adapter.prepare(wide, parameters);
+    const origin = (try adapter.positionRect(try document.version(), 0, .downstream)).?.x;
+    const near = struct {
+        fn f(a: f32, b: f32) bool {
+            return @abs(a - b) < 0.01;
+        }
+    }.f;
+    // A caret at a hint shows after it; one at trailing text, before it.
+    const after_hint = (try adapter.positionRect(try document.version(), 5, .downstream)).?.x - origin;
+    try std.testing.expect(near(after_hint, (try shown.caret(.{ .byte_offset = 10 })).x));
+    const before_trailing = (try adapter.positionRect(try document.version(), 9, .downstream)).?.x - origin;
+    try std.testing.expect(near(before_trailing, (try shown.caret(.{ .byte_offset = 14 })).x));
+    // A selection to the line's end does not cover the trailing text.
+    var rects: [16]t.Rect = undefined;
+    var right: f32 = 0;
+    for (try adapter.rangeRects(try document.version(), .{ .start = 0, .end = 9 }, &rects)) |rect| right = @max(right, rect.x + rect.width - origin);
+    try std.testing.expect(near(right, before_trailing));
+    // Hits inside inlay text land on the source byte it is at.
+    const middle_y = (try adapter.positionRect(try document.version(), 0, .downstream)).?.y + 4;
+    const hint_x = origin + (try shown.caret(.{ .byte_offset = 7 })).x;
+    try std.testing.expectEqual(@as(usize, 5), (try adapter.hitTest(wide, .{ .x = hint_x, .y = middle_y })).byte_offset);
+    const blame_x = origin + (try shown.caret(.{ .byte_offset = 18 })).x;
+    try std.testing.expectEqual(@as(usize, 9), (try adapter.hitTest(wide, .{ .x = blame_x, .y = middle_y })).byte_offset);
+    // Arrow keys step over a hint's text: it has no caret stops.
+    try adapter.bind(host.window);
+    defer adapter.unbind() catch unreachable;
+    _ = try adapter.setSelection(.{ .anchor = 4, .caret = 4 }, .downstream);
+    _ = try adapter.prepare(wide, parameters);
+    try std.testing.expect(try adapter.handleKey(host.window, .{ .key = .right }, wide, parameters));
+    try std.testing.expectEqual(@as(usize, 5), (try document.selection()).caret);
+    try std.testing.expect(try adapter.handleKey(host.window, .{ .key = .right }, wide, parameters));
+    try std.testing.expectEqual(@as(usize, 6), (try document.selection()).caret);
+    try std.testing.expect(try adapter.handleKey(host.window, .{ .key = .left }, wide, parameters));
+    try std.testing.expect(try adapter.handleKey(host.window, .{ .key = .left }, wide, parameters));
+    try std.testing.expectEqual(@as(usize, 4), (try document.selection()).caret);
+    // The inlay text is drawn in the inlay color.
+    _ = try adapter.prepare(bounds, parameters);
+    try host.paint();
+    // A suggestion at the caret: its first line with " …", taken by Tab.
+    _ = try adapter.setSelection(.{ .anchor = 9, .caret = 9 }, .downstream);
+    try adapter.setSuggestion(try document.version(), 9, ";\nfoo()");
+    try std.testing.expectEqualStrings(";\nfoo()", (try adapter.suggestion()).?);
+    _ = try adapter.prepare(wide, parameters);
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 9, .downstream)).?.x - origin, before_trailing));
+    try std.testing.expect(try adapter.handleKey(host.window, .{ .key = .tab }, wide, parameters));
+    var buffer: [64]u8 = undefined;
+    const length = try document.read(.{ .start = 0, .end = try document.byteLength() }, &buffer);
+    try std.testing.expectEqualStrings("let x = 1;\nfoo()\nnext\n", buffer[0..length]);
+    try std.testing.expect(try adapter.suggestion() == null);
+    try std.testing.expect(!try adapter.acceptSuggestion());
+    // Inlays move with edits: the trailing text at the old line end goes
+    // after the inserted text, the hint stays after `x`, and undo takes them
+    // back.
+    try std.testing.expect(!(try adapter.status()).inlays_required);
+    var text_now: [64]u8 = undefined;
+    const moved = try engine.layout("let x: i32 = 1;\nfoo()  blame\nnext\n", options);
+    defer moved.close() catch unreachable;
+    _ = try adapter.prepare(wide, parameters);
+    const line1 = (try document.line(1)).start;
+    const second = (try adapter.positionRect(try document.version(), line1, .downstream)).?.x;
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 5, .downstream)).?.x - origin, after_hint));
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), line1 + 5, .downstream)).?.x - second, (try moved.caret(.{ .byte_offset = line1 + 10 })).x - (try moved.caret(.{ .byte_offset = line1 + 5 })).x));
+    _ = try adapter.undo();
+    try std.testing.expectEqualStrings(text, text_now[0..try document.read(.{ .start = 0, .end = try document.byteLength() }, &text_now)]);
+    try std.testing.expect(!(try adapter.status()).inlays_required);
+    _ = try adapter.prepare(wide, parameters);
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 9, .downstream)).?.x - origin, before_trailing));
+    // Typing at a hint's byte goes before the hint.
+    _ = try adapter.replace(.{ .start = 5, .end = 5 }, "yz");
+    _ = try adapter.prepare(wide, parameters);
+    const typed = try engine.layout("let xyz: i32 = 1  blame\nnext\n", options);
+    defer typed.close() catch unreachable;
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 7, .downstream)).?.x - origin, (try typed.caret(.{ .byte_offset = 12 })).x));
+    _ = try adapter.undo();
+    // An edit the editor did not make leaves them stale: none are shown
+    // until they are set again.
+    try document.replace(.{ .start = 0, .end = 1 }, "l");
+    _ = try adapter.prepare(wide, parameters);
+    try std.testing.expect((try adapter.status()).inlays_required);
+    const now = (try adapter.positionRect(try document.version(), 0, .downstream)).?.x;
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 5, .downstream)).?.x - now, (try plain.caret(.{ .byte_offset = 5 })).x));
+    try std.testing.expectError(error.StaleRevision, adapter.setInlays(stamp, &.{}));
+    // A move of the caret drops a suggestion.
+    try adapter.setSuggestion(try document.version(), 1, "x");
+    _ = try adapter.setSelection(.{ .anchor = 2, .caret = 2 }, .downstream);
+    try std.testing.expect(try adapter.suggestion() == null);
+    try std.testing.expectError(error.StaleRevision, adapter.setSuggestion(0, 1, "x"));
+}
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -516,8 +637,9 @@ pub fn main() !void {
         try reentry(allocator, engine);
         try drawing(allocator, engine);
         try foreground(allocator, engine);
+        try inlays(allocator, engine);
     }
     try std.testing.expectEqual(before, t.resourceCounts());
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("range markers: UTF8/combining/bidi/wrap, shared prepared queries, fold/projection/IME/stale, OOM/budgets/reentry, foreground colors, unchanged Prepared and zero draw allocation resources=0\n", .{});
+    std.debug.print("range markers: UTF8/combining/bidi/wrap, shared prepared queries, fold/projection/IME/stale, OOM/budgets/reentry, foreground colors, inlays, unchanged Prepared and zero draw allocation resources=0\n", .{});
 }
