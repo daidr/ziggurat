@@ -421,7 +421,35 @@ fn devBackground() bool {
 pub fn titleBarAction() TitleBarAction {
     return if (@hasDecl(backend, "titleBarAction")) backend.titleBarAction() else .maximize;
 }
+/// The room the window controls take at the top of a window with a hidden
+/// title bar (`WindowOptions.title_bar`), in DIP: they sit in a band
+/// `height` tall along the top edge, `left` wide from the left edge and
+/// `right` wide from the right, and end `bottom` below the top edge: on
+/// macOS the bottom edge of the traffic lights, and `height` on Linux and
+/// Windows, where the controls fill the band. All zero in other windows,
+/// in full screen, where the controls hide, and with `hide_window_buttons`.
+pub const TitleBar = struct {
+    height: f32 = 0,
+    left: f32 = 0,
+    right: f32 = 0,
+    bottom: f32 = 0,
+};
+/// How the title bar of a `.custom` window looks (`WindowOptions.title_bar`).
+pub const TitleBarStyle = enum {
+    /// No title bar: the content draws all of it, the window controls too.
+    default,
+    /// The content fills the window and draws its title bar under the
+    /// system's window controls, which stay: the traffic lights on macOS,
+    /// and minimize, maximize and close at the top corner on Linux and
+    /// Windows. `TitleBar` says where they are.
+    hidden,
+    /// `hidden` with the traffic lights inset further from the edges, as
+    /// under a toolbar (macOS; `hidden` elsewhere).
+    hidden_inset,
+};
 pub const WindowState = struct {
+    /// Where the window controls of a hidden title bar are.
+    title_bar: TitleBar = .{},
     visible: bool,
     minimized: bool,
     maximized: bool,
@@ -695,6 +723,27 @@ pub const WindowOptions = struct {
     /// own rounded corners whatever the radius. Zero keeps the platform's
     /// corners.
     corner_radius: f32 = 0,
+    /// Keeps the system's window controls over a `.custom` window's
+    /// content, which draws the title bar under them: see `TitleBarStyle`
+    /// and `Window.titleBar`. The content keeps clear of them and marks its
+    /// title bar `.caption` in `hit_test`, as any `.custom` window does.
+    title_bar: TitleBarStyle = .default,
+    /// Where the traffic lights of a hidden title bar go (macOS): the
+    /// top-left corner of the close button this far, in DIP, from the
+    /// top-left corner of the window. The title bar then leaves as much
+    /// room below them as above.
+    traffic_light_position: ?Point = null,
+    /// The height in DIP of the title bar the content of a window with a
+    /// hidden title bar draws (Linux, Windows): the window controls fill it
+    /// on Windows and are centered in it on Linux. Zero is 32 on Windows, as
+    /// Windows 11's own title bars, and the height of the desktop's header
+    /// bars on Linux.
+    title_bar_height: u32 = 0,
+    /// Hides the window controls of a hidden title bar, which keeps the rest
+    /// of it: the shadow, the rounded corners and the resizing edges. The
+    /// content draws its own controls and calls `perform`; `titleBar` is
+    /// then all zero.
+    hide_window_buttons: bool = false,
     on_close: ?CloseHandler = null,
     on_closed: ?ClosedHandler = null,
 };
@@ -933,6 +982,9 @@ pub const App = struct {
         if (options.popup != null and (options.decoration != .borderless or options.modal)) return error.InvalidPopup;
         if (!std.math.isFinite(options.opacity) or options.opacity < 0 or options.opacity > 1) return error.InvalidOpacity;
         if (!std.math.isFinite(options.corner_radius) or options.corner_radius < 0) return error.InvalidGeometry;
+        if (options.title_bar != .default and (options.decoration != .custom or options.popup != null)) return error.InvalidWindowDecoration;
+        if (options.title_bar_height > 256) return error.InvalidGeometry;
+        if (options.traffic_light_position) |point| if (!std.math.isFinite(point.x) or !std.math.isFinite(point.y) or point.x < 0 or point.y < 0 or point.x > 256 or point.y > 256) return error.InvalidGeometry;
         const title = try self.allocator.dupe(u8, options.title);
         const record = self.allocator.create(WindowRecord) catch |err| {
             self.allocator.free(title);
@@ -1538,6 +1590,18 @@ pub const Window = struct {
         if (record.phase != .open) return error.Closed;
         return record.observedState();
     }
+    /// Where the window controls of a hidden title bar are
+    /// (`WindowOptions.title_bar`), all zero in other windows. It changes as
+    /// the window enters or leaves full screen, or the desktop's buttons
+    /// change: `Event.window_state` tells.
+    pub fn titleBar(self: Window) !TitleBar {
+        return (try self.state()).title_bar;
+    }
+    /// How the window's title bar looks (`WindowOptions.title_bar`).
+    pub fn titleBarStyle(self: Window) TitleBarStyle {
+        const record = self.resolve() orelse return .default;
+        return record.options.title_bar;
+    }
     pub fn relationship(self: Window) !WindowRelationship {
         const record = self.resolve() orelse return error.Closed;
         if (record.phase != .open) return error.Closed;
@@ -1988,6 +2052,20 @@ pub const Window = struct {
     }
     /// Keeps the window's pixels out of screenshots and screen recordings
     /// where the system honors the request.
+    /// Where the content draws the window's maximize button, in DIPs, in a
+    /// window with a hidden title bar without the system's buttons
+    /// (`WindowOptions.hide_window_buttons`); null for nowhere. On Windows
+    /// 11 resting the pointer over it shows the snap layouts, as over the
+    /// system's button; the pointer's moves and presses there still reach
+    /// the content, which hovers and clicks the button as any other. Other
+    /// platforms have no snap layouts and ignore it. The view sets it for
+    /// an area marked `maximize_button`.
+    pub fn setMaximizeButton(self: Window, rect: ?Rect) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        if (rect) |r| if (!std.math.isFinite(r.x) or !std.math.isFinite(r.y) or !std.math.isFinite(r.width) or !std.math.isFinite(r.height) or r.width < 0 or r.height < 0) return error.InvalidGeometry;
+        if (@hasDecl(backend, "setMaximizeButton")) backend.setMaximizeButton(scope.record, rect);
+    }
     pub fn setContentProtection(self: Window, enabled: bool) !void {
         const scope = try self.beginUpdate();
         defer endUpdate(scope);
@@ -2720,6 +2798,7 @@ pub const WindowRecord = struct {
     }
     fn observedState(self: *WindowRecord) WindowState {
         var current = backend.state(self);
+        current.title_bar = if (self.options.title_bar == .default or self.options.hide_window_buttons or current.fullscreen) .{} else if (@hasDecl(backend, "titleBar")) backend.titleBar(self) else .{};
         current.enabled_requested = self.enabled_requested;
         current.modal_blocked = self.modalBlocker() != null;
         return current;
@@ -3231,6 +3310,7 @@ test {
     _ = @import("diagnostics_test.zig");
     _ = @import("platform/decoration_test.zig");
     if (builtin.os.tag == .windows) _ = @import("platform/windows_frame.zig");
+    _ = @import("platform/windows_caption.zig");
     _ = @import("platform/work_area.zig");
     _ = @import("platform/input_region.zig");
     _ = @import("pointer_press_test.zig");

@@ -129,6 +129,16 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     record.native.native = zlg_window_create_transparent(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), @intFromBool(options.text_input_mode == .keyboard_compose), @intFromBool(options.accessibility_host == .children), @intFromBool(options.native_pointer_clicks), popup, @intFromBool(options.transparent), &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
     if (options.text_input_mode != .system) record.publishTextInputMode(options.text_input_mode);
     if (!options.focus_on_show) zlg_window_focus_on_map(record.native.native.?, 0);
+    // The system's title buttons over the content of a hidden title bar.
+    if (options.title_bar != .default and !options.hide_window_buttons) _ = zlg_window_title_bar(record.native.native.?, @intCast(options.title_bar_height));
+}
+extern fn zlg_window_title_bar(*anyopaque, c_int) c_int;
+extern fn zlg_window_title_room(*anyopaque, *[4]f64) void;
+/// The room the title buttons of a hidden title bar take.
+pub fn titleBar(record: *core.WindowRecord) core.TitleBar {
+    var room: [4]f64 = @splat(0);
+    zlg_window_title_room(record.native.native orelse return .{}, &room);
+    return .{ .height = @floatCast(room[0]), .left = @floatCast(room[1]), .right = @floatCast(room[2]), .bottom = @floatCast(room[3]) };
 }
 pub fn show(record: *core.WindowRecord) void {
     zlg_window_action(record.native.native.?, 0);

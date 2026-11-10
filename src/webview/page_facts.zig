@@ -101,12 +101,17 @@ fn within(value: u32, low: u32, high: u32) u32 {
     return if (high != 0) @min(raised, high) else raised;
 }
 
+/// The room of the window controls in DIPs, as `TitleBar` has it.
+pub const TitleBar = struct { height: f32 = 0, left: f32 = 0, right: f32 = 0, bottom: f32 = 0 };
+
 pub const Config = struct {
     theme: bool = false,
     fit: ?FitContent = null,
     zoom: f64 = 1,
+    /// The window has a hidden title bar: its controls take this room.
+    title_bar: ?TitleBar = null,
     pub fn any(self: Config) bool {
-        return self.theme or self.fit != null;
+        return self.theme or self.fit != null or self.title_bar != null;
     }
 };
 
@@ -115,10 +120,25 @@ pub const Config = struct {
 pub fn script(allocator: std.mem.Allocator, config: Config, post: []const u8) ![]u8 {
     const source = comptime std.mem.trimEnd(u8, @embedFile("page_facts.js"), "\n");
     const z = if (config.zoom > 0) config.zoom else 1;
+    var bar_buffer: [160]u8 = undefined;
+    const bar = if (config.title_bar) |room| try titleBarObject(&bar_buffer, room, z) else "";
     if (config.fit) |limits| {
-        return std.fmt.allocPrint(allocator, "({s})({s},{{theme:{},fit:{{minWidth:{d},minHeight:{d},maxWidth:{d},maxHeight:{d}}}}});", .{ source, post, config.theme, css(limits.min_width, z), css(limits.min_height, z), css(limits.max_width, z), css(limits.max_height, z) });
+        return std.fmt.allocPrint(allocator, "({s})({s},{{theme:{},fit:{{minWidth:{d},minHeight:{d},maxWidth:{d},maxHeight:{d}}}{s}{s}}});", .{ source, post, config.theme, css(limits.min_width, z), css(limits.min_height, z), css(limits.max_width, z), css(limits.max_height, z), if (bar.len > 0) ",titleBar:" else "", bar });
     }
-    return std.fmt.allocPrint(allocator, "({s})({s},{{theme:{},fit:null}});", .{ source, post, config.theme });
+    return std.fmt.allocPrint(allocator, "({s})({s},{{theme:{},fit:null{s}{s}}});", .{ source, post, config.theme, if (bar.len > 0) ",titleBar:" else "", bar });
+}
+/// The room as the page's object, in its CSS pixels.
+pub fn titleBarObject(buffer: []u8, room: TitleBar, zoom: f64) ![]const u8 {
+    const z = if (zoom > 0) zoom else 1;
+    return std.fmt.bufPrint(buffer, "{{height:{d},left:{d},right:{d},bottom:{d}}}", .{ cssOf(room.height, z), cssOf(room.left, z), cssOf(room.right, z), cssOf(room.bottom, z) });
+}
+/// What tells the page of a document already running the room that changed.
+pub fn titleBarUpdate(buffer: []u8, room: TitleBar, zoom: f64) ![]const u8 {
+    var object: [160]u8 = undefined;
+    return std.fmt.bufPrint(buffer, "window.__zigguratTitleBar&&window.__zigguratTitleBar({s});", .{try titleBarObject(&object, room, zoom)});
+}
+fn cssOf(value: f32, zoom: f64) f64 {
+    return @round(@as(f64, value) / zoom * 1000) / 1000;
 }
 fn css(value: u32, zoom: f64) f64 {
     return @as(f64, @floatFromInt(value)) / zoom;
@@ -181,4 +201,16 @@ test "limits validate and reach the script in CSS pixels" {
     const plain = try script(std.testing.allocator, .{ .theme = true }, "p");
     defer std.testing.allocator.free(plain);
     try std.testing.expect(std.mem.endsWith(u8, plain, "(p,{theme:true,fit:null});"));
+}
+
+test "the title bar's room reaches the page in CSS pixels" {
+    const room: TitleBar = .{ .height = 32, .right = 138, .bottom = 32 };
+    const text = try script(std.testing.allocator, .{ .title_bar = room, .zoom = 2 }, "p");
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.endsWith(u8, text, "(p,{theme:false,fit:null,titleBar:{height:16,left:0,right:69,bottom:16}});"));
+    const fitted = try script(std.testing.allocator, .{ .fit = .{}, .title_bar = .{ .height = 28, .left = 70, .bottom = 21 } }, "p");
+    defer std.testing.allocator.free(fitted);
+    try std.testing.expect(std.mem.endsWith(u8, fitted, "maxHeight:0},titleBar:{height:28,left:70,right:0,bottom:21}});"));
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("window.__zigguratTitleBar&&window.__zigguratTitleBar({height:21.333,left:0,right:0,bottom:0});", try titleBarUpdate(&buffer, .{ .height = 32 }, 1.5));
 }

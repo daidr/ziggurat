@@ -1417,6 +1417,10 @@ pub const View = struct {
     /// The page's facts, kept from its script's messages.
     theme_color_value: ?Rgba = null,
     theme_told: u64 = 0,
+    /// The room of the window controls the document-start script tells and
+    /// the one the page last heard (`tellTitleBar`).
+    title_bar_baked: page_facts.TitleBar = .{},
+    title_bar_told: page_facts.TitleBar = .{},
     content_size_value: ?ContentSize = null,
     fitted: ?page_facts.Size = null,
     agent_override: ?[]u8 = null,
@@ -3890,11 +3894,43 @@ pub const View = struct {
         if (self.attachmentClosed()) return error.Closed;
         if (hr < 0) return error.WebViewPropertyFailed;
     }
+    /// The room of the window controls of the window the View fills, when it
+    /// has a hidden title bar (`WindowOptions.title_bar`); a page in a
+    /// session or region has none.
+    fn titleBarRoom(self: *const View) ?page_facts.TitleBar {
+        if (self.session != null or self.region != null) return null;
+        const window = self.window orelse return null;
+        if (window.titleBarStyle() == .default) return null;
+        const room = window.titleBar() catch z.TitleBar{};
+        return .{ .height = room.height, .left = room.left, .right = room.right, .bottom = room.bottom };
+    }
+    /// Tells the page the room of the window controls, in its CSS variables
+    /// (--ziggurat-titlebar-*), when it changed since the page heard it.
+    /// The document-start script tells new documents the room it had when
+    /// the View attached; a document that loads after it changed hears the
+    /// change as it completes.
+    fn tellTitleBar(self: *View, document_completed: bool) void {
+        const room = self.titleBarRoom() orelse return;
+        if (!document_completed and std.meta.eql(room, self.title_bar_told)) return;
+        if (document_completed and std.meta.eql(room, self.title_bar_baked)) {
+            self.title_bar_told = room;
+            return;
+        }
+        var buffer: [256]u8 = undefined;
+        const script = page_facts.titleBarUpdate(&buffer, room, self.zoom_override orelse self.config.?.options.zoom) catch return;
+        _ = self.evaluateJS(script, .{}, .{ .context = self, .complete = ignoreCompletion }) catch return;
+        self.title_bar_told = room;
+    }
+    fn ignoreCompletion(_: *anyopaque, _: evaluations.Result) void {}
     /// The page-facts script for a backend, owned by the caller (UTF-16 on
     /// Windows), or null when Options asks for no fact.
     fn factsScript(self: *View, comptime backend_kind: enum { windows, linux }) !?(if (backend_kind == .windows) [:0]u16 else [:0]u8) {
         const options = self.config.?.options;
-        const config: page_facts.Config = .{ .theme = options.theme_color, .fit = options.fit_content, .zoom = self.zoom_override orelse options.zoom };
+        const config: page_facts.Config = .{ .theme = options.theme_color, .fit = options.fit_content, .zoom = self.zoom_override orelse options.zoom, .title_bar = self.titleBarRoom() };
+        if (config.title_bar) |room| {
+            self.title_bar_baked = room;
+            self.title_bar_told = room;
+        }
         if (backend_kind == .linux) {
             // WebKitGTK's hit test tells no selection: the page's
             // contextmenu event, just before the menu, does.
@@ -4308,6 +4344,11 @@ pub const View = struct {
         }
         if ((native.kind == 0 and native.flags & 1 == 0) or ((native.kind == 1 or native.kind == 3) and native.flags & 1 == 0)) self.finishRequests(.page_changed, .page_changed, .page_changed, .page, null, true);
         if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
+        // A document that loaded after the window controls moved hears where.
+        if (native.kind == 1 and native.flags & 1 != 0 and self.page_active) {
+            self.tellTitleBar(true);
+            if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
+        }
         if (native.kind == 10) return self.pageFactNotify(window, id, native.value);
         if (native.kind == 12) {
             const listener = self.config.?.options.page_listener orelse return 1;
@@ -4590,6 +4631,7 @@ pub const View = struct {
     }
     fn event(ptr: *anyopaque, _: z.Window, ev: z.Event) void {
         const self: *View = @ptrCast(@alignCast(ptr));
+        if (ev == .window_state and self.native != null and self.config != null) self.tellTitleBar(false);
         if (is_webkit) return;
         switch (ev) {
             .resize => if (self.native) |native| {

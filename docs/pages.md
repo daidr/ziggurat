@@ -368,6 +368,14 @@ Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须�
 .theme_color_changed => |change| toolbar.setBackground(change.color orelse default_color),
 ```
 
+### 隐藏标题栏的 CSS 变量
+
+View 直接附着在 `title_bar` 为 `.hidden`/`.hidden_inset` 的窗口上时（区域和 PageSession 不算），页面的根元素带四个 CSS 变量，告诉页面窗口按钮占的位置，单位为 CSS 像素（`Window.titleBar()` 的 DIP 除以缩放）：`--ziggurat-titlebar-height`、`--ziggurat-titlebar-inset-left`、`--ziggurat-titlebar-inset-right`、`--ziggurat-titlebar-controls-bottom`。它们由文档开始时运行的脚本以附加样式表设置，页面在首次绘制前就能按它们排版；进出全屏等变化时 View 更新当前文档，变化后才加载的文档在加载完成时得到新值。
+
+```css
+header { height: var(--ziggurat-titlebar-height, 0); padding-left: var(--ziggurat-titlebar-inset-left, 0); padding-right: var(--ziggurat-titlebar-inset-right, 0); }
+```
+
 `Options.fit_content = .{ .max_width = 400, .max_height = 600 }` 让窗口跟随页面内容的尺寸，像浏览器扩展的弹出页面：页面根元素按内容宽度（`width: max-content`）在限制内布局，文字在最大宽度处换行，高度超过最大高度时页面滚动，此时滚动条的宽度计入窗口宽度。限制以 DIP 给出，0 表示不限，按文档开始时的缩放换算成页面的 CSS 像素；缩放改变后的新限制在下一次 reload 生效。规则没有特异性，页面自己给 `html` 的尺寸（如 `height: 100%`）优先，所以要让 `html` 和 `body` 取内容的尺寸。`PageEvent.content_size_changed` 以 CSS 像素报告根元素尺寸和可见滚动条的空间，`View.contentSize()` 返回最近一次的值。附着在窗口上且 `resize_window = true`（默认）时，View 用 `page_facts.fit` 把尺寸换算成 DIP 并调用 `Window.resize`：只改变真正变化的那一维，用户调整过的另一维保持不变，最大化和全屏时不改变。区域、PageSession 和 `resize_window = false` 只报告尺寸，由应用调用 `web.page_facts.fit` 再交给 `Flyout.setSize` 或自己的布局。
 
 两项都由 View 在每个顶层文档开始时运行的同一段脚本完成（`src/webview/page_facts.js`），与页面来源和信任无关：Linux 运行在私有 script world 中，经私有消息通道只到达 View；Windows 用 `AddScriptToExecuteOnDocumentCreated` 在页面脚本之前取得 `chrome.webview.postMessage`，消息带 `\x01ziggurat-facts:` 前缀，在来源与 IPC 授权检查之前交给 View，不会成为 `Event.message`。页面也能发出同样前缀的消息，但只能谎报自己的主题色和内容尺寸，窗口尺寸仍受应用给的限制。两项都关闭时不注入脚本。

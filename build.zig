@@ -617,6 +617,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_system", .module = system },
             .{ .name = "os_integration_probe", .module = integration_probe },
         });
+        addSmoke(b, "smoke-title-bar", "tests/title_bar_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         if (target.result.os.tag == .linux) addSmoke(b, "smoke-program-name", "tests/program_name_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
@@ -628,7 +629,11 @@ pub fn build(b: *std.Build) void {
         core.linkSystemLibrary("imm32", .{});
         core.linkSystemLibrary("dwmapi", .{});
         core.linkSystemLibrary("gdi32", .{});
+        core.linkSystemLibrary("advapi32", .{});
         core.link_libc = true;
+        // Software frames and the window controls of hidden title bars over
+        // windows without a redirection bitmap.
+        _ = native_support.add(b, core, "core-composed-native", "src/platform/windows_composed.c", &.{"-std=c11"}, target, optimize);
     }
     if (target.result.os.tag == .macos) {
         _ = native_support.add(b, core, "core-native", "src/platform/macos.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
@@ -1200,7 +1205,6 @@ pub fn build(b: *std.Build) void {
         ui.linkSystemLibrary("oleaut32", .{});
     }
     if (target.result.os.tag == .windows) {
-        _ = native_support.add(b, ui, "ui-composed-native", "src/ui/windows_composed.c", &.{"-std=c11"}, target, optimize);
         ui.linkSystemLibrary("gdi32", .{});
         ui.link_libc = true;
     }
