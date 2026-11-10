@@ -302,3 +302,39 @@ test "Tab reaches a control scrolled out of sight and scrolls it into view" {
     _ = try h.key(.{ .key = .tab, .modifiers = .{ .shift = true } });
     try testing.expectEqualStrings("Before", h.focused().?.text);
 }
+
+/// A scroll view whose controls out of sight include one disabled and one
+/// out of Tab's order.
+const Skips = struct {
+    model: view.ScrollModel = .{},
+    fn build(self: *Skips, v: *View) anyerror!void {
+        try v.scroll(&self.model, .{ .height = 200, .self_align = .stretch });
+        try v.column(.{});
+        _ = try v.button("Top", .{ .height = 30 });
+        try v.spacer(.{ .height = 400 });
+        _ = try v.button("Off", .{ .height = 30, .enabled = false });
+        _ = try v.button("Skip", .{ .height = 30, .tab_stop = false });
+        try v.spacer(.{ .height = 400 });
+        _ = try v.button("Bottom", .{ .height = 30 });
+        try v.end();
+        try v.end();
+    }
+};
+
+test "Tab out of sight passes over what takes no Tab stop" {
+    var storage: Storage = .{};
+    var app: Skips = .{};
+    var h = Harness.init(&app, Skips.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 400, .height = 400 } });
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.render();
+    try h.focus(.{ .text = "Top" });
+    _ = try h.key(.{ .key = .tab });
+    try testing.expectEqualStrings("Bottom", h.focused().?.text);
+    try testing.expect(try shows(&h, "Bottom"));
+    try testing.expect(!try shows(&h, "Skip"));
+    _ = try h.key(.{ .key = .tab, .modifiers = .{ .shift = true } });
+    try testing.expectEqualStrings("Top", h.focused().?.text);
+    try testing.expect(try shows(&h, "Top"));
+}
