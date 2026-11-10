@@ -417,6 +417,9 @@ pub const Editor = struct {
     /// DIPs below its top; `hovered` that the pointer is over the editor,
     /// which shows the bar.
     thumb: bool = false,
+    /// The theme's scroll bar style as of the last paint, which input
+    /// lays the bar out with.
+    bar_style: ui.scroll.Style = .{},
     thumb_grab: f32 = 0,
     hovered: bool = false,
     cursor: Cursor = .text,
@@ -1231,6 +1234,7 @@ pub const Editor = struct {
         }
         // The scroll bar, as a scroll container's, while the pointer is
         // over the editor or drags the thumb.
+        self.bar_style = frame.scrollbarStyle();
         if (self.hovered or self.thumb) {
             var bar = self.scrollbar();
             bar.box = bounds;
@@ -1422,7 +1426,7 @@ pub const Editor = struct {
 
     /// The scroll bar along the editor's right edge, in window coordinates.
     fn scrollbar(self: *const Editor) ui.scroll.Bar {
-        return .{ .box = self.bounds, .view = self.view_height, .content = @floatCast(self.heights.top(self.paras.items.len)), .offset = @floatCast(self.scroll) };
+        return .{ .box = self.bounds, .view = self.view_height, .content = @floatCast(self.heights.top(self.paras.items.len)), .offset = @floatCast(self.scroll), .style = self.bar_style };
     }
 
     fn overScrollbar(self: *const Editor, point: z.Point) bool {

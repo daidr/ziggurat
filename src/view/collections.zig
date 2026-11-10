@@ -407,6 +407,10 @@ const Core = struct {
     /// Where the pointer rests over the leaf, local to it, for the row a
     /// scroll brings under it to hover in the frame that shows the scroll.
     hover_at: ?Point = null,
+    /// The style of the theme's scroll bars as of the last paint, which
+    /// input lays the bars out with.
+    bar_style: ui.scroll.Style = .{},
+    bar_hovered: bool = false,
     press: Press = .none,
     pointer: Point = .{},
     pointer_inside: bool = false,
@@ -961,6 +965,13 @@ const Core = struct {
         return @max(1, (self.bounds.width - self.gap * (columns + 1)) / columns);
     }
 
+    /// Notes whether the pointer at `local` is over the vertical scroll
+    /// bar, which shows hovered; true when that changed.
+    fn hoverBar(self: *Core, local: ?Point) bool {
+        const over = if (local) |at| bodyBar(self, .{ .x = 0, .y = 0, .width = self.bounds.width, .height = self.bounds.height }, self.scroll_y).hit(at) else false;
+        defer self.bar_hovered = over;
+        return over != self.bar_hovered;
+    }
     /// The row under a pointer resting at `local`, header and gaps aside.
     fn hoverIndex(self: *const Core, local: Point) ?usize {
         if (self.shape != .grid and local.y < self.bodyTop()) return null;
@@ -1076,16 +1087,22 @@ fn triangle(frame: *ui.Frame, bounds: Rect, direction: enum { right, down, up, l
 
 /// The vertical scroll bar of a collection's body, as a scroll container's.
 fn bodyBar(core: *const Core, origin: Rect, offset: f64) ui.scroll.Bar {
-    return .{ .box = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = origin.width, .height = core.bodyHeight() }, .view = core.bodyHeight(), .content = @floatCast(core.contentHeight()), .offset = @floatCast(offset) };
+    return .{ .box = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = origin.width, .height = core.bodyHeight() }, .view = core.bodyHeight(), .content = @floatCast(core.contentHeight()), .offset = @floatCast(offset), .style = core.bar_style };
 }
 
-fn paintScrollIndicators(frame: *ui.Frame, core: *const Core, origin: Rect, content_width: f32, view_width: f32, palette: ui.theme.Palette) void {
+/// The bars in the theme's style (`Theme.scrollbar`), which input then
+/// lays them out with; the bar under the pointer shows hovered.
+fn paintScrollIndicators(frame: *ui.Frame, core: *Core, origin: Rect, content_width: f32, view_width: f32, palette: ui.theme.Palette) void {
+    core.bar_style = frame.scrollbarStyle();
     const color = ui.Color.rgb(palette.track);
     const dragging = core.press == .thumb;
-    bodyBar(core, origin, core.scroll_y).paint(frame, color, dragging);
+    const down = bodyBar(core, origin, core.scroll_y);
+    const over = if (core.hover_at) |at| down.hit(.{ .x = origin.x + at.x, .y = origin.y + at.y }) else false;
+    down.paintStyled(frame, color, .{ .dragging = dragging, .hovered = over });
     const body: Rect = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = view_width, .height = core.bodyHeight() };
-    const across: ui.scroll.Bar = .{ .box = body, .axis = .horizontal, .view = view_width, .content = content_width, .offset = core.scroll_x };
-    across.paint(frame, color, false);
+    const across: ui.scroll.Bar = .{ .box = body, .axis = .horizontal, .view = view_width, .content = content_width, .offset = core.scroll_x, .style = core.bar_style };
+    const over_across = if (core.hover_at) |at| across.hit(.{ .x = origin.x + at.x, .y = origin.y + at.y }) else false;
+    across.paintStyled(frame, color, .{ .hovered = over_across });
 }
 
 // ------------------------------------------------------------------ table
@@ -1857,14 +1874,16 @@ pub const TableState = struct {
         switch (event) {
             .pointer_move => |point| {
                 core.hover_at = point;
+                const bar = core.hoverBar(point);
                 const hit = core.hoverIndex(point);
-                if (std.meta.eql(hit, core.hover)) return false;
+                if (std.meta.eql(hit, core.hover)) return bar;
                 core.hover = hit;
                 return true;
             },
             .pointer_leave => {
                 core.hover_at = null;
-                if (core.hover == null) return false;
+                const bar = core.hoverBar(null);
+                if (core.hover == null) return bar;
                 core.hover = null;
                 return true;
             },
@@ -2615,14 +2634,16 @@ pub const GridState = struct {
         switch (event) {
             .pointer_move => |point| {
                 core.hover_at = point;
+                const bar = core.hoverBar(point);
                 const hit = core.hoverIndex(point);
-                if (std.meta.eql(hit, core.hover)) return false;
+                if (std.meta.eql(hit, core.hover)) return bar;
                 core.hover = hit;
                 return true;
             },
             .pointer_leave => {
                 core.hover_at = null;
-                if (core.hover == null) return false;
+                const bar = core.hoverBar(null);
+                if (core.hover == null) return bar;
                 core.hover = null;
                 return true;
             },

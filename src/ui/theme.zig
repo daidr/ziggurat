@@ -58,6 +58,10 @@ pub const Theme = struct {
     /// thirds of it after another tip goes, as the pointer moves along a
     /// toolbar, the next one shows at once: 0.4 seconds by default.
     tooltip_delay: i64 = 0,
+    /// How every scroll bar of the theme looks, as a code editor's square
+    /// thumb over a track; a view's own style takes its place. The zero
+    /// style is the usual rounded thumb in the palette's `track`.
+    scrollbar: @import("scroll.zig").Style = .{},
     pub fn light() Theme {
         return .{};
     }

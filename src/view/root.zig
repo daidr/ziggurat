@@ -469,6 +469,9 @@ pub const Style = struct {
     /// overflows; false hides it, keeping the wheel, keys and assistive
     /// technology scrolling, for a surface that draws its own.
     scrollbars: bool = true,
+    /// A scroll container's own scroll bar style, in place of the theme's
+    /// (`Theme.scrollbar`): widths, corners, track and thumb colors.
+    scrollbar_style: ?ui.scroll.Style = null,
     /// Text a search, token field or editable combo box gives the text
     /// input inside it to show while it is empty; see
     /// `text_field.Options.placeholder`.
@@ -7353,7 +7356,7 @@ pub const View = struct {
         while (at < stop) {
             while (scope_depth > 0 and all[scopes[scope_depth - 1].index].end <= at) {
                 scope_depth -= 1;
-                try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme);
+                try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme, self.pointer);
             }
             const node = &all[at];
             const theme = if (node.theme) |inner| inner.* else window_theme;
@@ -7723,7 +7726,7 @@ pub const View = struct {
         }
         while (scope_depth > 0) {
             scope_depth -= 1;
-            try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme);
+            try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme, self.pointer);
         }
     }
     /// Paint the children of the node at `index` sorted by
@@ -7851,7 +7854,7 @@ pub const View = struct {
         } else 0;
         try target.semantic(.{ .id = node.id, .parent = node.semantic_parent, .role = role.semantic(), .name = if (node.kind == .text) node.text else node.style.name, .bounds = node.bounds, .busy = node.style.busy, .vertical = role == .separator and node.axis == .column, .level = level });
     }
-    fn closeScope(node: *const Node, scope: Scope, target: anytype, window_theme: Theme) !void {
+    fn closeScope(node: *const Node, scope: Scope, target: anytype, window_theme: Theme, pointer: ?Point) !void {
         switch (scope.kind) {
             .effect => return target.endEffect(),
             .opacity => return target.popOpacity(),
@@ -7864,7 +7867,7 @@ pub const View = struct {
             .clip => {
                 paintEdges(node, target);
                 try target.popClip();
-                paintScrollIndicator(node, target, if (node.theme) |inner| inner.* else window_theme);
+                paintScrollIndicator(node, target, if (node.theme) |inner| inner.* else window_theme, pointer);
             },
         }
     }
@@ -8286,14 +8289,16 @@ pub const View = struct {
             target.backdropEffect(.{ .x = b.x, .y = b.y + b.height - height, .width = b.width, .height = height }, 0, .{ .scroll_edge = bottom });
         }
     }
-    fn paintScrollIndicator(node: *const Node, target: anytype, theme: Theme) void {
+    fn paintScrollIndicator(node: *const Node, target: anytype, theme: Theme, pointer: ?Point) void {
         const model = node.scroll orelse return;
         if (!node.style.scrollbars) return;
         const b = node.bounds;
         if (b.width < 8 or b.height < 8) return;
-        // Right to left, the indicator runs along the left edge.
-        const bar: ui.scroll.Bar = .{ .box = b, .leading = node.rtl, .view = model.viewport.height, .content = model.content.height, .offset = model.offset.y };
-        bar.paint(target, ui.Color.rgb(theme.palette.track), false);
+        // Right to left, the indicator runs along the left edge; it takes
+        // the container's own style, or the theme's.
+        const bar: ui.scroll.Bar = .{ .box = b, .leading = node.rtl, .view = model.viewport.height, .content = model.content.height, .offset = model.offset.y, .style = node.style.scrollbar_style orelse theme.scrollbar };
+        const hovered = if (pointer) |at| bar.hit(at) else false;
+        bar.paintStyled(target, ui.Color.rgb(theme.palette.track), .{ .hovered = hovered });
     }
 };
 

@@ -103,6 +103,12 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 
 自己滚动、不经滚动容器的视图（终端、富文本编辑器、虚拟表格与大纲）用 `ui.scroll.Bar` 画滚动条，外观与滚动容器一致，跟随主题：`box` 是滑块所沿的视图（右边缘，`leading` 时左边缘，横向时底边），`view`、`content`、`offset` 是可见长度、总长度与偏移，单位任意（终端用行数）。`Frame.scrollbar(bar, .{ .dragging, .color })` 画滑块：默认主题的 `track` 色，`color` 给自有配色的视图（如终端）替换；拖动时向内容一侧加宽 2 DIP；无处可滚时什么也不画。`thumb` 给出滑块矩形，`offsetAt(start)` 把拖动中滑块起点换算成偏移，`hit(point)` 判断指针是否在边缘 12 DIP 的条带上。终端与富文本编辑器只在指针位于其上或拖动滑块时显示滚动条；虚拟集合与滚动容器一样常显。
 
+`ui.scroll.Style` 是滚动条的样式：`track_width`（整条宽度，含轨道）、`thumb_width`（滑块宽度，在轨道里居中）、`radius`（滑块圆角，null 时两端全圆）、`square`（直角）、`min_length`（滑块最短长度）、`flush`（轨道与滑块延伸到两端，不留边距），以及颜色 `track`（设置时沿整条画轨道）、`thumb`、`thumb_hovered`（指针在滚动条上）与 `thumb_dragged`（拖动中），颜色为 0xAARRGGBB，alpha 为 0 视为不透明。`Theme.scrollbar` 给主题的全部滚动条一种样式，滚动容器的 `Style.scrollbar_style` 代替它；`Frame.scrollbar` 对样式为零值的 `Bar` 使用主题的，`Frame.scrollbarStyle()` 给出主题的样式，供自己滚动的视图在输入时按同样的几何判断（虚拟集合、终端与富文本编辑器都这样接入）。`Bar.paintStyled(target, rest, .{ .dragging, .hovered })` 画轨道与该状态的滑块，`trough()` 是整条的矩形，供在条上画标记的视图使用。零值样式与以往完全相同：4 DIP 宽的圆角滑块，离边缘与两端 2 DIP，主题的 `track` 色，没有轨道。像代码编辑器那样的滚动条：
+
+```zig
+theme.scrollbar = .{ .track_width = 14, .thumb_width = 10, .square = true, .flush = true, .thumb = 0x66_79797a, .thumb_hovered = 0xb3_646464, .thumb_dragged = 0x66_bfbfbf };
+```
+
 Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions` 个，按绘制顺序），滚轮事件落在其中时交给最内层的那个，作为一个携带 `Event.scroll` 的构建遍立即作用于模型并消费该事件；不在任何滚动容器内的滚轮照常交给 Context。目前没有滚动条拖动、焦点自动显露和横向滚动。
 
 滚动容器也可以用键盘滚动：控件与应用都没有处理的按键里，Up/Down 滚一行（40 DIP），PageUp/PageDown 与 Space/Shift+Space 滚一页（视口高度减一行，至少半个视口），Home/End（macOS 上还有 Cmd+Up/Down）滚到顶或底。按键交给焦点所在、在这个方向上还能滚的最内层滚动容器；焦点不在滚动容器里时交给指针下的。焦点接收文本时（`focusTakesText`）Space 不翻页，照常输入空格。

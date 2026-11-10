@@ -4607,10 +4607,20 @@ pub const Frame = struct {
     /// or `state.color` for a view whose colors are not the theme's, as a
     /// terminal's; wider while `state.dragging`. Nothing shows when the bar
     /// has nowhere to scroll.
+    /// A bar whose style is the zero one takes the theme's
+    /// (`Theme.scrollbar`): its widths, corners, track and thumb colors at
+    /// rest, hovered (`state.hovered`) and dragged. Lay the bar out for
+    /// input with the same style: `scrollbarStyle` gives it.
     pub fn scrollbar(self: *Frame, bar: scroll.Bar, state: ScrollbarState) void {
-        bar.paint(self, state.color orelse Color.rgb(self.currentTheme().palette.track), state.dragging);
+        var styled = bar;
+        if (styled.style.isDefault()) styled.style = self.currentTheme().scrollbar;
+        styled.paintStyled(self, state.color orelse Color.rgb(self.currentTheme().palette.track), .{ .dragging = state.dragging, .hovered = state.hovered });
     }
-    pub const ScrollbarState = struct { dragging: bool = false, color: ?Color = null };
+    /// The style of the current theme's scroll bars.
+    pub fn scrollbarStyle(self: *const Frame) scroll.Style {
+        return self.currentTheme().scrollbar;
+    }
+    pub const ScrollbarState = struct { dragging: bool = false, hovered: bool = false, color: ?Color = null };
     pub fn roundedRect(self: *Frame, bounds: Rect, radius: f32, color: Color) void {
         self.context.command_buffer.roundedRect(self.absolute(bounds), radius, color) catch |err| {
             self.failure = self.failure orelse err;
