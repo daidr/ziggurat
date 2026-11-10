@@ -5,6 +5,7 @@ const update = @import("ziggurat_update");
 const options = @import("cli_options");
 const setup_format = @import("setup_format");
 const deb = @import("deb");
+const rpm = @import("rpm");
 const publish = @import("publish.zig");
 const console_mod = @import("console.zig");
 const i18n_gen = @import("i18n_gen.zig");
@@ -23,7 +24,9 @@ const usage =
     \\ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
     \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--install-dir-name NAME] [--hook-init CMD] [--hook-install CMD] [--hook-uninstall CMD] [--command LIST] [--output FILE]
     \\ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>" [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--command LIST] [--output FILE]
+    \\ziggurat package rpm --zip PACKAGE [--maintainer "NAME <EMAIL>"] [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--command LIST] [--homepage URL] [--license SPDX] [--output FILE]
     \\ziggurat package pkgbuild --zip PACKAGE [--maintainer "NAME <EMAIL>"] [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--command LIST] [--homepage URL] [--license SPDX] [--output FILE]
+    \\ziggurat package linux --zip PACKAGE [--maintainer "NAME <EMAIL>"] [the options of deb, rpm and pkgbuild] [--output DIR]
     \\ziggurat package app --zip PACKAGE [--sign IDENTITY] [--dmg [--skip-notarize]] [--output DIR]
     \\ziggurat package install-script --zip PACKAGE [--github OWNER/REPO [--tag-prefix PREFIX]] [--url BASE] [--webview] [--output FILE]
     \\ziggurat package install-ps1 --zip PACKAGE [--github OWNER/REPO [--tag-prefix PREFIX]] [--url BASE] [--output FILE]
@@ -75,6 +78,14 @@ const usage =
     \\SHA-256), from which makepkg -si installs what the Debian package does on
     \\Arch Linux; --depends takes the Debian dependencies, mapped to Arch Linux
     \\packages. homepage and license in ziggurat.json fill url and license.
+    \\package rpm writes an RPM package that installs what the Debian package
+    \\does, needing GTK (and WebKitGTK with --webview) by their libraries'
+    \\names; --depends takes the Debian dependencies, mapped to RPM ones.
+    \\linux.depends in ziggurat.json lists what the app needs besides those:
+    \\Debian packages, mapped for the other formats, or {"deb": [...], "rpm":
+    \\[...], "arch": [...]} for each format as written.
+    \\package linux writes the packages linux.formats lists, of "deb", "rpm"
+    \\and "pkgbuild" (default: all three) into dist/ or --output DIR.
     \\package setup links each command in ~/.local/bin unless another program has it.
     \\--icon names a PNG inside the package for the Linux menu (default: the package's icon.png).
     \\package install-script writes install.sh, which installs a Linux app for the
@@ -144,15 +155,75 @@ pub const Project = struct {
 
     pub const Linux = struct {
         /// The names of the commands that run the app: a name, or a list
-        /// such as ["my-app", "ma"] to add a short one. The Debian package
-        /// and the PKGBUILD link each in /usr/bin, the setup installer in
-        /// ~/.local/bin unless another program has it; the first is the
-        /// one to run the app by.
+        /// such as ["my-app", "ma"] to add a short one. The Debian and RPM
+        /// packages and the PKGBUILD link each in /usr/bin, the setup
+        /// installer in ~/.local/bin unless another program has it; the
+        /// first is the one to run the app by.
         command: Commands = .{},
+        /// What the app needs besides GTK, Pango and (with WebKitGTK)
+        /// WebKitGTK and libsoup: see `LinuxDepends`.
+        depends: LinuxDepends = .{},
+        /// The packages `package linux` writes, of `linux_formats`
+        /// (default: all of them).
+        formats: ?[]const []const u8 = null,
+        /// The Debian and RPM packages' maintainer, "NAME <EMAIL>", when
+        /// --maintainer leaves it out.
+        maintainer: ?[]const u8 = null,
     };
 
     /// `dir` under src/ lets the app import `catalog.zig` from its sources.
     pub const I18n = struct { dir: []const u8 = "src/locales", source: []const u8 = "en" };
+};
+
+pub const linux_formats = [_][]const u8{ "deb", "rpm", "pkgbuild" };
+
+/// `linux.depends`: a list of Debian packages, which the RPM package and the
+/// PKGBUILD map to their own where known, or an object with a list for
+/// each format, as written.
+pub const LinuxDepends = struct {
+    deb: []const []const u8 = &.{},
+    rpm: []const []const u8 = &.{},
+    arch: []const []const u8 = &.{},
+    /// A list of Debian packages, mapped for the other formats.
+    legacy: bool = false,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, parse_options: std.json.ParseOptions) !LinuxDepends {
+        const value = try std.json.Value.jsonParse(allocator, source, parse_options);
+        return jsonParseFromValue(allocator, value, parse_options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, value: std.json.Value, _: std.json.ParseOptions) !LinuxDepends {
+        switch (value) {
+            .null => return .{},
+            .array => |list| {
+                const names = try stringList(allocator, list.items);
+                return .{ .deb = names, .legacy = names.len > 0 };
+            },
+            .object => |object| {
+                var result: LinuxDepends = .{};
+                var fields = object.iterator();
+                while (fields.next()) |field| {
+                    const list = switch (field.value_ptr.*) {
+                        .array => |items| try stringList(allocator, items.items),
+                        .null => &.{},
+                        else => return error.UnexpectedToken,
+                    };
+                    if (std.mem.eql(u8, field.key_ptr.*, "deb")) result.deb = list else if (std.mem.eql(u8, field.key_ptr.*, "rpm")) result.rpm = list else if (std.mem.eql(u8, field.key_ptr.*, "arch")) result.arch = list else return error.UnknownField;
+                }
+                return result;
+            },
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    fn stringList(allocator: std.mem.Allocator, items: []const std.json.Value) ![]const []const u8 {
+        const names = try allocator.alloc([]const u8, items.len);
+        for (items, names) |item, *name| name.* = switch (item) {
+            .string => |text| try allocator.dupe(u8, text),
+            else => return error.UnexpectedToken,
+        };
+        return names;
+    }
 };
 
 /// One command name or a list of them, as `linux.command` takes.
@@ -401,7 +472,17 @@ pub fn readProject(allocator: std.mem.Allocator, dir: std.Io.Dir) !Project {
     const project = std.json.parseFromSliceLeaky(Project, allocator, bytes, .{ .allocate = .alloc_always }) catch return error.InvalidProjectFile;
     if (!validIdentity(project.identity) or !validDisplayName(project.name)) return error.InvalidProjectFile;
     if (project.windows) |config| if (config.installDirName) |name| if (!setup_format.validInstallDirName(std.mem.trim(u8, name, " "))) return error.InvalidInstallDirName;
-    if (project.linux) |config| if (!setup_format.validCommands(config.command.names)) return error.InvalidCommandName;
+    if (project.linux) |config| {
+        if (!setup_format.validCommands(config.command.names)) return error.InvalidCommandName;
+        if (config.formats) |formats| for (formats) |format| {
+            for (linux_formats) |known| {
+                if (std.mem.eql(u8, known, format)) break;
+            } else {
+                std.debug.print("ziggurat: linux.formats \"{s}\" is not a Linux package format, which are deb, rpm and pkgbuild\n", .{format});
+                return error.InvalidLinuxFormat;
+            }
+        };
+    }
     update.publication.validateFilename(project.executable) catch return error.InvalidProjectFile;
     _ = update.retention.parseVersion(project.version) catch return error.InvalidProjectFile;
     try validateMacOS(project);
@@ -869,8 +950,16 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     }
     // ziggurat.json, where the command runs in the project, fills what the
     // options leave out.
-    const project_file = if (std.mem.eql(u8, kind, "setup") or std.mem.eql(u8, kind, "install-ps1") or std.mem.eql(u8, kind, "deb") or std.mem.eql(u8, kind, "pkgbuild")) readProject(allocator, std.Io.Dir.cwd()) catch null else null;
+    const linux_kind = std.mem.eql(u8, kind, "deb") or std.mem.eql(u8, kind, "rpm") or std.mem.eql(u8, kind, "pkgbuild") or std.mem.eql(u8, kind, "linux");
+    const project_file = if (std.mem.eql(u8, kind, "setup") or std.mem.eql(u8, kind, "install-ps1") or linux_kind) readProject(allocator, std.Io.Dir.cwd()) catch null else null;
+    var linux_config: Project.Linux = .{};
     if (project_file) |project| {
+        if (project.linux) |config| {
+            linux_config = config;
+            if (package_options.maintainer.len == 0) if (config.maintainer) |maintainer| {
+                package_options.maintainer = maintainer;
+            };
+        }
         if (package_options.commands == null) if (project.linux) |config| {
             if (config.command.names.len > 0) package_options.commands = config.command;
         };
@@ -978,8 +1067,54 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
         return 0;
     }
-    if (!std.mem.eql(u8, kind, "deb") and !std.mem.eql(u8, kind, "pkgbuild")) return error.InvalidArguments;
+    if (!linux_kind) return error.InvalidArguments;
     if (!std.mem.startsWith(u8, info.target, "linux-")) return error.WrongTarget;
+    if (!std.mem.eql(u8, kind, "linux")) return linuxPackage(allocator, kind, package_options, info, package.files, zip_path, config, linux_config.depends, package_options.output, null);
+    // Each format the project lists, into one directory.
+    const formats = linux_config.formats orelse &linux_formats;
+    if (formats.len > 0 and package_options.maintainer.len == 0) for (formats) |format| {
+        if (std.mem.eql(u8, format, "deb")) return error.MissingMaintainer;
+    };
+    // The PKGBUILD goes next to the package, its source, as makepkg wants.
+    for (linux_formats) |format| {
+        for (formats) |listed| {
+            if (std.mem.eql(u8, listed, format)) break;
+        } else continue;
+        if (try linuxPackage(allocator, format, package_options, info, package.files, zip_path, config, linux_config.depends, null, package_options.output) != 0) return 1;
+    }
+    return 0;
+}
+
+/// What the Linux packages depend on, in each format's terms.
+const LinuxRequirements = struct { debian: []const u8, arch: pkgbuild.Depends, rpm: rpm.Depends };
+
+/// GTK and Pango, WebKitGTK and libsoup with `webview`, and `configured`;
+/// a --depends list (`option`) replaces the Debian dependencies and is
+/// mapped for the other formats, as a Debian list in ziggurat.json is.
+fn linuxRequirements(allocator: std.mem.Allocator, option: ?[]const u8, configured: LinuxDepends, webview: bool, arch: std.Target.Cpu.Arch) !LinuxRequirements {
+    const default = if (webview) "libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0, libwebkit2gtk-4.1-0, libsoup-3.0-0" else "libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0";
+    const suffix = rpm.sonameSuffix(arch);
+    var debian: std.ArrayList(u8) = .empty;
+    try debian.appendSlice(allocator, option orelse default);
+    if (option == null) for (configured.deb) |name| {
+        try debian.appendSlice(allocator, ", ");
+        try debian.appendSlice(allocator, name);
+    };
+    if (option != null or configured.legacy) return .{ .debian = debian.items, .arch = try pkgbuild.depends(allocator, debian.items), .rpm = try rpm.depends(allocator, debian.items, suffix) };
+    const arch_default = try pkgbuild.depends(allocator, default);
+    const rpm_default = try rpm.depends(allocator, default, suffix);
+    return .{
+        .debian = debian.items,
+        .arch = .{ .depends = try std.mem.concat(allocator, []const u8, &.{ arch_default.depends, configured.arch }), .unknown = &.{} },
+        .rpm = .{ .requires = try std.mem.concat(allocator, []const u8, &.{ rpm_default.requires, configured.rpm }), .unknown = &.{} },
+    };
+}
+
+/// Writes one Linux package of an update package: "deb", "rpm" or
+/// "pkgbuild", to `output` or its default path.
+fn linuxPackage(allocator: std.mem.Allocator, kind: []const u8, package_options: PackageOptions, info: Inventory, entries: []const update.archive.Entry, zip_path: []const u8, config: setup_format.Config, configured: LinuxDepends, output_path: ?[]const u8, directory: ?[]const u8) !u8 {
+    const name = if (info.name.len > 0) info.name else info.executable;
+    const stem = std.fs.path.stem(info.executable);
     const arch = std.meta.stringToEnum(std.Target.Cpu.Arch, info.target["linux-".len..]) orelse return error.UnsupportedArchitecture;
     const package_name = try std.ascii.allocLowerString(allocator, stem);
     if (!deb.validName(package_name)) return error.InvalidPackageName;
@@ -988,41 +1123,73 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const lib = try std.fmt.allocPrint(allocator, "/usr/lib/{s}", .{package_name});
     // The menu entry runs the app by its path.
     const exec = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ lib, info.executable });
-    const debian_depends = package_options.depends orelse if (package_options.webview) "libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0, libwebkit2gtk-4.1-0, libsoup-3.0-0" else "libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0";
-    if (std.mem.eql(u8, kind, "pkgbuild")) return writePkgbuild(allocator, package_options, info, package.files, zip_path, config, .{ .arch = arch, .package_name = package_name, .commands = commands, .exec = exec, .debian_depends = debian_depends });
-    if (package_options.maintainer.len == 0) return error.MissingMaintainer;
+    const requirements = try linuxRequirements(allocator, package_options.depends, configured, package_options.webview, arch);
+    if (std.mem.eql(u8, kind, "pkgbuild")) return writePkgbuild(allocator, package_options, info, entries, zip_path, config, .{ .arch = arch, .package_name = package_name, .commands = commands, .exec = exec, .depends = requirements.arch, .output = output_path });
+    const rpm_kind = std.mem.eql(u8, kind, "rpm");
+    if (!rpm_kind and !std.mem.eql(u8, kind, "deb")) return error.InvalidArguments;
+    if (!rpm_kind and package_options.maintainer.len == 0) return error.MissingMaintainer;
     var files: std.ArrayList(deb.File) = .empty;
-    for (package.files) |entry| {
+    for (entries) |entry| {
         if (std.mem.eql(u8, entry.name, "package.json")) continue;
         const executable = std.mem.eql(u8, entry.name, info.executable);
         try files.append(allocator, .{ .path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ lib, entry.name }), .bytes = entry.bytes, .mode = if (executable) 0o755 else 0o644 });
-        if (std.ascii.eqlIgnoreCase(entry.name, "LICENSE.txt")) try files.append(allocator, .{ .path = try std.fmt.allocPrint(allocator, "/usr/share/doc/{s}/copyright", .{package_name}), .bytes = entry.bytes });
+        if (std.ascii.eqlIgnoreCase(entry.name, "LICENSE.txt")) try files.append(allocator, .{ .path = if (rpm_kind) try std.fmt.allocPrint(allocator, "/usr/share/licenses/{s}/LICENSE", .{package_name}) else try std.fmt.allocPrint(allocator, "/usr/share/doc/{s}/copyright", .{package_name}), .bytes = entry.bytes });
         if (package_options.icon) |icon| if (std.mem.eql(u8, entry.name, icon)) try files.append(allocator, .{ .path = try std.fmt.allocPrint(allocator, "/usr/share/icons/hicolor/256x256/apps/{s}.png", .{info.identity}), .bytes = entry.bytes });
     }
     try files.append(allocator, .{ .path = try std.fmt.allocPrint(allocator, "/usr/share/applications/{s}.desktop", .{info.identity}), .bytes = try setup_format.desktopEntry(allocator, config, exec, if (package_options.icon != null) info.identity else null) });
-    const debian_version = try std.mem.replaceOwned(u8, allocator, info.version, "-", "~");
+    const links = try allocator.alloc(deb.Link, commands.len);
+    for (commands, links) |command, *link| link.* = .{ .path = try std.fmt.allocPrint(allocator, "/usr/bin/{s}", .{command}), .target = try std.fmt.allocPrint(allocator, "../lib/{s}/{s}", .{ package_name, info.executable }) };
     // Menus and icon caches refresh when the tools exist; failures never block.
     const refresh = "#!/bin/sh\nset -e\nif command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications || true; fi\nif command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true; fi\n";
     var output_bytes: std.Io.Writer.Allocating = .init(allocator);
     const mtime: u64 = if (zio.getEnvVarOwned(allocator, "SOURCE_DATE_EPOCH")) |text| std.fmt.parseInt(u64, text, 10) catch 0 else |_| 0;
-    try deb.write(allocator, &output_bytes.writer, .{
-        .name = package_name,
-        .version = debian_version,
-        .architecture = try deb.architecture(arch),
-        .maintainer = package_options.maintainer,
-        .description = if (package_options.comment.len > 0) try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ name, package_options.comment }) else name,
-        .depends = debian_depends,
-        .files = files.items,
-        .links = links: {
-            const links = try allocator.alloc(deb.Link, commands.len);
-            for (commands, links) |command, *link| link.* = .{ .path = try std.fmt.allocPrint(allocator, "/usr/bin/{s}", .{command}), .target = try std.fmt.allocPrint(allocator, "../lib/{s}/{s}", .{ package_name, info.executable }) };
-            break :links links;
-        },
-        .postinst = refresh,
-        .postrm = refresh,
-        .mtime = mtime,
-    });
-    const output = package_options.output orelse try std.fmt.allocPrint(allocator, "dist/{s}_{s}_{s}.deb", .{ package_name, debian_version, try deb.architecture(arch) });
+    const description = if (package_options.comment.len > 0) try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ name, package_options.comment }) else name;
+    var default_output: []const u8 = undefined;
+    if (rpm_kind) {
+        for (requirements.rpm.unknown) |dependency| std.debug.print("ziggurat: leaving {s} out of the RPM package's dependencies: no RPM package is known for it\n", .{dependency});
+        const files_rpm = try allocator.alloc(rpm.File, files.items.len);
+        for (files.items, files_rpm) |file, *out| out.* = .{ .path = file.path, .bytes = file.bytes, .mode = file.mode };
+        const links_rpm = try allocator.alloc(rpm.Link, links.len);
+        for (links, links_rpm) |link, *out| out.* = .{ .path = link.path, .target = link.target };
+        const rpm_version = try rpm.version(allocator, info.version);
+        const rpm_arch = try rpm.architecture(arch);
+        try rpm.write(allocator, &output_bytes.writer, .{
+            .name = package_name,
+            .version = rpm_version,
+            .architecture = rpm_arch,
+            .summary = if (package_options.comment.len > 0) package_options.comment else name,
+            .description = description,
+            // The app's own license when ziggurat.json names none.
+            .license = package_options.license orelse "LicenseRef-custom",
+            .packager = package_options.maintainer,
+            .url = package_options.homepage orelse "",
+            .requires = requirements.rpm.requires,
+            .files = files_rpm,
+            .links = links_rpm,
+            .directories = &.{lib},
+            .postin = refresh,
+            .postun = refresh,
+            .mtime = mtime,
+        });
+        default_output = try std.fmt.allocPrint(allocator, "dist/{s}-{s}-1.{s}.rpm", .{ package_name, rpm_version, rpm_arch });
+    } else {
+        const debian_version = try std.mem.replaceOwned(u8, allocator, info.version, "-", "~");
+        try deb.write(allocator, &output_bytes.writer, .{
+            .name = package_name,
+            .version = debian_version,
+            .architecture = try deb.architecture(arch),
+            .maintainer = package_options.maintainer,
+            .description = description,
+            .depends = requirements.debian,
+            .files = files.items,
+            .links = links,
+            .postinst = refresh,
+            .postrm = refresh,
+            .mtime = mtime,
+        });
+        default_output = try std.fmt.allocPrint(allocator, "dist/{s}_{s}_{s}.deb", .{ package_name, debian_version, try deb.architecture(arch) });
+    }
+    const output = output_path orelse if (directory) |dir| try std.fs.path.join(allocator, &.{ dir, std.fs.path.basename(default_output) }) else default_output;
     if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
     try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = output_bytes.written() });
     try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
@@ -1034,7 +1201,8 @@ const PkgbuildContext = struct {
     package_name: []const u8,
     commands: []const []const u8,
     exec: []const u8,
-    debian_depends: []const u8,
+    depends: pkgbuild.Depends,
+    output: ?[]const u8 = null,
 };
 
 /// Writes the PKGBUILD of a Linux update package next to it (or to
@@ -1051,7 +1219,7 @@ fn writePkgbuild(allocator: std.mem.Allocator, package_options: PackageOptions, 
         try files.append(allocator, .{ .path = entry.name, .executable = std.mem.eql(u8, entry.name, info.executable) });
         if (std.ascii.eqlIgnoreCase(entry.name, "LICENSE.txt")) license_file = entry.name;
     }
-    const mapped = try pkgbuild.depends(allocator, context.debian_depends);
+    const mapped = context.depends;
     for (mapped.unknown) |dependency| std.debug.print("ziggurat: leaving {s} out of the PKGBUILD's dependencies: no Arch Linux package is known for it\n", .{dependency});
     var output_bytes: std.Io.Writer.Allocating = .init(allocator);
     try pkgbuild.write(allocator, &output_bytes.writer, .{
@@ -1075,7 +1243,7 @@ fn writePkgbuild(allocator: std.mem.Allocator, package_options: PackageOptions, 
         .license_file = license_file,
     });
     // makepkg finds the source next to the PKGBUILD.
-    const output = package_options.output orelse try std.fs.path.join(allocator, &.{ std.fs.path.dirname(zip_path) orelse ".", pkgbuild.name });
+    const output = context.output orelse try std.fs.path.join(allocator, &.{ std.fs.path.dirname(zip_path) orelse ".", pkgbuild.name });
     if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
     try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = output_bytes.written() });
     try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
@@ -1995,6 +2163,7 @@ fn vetCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 }
 
 test {
+    _ = rpm;
     _ = publish;
     _ = console_mod;
     _ = i18n_gen;
@@ -2072,6 +2241,56 @@ test "ziggurat.json configures macOS bundles, checked when it is read" {
         \\{"name": "A", "identity": "a.b", "executable": "a", "template": "native", "macos": {"notarize": {"keychainProfile": ""}}}
     }) |bad| {
         try temp.dir.writeFile(zio.io(), .{ .sub_path = "ziggurat.json", .data = bad });
+        if (readProject(allocator, temp.dir)) |_| return error.TestExpectedError else |_| {}
+    }
+}
+
+test "linux.depends lists Debian packages or each format's, and linux.formats is checked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const base =
+        \\{"name": "Hello", "identity": "com.example.hello", "executable": "hello", "template": "native", "version": "1.2.0.0", "linux":
+    ;
+    // A Debian list: GTK and Pango first, mapped for RPM and Arch Linux.
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "ziggurat.json", .data = base ++
+        \\ {"depends": ["libnotify4", "libfoo1"], "formats": ["deb", "rpm"], "maintainer": "Dev <dev@example.invalid>"}}
+    });
+    const legacy = (try readProject(allocator, temp.dir)).linux.?;
+    try std.testing.expect(legacy.depends.legacy);
+    try std.testing.expectEqual(2, legacy.formats.?.len);
+    const mapped = try linuxRequirements(allocator, null, legacy.depends, false, .x86_64);
+    try std.testing.expectEqualStrings("libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0, libnotify4, libfoo1", mapped.debian);
+    try std.testing.expectEqualStrings("libnotify.so.4()(64bit)", mapped.rpm.requires[2]);
+    try std.testing.expectEqualStrings("libfoo1", mapped.rpm.unknown[0]);
+    try std.testing.expectEqualStrings("libnotify", mapped.arch.depends[2]);
+    // Each format's list, as written, after what every app needs.
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "ziggurat.json", .data = base ++
+        \\ {"depends": {"deb": ["libfoo1"], "rpm": ["foo-libs"], "arch": ["foo"]}}}
+    });
+    const each = (try readProject(allocator, temp.dir)).linux.?;
+    try std.testing.expect(!each.depends.legacy);
+    const written = try linuxRequirements(allocator, null, each.depends, true, .aarch64);
+    try std.testing.expectEqualStrings("libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0, libwebkit2gtk-4.1-0, libsoup-3.0-0, libfoo1", written.debian);
+    try std.testing.expectEqual(5, written.rpm.requires.len);
+    try std.testing.expectEqualStrings("libwebkit2gtk-4.1.so.0()(64bit)", written.rpm.requires[2]);
+    try std.testing.expectEqualStrings("foo-libs", written.rpm.requires[4]);
+    try std.testing.expectEqualStrings("foo", written.arch.depends[written.arch.depends.len - 1]);
+    try std.testing.expectEqual(0, written.rpm.unknown.len);
+    // --depends replaces the Debian list and is mapped too.
+    const option = try linuxRequirements(allocator, "libgtk-3-0", each.depends, false, .x86);
+    try std.testing.expectEqualStrings("libgtk-3-0", option.debian);
+    try std.testing.expectEqualStrings("libgtk-3.so.0", option.rpm.requires[0]);
+    for ([_][]const u8{
+        \\ {"depends": {"debian": ["x"]}}}
+        ,
+        \\ {"depends": "libfoo1"}}
+        ,
+        \\ {"formats": ["deb", "snap"]}}
+    }) |bad| {
+        try temp.dir.writeFile(zio.io(), .{ .sub_path = "ziggurat.json", .data = try std.mem.concat(allocator, u8, &.{ base, bad }) });
         if (readProject(allocator, temp.dir)) |_| return error.TestExpectedError else |_| {}
     }
 }

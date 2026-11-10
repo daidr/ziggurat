@@ -3230,6 +3230,7 @@ test {
     _ = @import("damage_test.zig");
     _ = @import("diagnostics_test.zig");
     _ = @import("platform/decoration_test.zig");
+    if (builtin.os.tag == .windows) _ = @import("platform/windows_frame.zig");
     _ = @import("platform/work_area.zig");
     _ = @import("platform/input_region.zig");
     _ = @import("pointer_press_test.zig");

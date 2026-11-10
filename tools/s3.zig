@@ -300,6 +300,7 @@ pub fn contentType(name: []const u8) []const u8 {
         .{ ".zip", "application/zip" },
         .{ ".exe", "application/vnd.microsoft.portable-executable" },
         .{ ".deb", "application/vnd.debian.binary-package" },
+        .{ ".rpm", "application/x-rpm" },
         .{ ".gz", "application/gzip" },
         // Readable in a browser before it is piped to sh.
         .{ ".sh", "text/plain; charset=utf-8" },

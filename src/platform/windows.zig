@@ -1,4 +1,5 @@
 const std = @import("std");
+const windows_frame = @import("windows_frame.zig");
 const core = @import("../root.zig");
 const icons = @import("windows_icons.zig");
 const text_input = @import("windows_text.zig");
@@ -252,7 +253,7 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
     window.native.icons.apply(window.native.hwnd);
     cloak(window);
     if (options.decoration != .system and options.popup == null) plainCaption(window.native.hwnd);
-    if (options.vibrancy != .none) setVibrancy(window, options.vibrancy);
+    if (options.vibrancy != .none) setVibrancy(window, options.vibrancy) else applyTransparentFramePolicy(window);
     // Windows 11 rounds, outlines and shades a popup with a shadow as it
     // does its menus, and gives a rounded frameless window its own corners
     // whatever the radius; earlier versions ignore the attribute.
@@ -1008,9 +1009,21 @@ fn backdropFor(material: core.Vibrancy) u32 {
 }
 /// The material shows where the frame extends, behind the client area.
 /// Windows before 11 22H2 ignore the backdrop attribute.
+fn plainTransparentFrame(options: anytype, material: core.Vibrancy) bool {
+    return windows_frame.plainTransparentFrame(options, material != .none);
+}
+const dwm_nc_rendering_policy = 2;
+/// DWMNCRP_DISABLED for a plain transparent frame, else
+/// DWMNCRP_USEWINDOWSTYLE, as a material put on later needs.
+fn applyTransparentFramePolicy(window: *core.WindowRecord) void {
+    if (window.options.decoration == .system or !window.options.transparent) return;
+    const policy: u32 = if (plainTransparentFrame(window.options, window.native.material)) 1 else 0;
+    _ = DwmSetWindowAttribute(window.native.hwnd, dwm_nc_rendering_policy, &policy, @sizeOf(u32));
+}
 pub fn setVibrancy(window: *core.WindowRecord, material: core.Vibrancy) void {
     const hwnd = window.native.hwnd;
     window.native.material = material;
+    applyTransparentFramePolicy(window);
     extendGlass(window, hwnd, true);
     const backdrop = backdropFor(material);
     _ = DwmSetWindowAttribute(hwnd, dwm_system_backdrop_type, &backdrop, @sizeOf(u32));
@@ -1698,6 +1711,10 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
     // or replaced HWND must not reach the following native state queries.
     if (guarded_pointer and (!sameWindow(window, hwnd) or pointerOperation(window) != operation)) return 0;
     switch (message) {
+        // What the frames leave transparent shows what is behind, without a
+        // frame painted over it or an active border on activation.
+        c.WM_NCPAINT => if (plainTransparentFrame(window.options, window.native.material)) return 0,
+        c.WM_NCACTIVATE => if (plainTransparentFrame(window.options, window.native.material)) return c.TRUE,
         c.WM_NCCALCSIZE => {
             if (window.native.fullscreen and !window.native.restoring_placement and style(hwnd, c.GWL_STYLE) & c.WS_CAPTION == 0) return 0;
             if (window.options.decoration != .system) {
