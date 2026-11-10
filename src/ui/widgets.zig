@@ -1,3 +1,4 @@
+// 测量用：改共享界面代码时 Windows PR 检查要多久（下一个提交撤回）
 const std = @import("std");
 const layout = @import("layout.zig");
 const access = @import("accessibility.zig");
