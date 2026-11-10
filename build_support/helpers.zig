@@ -678,3 +678,53 @@ pub fn addTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Co
     };
     return b.addTest(with);
 }
+
+/// Without `ui_logic`, `test` leaves out the unit tests of modules built on
+/// the UI module that reach native code only through it: their checks run
+/// on the test backend and give the same results on every platform, so a
+/// pull request runs them on Linux and macOS, while Windows rebuilds only
+/// the tests that touch its native code (nightly and `full-ci` keep all).
+pub fn selectUiLogicTests(b: *std.Build, ui_logic: bool) void {
+    if (ui_logic) return;
+    const top = &b.top_level_steps.get("test").?.step;
+    var kept: usize = 0;
+    for (top.dependencies.items) |dependency| {
+        if (!isUiLogicTest(dependency)) {
+            top.dependencies.items[kept] = dependency;
+            kept += 1;
+        }
+    }
+    top.dependencies.shrinkRetainingCapacity(kept);
+}
+
+fn isUiLogicTest(step: *std.Build.Step) bool {
+    const run = step.cast(std.Build.Step.Run) orelse return false;
+    const compile = run.producer orelse return false;
+    if (compile.kind != .@"test") return false;
+    const root = compile.root_module;
+    if (isUiRoot(root)) return false;
+    const file = root.root_source_file orelse return false;
+    if (file != .src_path) return false;
+    for (platform_specific_tests) |path| if (std.mem.eql(u8, file.src_path.sub_path, path)) return false;
+    // Code that links native libraries or C itself is tested where it runs.
+    if (root.link_objects.items.len != 0 or root.link_libc == true) return false;
+    for (root.getGraph().modules) |module| if (isUiRoot(module)) return true;
+    return false;
+}
+
+/// Modules above the UI whose own tests take a platform's native paths:
+/// local sockets, a pseudo console, accessibility providers, gamepads.
+const platform_specific_tests = [_][]const u8{
+    "src/automation/root.zig",
+    "src/terminal/view.zig",
+    "src/document_diff_accessibility/root.zig",
+    "src/game/root.zig",
+};
+
+fn isUiRoot(module: *std.Build.Module) bool {
+    const file = module.root_source_file orelse return false;
+    return switch (file) {
+        .src_path => |source| std.mem.eql(u8, source.sub_path, "src/ui/root.zig"),
+        else => false,
+    };
+}
