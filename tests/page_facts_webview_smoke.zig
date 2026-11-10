@@ -116,9 +116,9 @@ const Probe = struct {
             },
             .popup => {
                 const gesture = self.popup_gesture orelse return;
-                // WebKit runs the app's own script as a user's gesture;
-                // WebView2's ExecuteScript does not.
-                if (gesture != linux) return self.fail(error.WrongGesture);
+                // WebKit and WebView2 both run the app's own script as a
+                // user's gesture.
+                if (!gesture) return self.fail(error.WrongGesture);
                 self.step = .untrusted;
                 self.untrusted = true;
                 self.loaded = false;

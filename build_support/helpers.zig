@@ -20,7 +20,7 @@ pub fn linksSqlite(compile: *std.Build.Step.Compile) bool {
 /// The linker also binds `@sin`-style calls to UCRT rather than compiler-rt,
 /// so they link src/c/windows/math, which defines those symbols from
 /// compiler-rt's code. The self-hosted backend writes no PDB, so installs
-/// skip it.
+/// skip it, and root modules are stripped.
 /// Debug images with the SQLite amalgamation crash in most tests when Zig's
 /// own backend and linker build them; those keep LLVM.
 pub fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
@@ -60,6 +60,10 @@ pub fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
             root.* = compile.root_module.*;
             root.link_objects = compile.root_module.link_objects.clone(b.allocator) catch @panic("OOM");
             root.cached_graph = .{ .modules = &.{}, .names = &.{} };
+            // With no PDB the image's debug information is never read, and
+            // emitting it for some roots crashes the compiler (web-counter
+            // with -Dwebview): leave it out.
+            if (root.strip == null) root.strip = true;
             // Zig's COFF linker drops resource sections, so compile the
             // resources separately and add them to the linked image.
             var resources: std.ArrayList(*std.Build.Module.RcSourceFile) = .empty;
@@ -456,9 +460,10 @@ pub fn addSmokeModule(b: *std.Build, name: []const u8, path: []const u8, target:
 
 /// addSmoke that returns the executable for test-only native additions.
 pub fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+    // Error return traces name the check that failed in release builds too.
     const exe = b.addExecutable(.{
         .name = name,
-        .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .imports = imports }),
+        .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .error_tracing = true, .imports = imports }),
     });
     addResources(b, exe);
     const install = b.addInstallArtifact(exe, .{});

@@ -43,7 +43,7 @@ const Preparation = struct {
     }
     fn prepare(self: *Preparation) !void {
         var directory = try std.Io.Dir.cwd().openDir(zio.io(), self.directory, .{});
-        defer directory.close();
+        defer directory.close(zio.io());
         var certificate: [16384]u8 = undefined;
         var private_key: [16384]u8 = undefined;
         defer std.crypto.secureZero(u8, &private_key);
@@ -53,7 +53,7 @@ const Preparation = struct {
     }
     fn read(directory: std.Io.Dir, path: []const u8, buffer: []u8) ![]const u8 {
         const file = try directory.openFile(zio.io(), path, .{});
-        defer file.close();
+        defer file.close(zio.io());
         const n = try zio.readAll(file, buffer);
         if (n == 0 or n == buffer.len) return error.InvalidFixtureMaterial;
         return buffer[0..n];
@@ -144,7 +144,7 @@ const Job = struct {
     }
     fn produceFile(self: *Job) !void {
         const file = try std.Io.Dir.cwd().openFile(zio.io(), self.state.file_path, .{});
-        defer file.close();
+        defer file.close(zio.io());
         try zio.posix.seekTo(file.handle, 3);
         const prepared = try https.PreparedFileResponse.prepare(self.state.app.owner, file, large_length, self.file_request.?);
         var pump = prepared.pump;

@@ -88,6 +88,7 @@ const Probe = struct {
         switch (input) {
             .title_changed => |change| {
                 const title = change.title orelse return;
+                if (self.step == .welcome and !std.mem.eql(u8, title, "welcome")) std.debug.print("http auth title while signing in: {s}\n", .{title});
                 if (std.mem.eql(u8, title, "welcome") and self.step == .welcome) {
                     if (self.challenges != 1) return self.fail(error.ChallengeCount);
                     self.step = .denied;
@@ -103,6 +104,17 @@ const Probe = struct {
                 }
             },
             .completed => |info| {
+                if (self.step == .welcome) std.debug.print("http auth load while signing in: success {} status {d}\n", .{ info.success, info.native_status });
+                if (self.step == .denied) {
+                    std.debug.print("http auth load after declining: success {} status {d}\n", .{ info.success, info.native_status });
+                    // WebView2 stops a declined challenge without rendering the
+                    // server's 401 body, so the refused load is the signal there.
+                    if (!webkit and self.challenges == 2) {
+                        self.step = .refused;
+                        view.navigateRemote(self.at(self.secure, "/tls")) catch |err| self.fail(err);
+                    }
+                    return;
+                }
                 if (self.step != .refused or info.success) return;
                 if (self.certificates != 1) {
                     std.debug.print("refused load: status {d}, asked {d} times\n", .{ info.native_status, self.certificates });
@@ -156,6 +168,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try app.run();
     watchdog.stop();
     if (probe.failure) |err| return err;
+    if (watchdog.expired or probe.step != .done or probe.challenges != 2 or probe.certificates != 2)
+        std.debug.print("http auth ended: expired {} step {s} challenges {d} certificates {d} native {any}\n", .{ watchdog.expired, @tagName(probe.step), probe.challenges, probe.certificates, probe.view.nativeFailure() });
     try std.testing.expect(!watchdog.expired and probe.step == .done and probe.challenges == 2 and probe.certificates == 2);
     std.debug.print("http auth: signed in, refusal without credentials, certificate refused then allowed by its DER\n", .{});
 }

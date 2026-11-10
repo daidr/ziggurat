@@ -187,6 +187,20 @@ export async function fetch(input: RequestInfo | URL, init: RequestInit = {}): P
     statusText: head.statusText,
     headers: head.headers.map(({ name, value }) => [name, value] as [string, string]),
   });
+  // Reading an aborted body rejects with the signal's reason, as fetch's
+  // own does; a WebView may instead report its stream error as its own.
+  if (readable && signal) {
+    for (const name of ["arrayBuffer", "blob", "bytes", "formData", "json", "text"] as const) {
+      const read = (res as unknown as Record<string, unknown>)[name];
+      if (typeof read !== "function") continue;
+      Object.defineProperty(res, name, {
+        value: (...args: unknown[]) =>
+          (read.apply(res, args) as Promise<unknown>).catch((error: unknown) => {
+            throw aborted ? signal.reason : error;
+          }),
+      });
+    }
+  }
   return withMetadata(res, head.url || url.href, head.redirected, status);
 }
 

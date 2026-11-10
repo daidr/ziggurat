@@ -566,26 +566,24 @@ jobs:
         run: |
           zig build smoke-webview-overlay-windows -Dwebview=true -Daccessibility=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Standalone CookieStore over a hidden web view
-        timeout-minutes: 15
+      - name: Unit tests of the WebView2 module, and every page check built
         run: |
-          zig build smoke-webview-cookies-windows -Dwebview=true -Doptimize=ReleaseSafe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Pages in the app's forced appearance from their first document
-        timeout-minutes: 15
-        run: |
-          zig build smoke-webview-forced-appearance -Dwebview=true -Doptimize=ReleaseSafe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Real WebView2 Runtime lifecycle and policy checks
-        run: |
+          # The whole ReleaseSafe suite takes an hour on this runner; the full
+          # checks run it, and the Windows job runs it in Debug.
           bun test tests/ipc_client.test.ts tests/ipc_events.test.ts tests/resource_stream_client.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-content-rules smoke-webview-page-facts smoke-webview-http-auth smoke-webview-context-menu smoke-webview-page-options smoke-webview-session-state smoke-webview-picture-in-picture -Dwebview=true -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test-webview test-remote-origin smoke-page-host smoke-page-authorization build-smoke-webview build-smoke-composition-webview build-smoke-page-session build-smoke-webview-policy build-smoke-page build-smoke-page-remote build-smoke-script build-smoke-browser-tools build-smoke-request-policy build-smoke-resource-async build-smoke-resource-file build-smoke-scheme build-smoke-resource-producer build-smoke-permission build-smoke-download build-smoke-browser-policy build-smoke-ipc build-smoke-assets build-smoke-page-runtime build-smoke-plugin-fetch build-smoke-plugin-watch build-smoke-plugin-sqlite build-smoke-plugin-websocket build-smoke-embedded-webview build-smoke-webview-content-rules build-smoke-webview-page-facts build-smoke-webview-http-auth build-smoke-webview-context-menu build-smoke-webview-page-options build-smoke-webview-session-state build-smoke-webview-picture-in-picture build-smoke-webview-cookies-windows build-smoke-webview-forced-appearance -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Real WebView2 Runtime lifecycle and policy checks, one at a time
+        if: success() || failure()
+        run: |
+          # These fail when the system Runtime is unavailable; no Runtime is downloaded.
+          # Each starts and waits out real browser processes: they run alone, after the compiles.
+          ./scripts/ci-webview-checks.ps1 -Options '-Dwebview=true', '-Doptimize=ReleaseSafe' -Steps smoke-webview, smoke-composition-webview, smoke-page-session, smoke-webview-policy, smoke-page, smoke-page-remote, smoke-script, smoke-browser-tools, smoke-request-policy, smoke-resource-async, smoke-resource-file, smoke-scheme, smoke-resource-producer, smoke-permission, smoke-download, smoke-browser-policy, smoke-ipc, smoke-assets, smoke-page-runtime, smoke-plugin-fetch, smoke-plugin-watch, smoke-plugin-sqlite, smoke-plugin-websocket, smoke-embedded-webview, smoke-webview-content-rules, smoke-webview-page-facts, smoke-webview-http-auth, smoke-webview-context-menu, smoke-webview-page-options, smoke-webview-session-state, smoke-webview-picture-in-picture, smoke-webview-cookies-windows, smoke-webview-forced-appearance
       - name: Standalone engine discovery without a page
+        if: success() || failure()
         run: |
           zig build "-j$env:NUMBER_OF_PROCESSORS" test-webview-runtime build-smoke-webview-runtime -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -593,12 +591,14 @@ jobs:
           ./zig-out/bin/smoke-webview-runtime.exe $loader
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Exact-origin HTTPS credential lifecycle and redirect checks
+        if: success() || failure()
         run: |
           zig build "-j$env:NUMBER_OF_PROCESSORS" build-smoke-request-credentials -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -B tests/windows_https_credentials_host.py --exe zig-out/bin/smoke-request-credentials.exe --cache .zig-cache/managed/windows-credentials-ci --log .validation/ci/windows-credentials.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Document-start initializer lifecycle and wire checks
+        if: success() || failure()
         run: |
           zig build "-j$env:NUMBER_OF_PROCESSORS" test-document-initializers test-document-initializers-native build-initializer-semantics-emitter build-smoke-document-initializers -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

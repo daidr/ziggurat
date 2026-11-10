@@ -12,6 +12,10 @@ const Server = struct {
     stop_requested: std.atomic.Value(bool) = .init(false),
     gate: zio.ResetEvent = .{},
     downloads: std.atomic.Value(u32) = .init(0),
+    // A transfer still being written must not hold up the next page, so each
+    // connection gets its own thread.
+    connections: [64]?std.Thread = @splat(null),
+    connection_count: usize = 0,
     fn start(self: *Server) !void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
@@ -21,15 +25,29 @@ const Server = struct {
         const wake = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
         wake.close(zio.io());
         self.thread.?.join();
+        for (self.connections[0..self.connection_count]) |connection| connection.?.join();
         self.listener.deinit(zio.io());
     }
     fn run(self: *Server) void {
         while (true) {
             const connection = self.listener.accept(zio.io()) catch return;
-            defer connection.close(zio.io());
-            if (self.stop_requested.load(.acquire)) return;
-            self.serve(connection) catch {};
+            if (self.stop_requested.load(.acquire)) {
+                connection.close(zio.io());
+                return;
+            }
+            if (self.connection_count < self.connections.len) {
+                if (std.Thread.spawn(.{}, serveConnection, .{ self, connection })) |thread| {
+                    self.connections[self.connection_count] = thread;
+                    self.connection_count += 1;
+                    continue;
+                } else |_| {}
+            }
+            serveConnection(self, connection);
         }
+    }
+    fn serveConnection(self: *Server, stream: std.Io.net.Stream) void {
+        defer stream.close(zio.io());
+        self.serve(stream) catch {};
     }
     fn serve(self: *Server, stream: std.Io.net.Stream) !void {
         var request: [8192]u8 = undefined;

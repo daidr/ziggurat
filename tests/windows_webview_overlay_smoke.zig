@@ -325,13 +325,17 @@ pub fn main() !void {
     defer active = null;
     const timer = c.SetTimer(null, 0, 20, @ptrCast(&State.windowsTick));
     if (timer == 0) return error.CreateTimerFailed;
-    var watchdog: Watchdog = .{ .app = app };
+    // Each phase has its own 10 s budget in `step`; this only ends a run
+    // that stops ticking. A cold Runtime's first page plus nine phases of
+    // focus round trips can pass the default 15 s on a busy runner.
+    var watchdog: Watchdog = .{ .app = app, .seconds = 60 };
     try watchdog.start();
     defer watchdog.stop();
     try app.run();
     watchdog.stop();
     if (state.client) |thread| thread.join();
     if (state.failure) |err| return err;
+    if (watchdog.expired) std.debug.print("windows web view overlay: still in {s} after {d} ticks, {d} in this phase; loaded {}\n", .{ @tagName(state.phase), state.ticks, state.ticks - state.since, state.loaded });
     try std.testing.expect(!watchdog.expired and state.phase == .done);
     state.item.remove();
     _ = try state.window.destroy();
