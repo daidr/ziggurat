@@ -14,6 +14,23 @@
 ## 尺度
 
 - `chart.Linear.init(lo, hi)` 映射数值。`nice(n)` 把定义域向外取整到约 n 个刻度的整值（0..87、10 个刻度得 0..90；5 个刻度得 0..100）；`ticks(n, &out)` 写出间隔为 10 的幂乘 1、2 或 5 的刻度，标签的小数位数由步长决定，或由 `format` 自定义。`at`、`span`、`invert` 做正反映射，`clamp` 把定义域外的值压到两端。`chart.extent(values)` 求忽略 NaN 的最小最大值，没有数据时为 0..1。
+- `chart.Log.init(lo, hi)` 让相同的比值相距相同：1、10、100 等距，适合跨几个数量级的数据。两端须同为正或同为负，可以反向。`base` 默认 10（2 与 e 也可），只影响刻度和 `nice()`，不影响位置；`nice()` 把定义域扩到底数的整次幂。`ticks(n, &out)` 的 n 是密度提示：整数底数的短定义域会加入次刻度（底数幂的倍数），拥挤时次刻度没有标签；设置 `format` 时每个刻度都有标签，默认标签取六位有效数字（`chart.formatSignificant`，如 `0.001`、`1e+06`）。只有一个值的定义域在该值处有一个刻度。
+- `chart.SymLog.init(lo, hi)` 包含零和负数，按 sign(v)·log1p(|v|/c) 映射：`constant` 即 c（默认 1），是零附近近似线性区域的大小，更大的绝对值按对数分布。`ticks(n, &out)` 与 `nice(n)` 取原单位下的整值，按曲线放置；n 为 0，或取整不能稳定到一个定义域时，定义域保持不变。
+
+  两种尺度都有 `at`、`invert`、`span`、`clamp` 与 `format`，与 `Linear` 一样。定义域用数据单位，对每个样本调用 `at`，再用普通的标记和路径。对数坐标的柱状图需要非零的基线，围绕零的柱子用 `SymLog`。NaN 样本保持为 NaN，折线与面积路径在那里断开。不夹取时，对数尺度上符号相反的值为 NaN，零映射到绘图区外无穷远；`clamp` 时定义域外的值（含零）留在两端。定义域须有限；对数定义域不能碰到或跨过零，底数须有限且大于 1，`SymLog` 的常数须有限且为正。无效的尺度给出 NaN 位置、没有刻度，`nice` 原样返回。在 f64 的极限处，下一个整次幂不可表示时对数 `nice` 保留原端点。
+
+  ```zig
+  const latency = chart.Log.init(0.01, 1000); // 毫秒，跨五个数量级
+  const position = latency.at(0.1); // 绘图区的 0.2
+  const value = latency.invert(0.5); // 约 3.162 ms
+
+  var changes = chart.SymLog.init(-1000, 1000);
+  changes.constant = 10;
+  const baseline = changes.at(0); // 0.5，零有效
+  const bar = changes.span(0, -100); // 围绕基线的有符号柱
+  ```
+
+  位置、反映射、刻度与取整后的定义域与 d3-scale 4.0.2 的 `scaleLog`、`scaleSymlog` 一致：`src/chart/testdata/log_scales.json.gz` 是 `scripts/chart-scales-golden.mjs` 用 Node 从 d3-scale 生成的参考值，`test-chart` 逐项比对。只有一个值的对数定义域在底数不是整数时 d3-scale 不给刻度，这里仍保留该值的刻度。
 - `chart.Band.init(labels)` 给每个分类一条带：`band(i)`、`at(i)`、`width()`、`index(f)`（带之间的空隙归属相邻的带），`padding(inner, outer)` 以步长比例留出间隔，`ticks(&out)` 把标签放在各带中央。
 - `chart.Time.init(from, to)` 映射以毫秒计的 Unix 时间。`offset` 是所在地相对 UTC 的固定分钟偏移，刻度落在该偏移下的整时刻上：秒、刻钟、午夜、周日、月初或年初，按跨度选择；默认标签只写相对上一级整单位变化的部分，如 `2026`、`Mar`、`Mar 5`、`14:00`、`09:14`、`:30`、`.250`。`chart.fromCivil` / `chart.toCivil` 在公历时间与毫秒之间换算。
 
