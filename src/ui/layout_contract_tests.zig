@@ -285,3 +285,34 @@ test "growth keeps exact resolved caps with extreme weights and tiny extents" {
     try std.testing.expect(output[2].width >= @as(f32, 1e-30));
     try std.testing.expectApproxEqAbs(@as(f32, 100), result.content_size.width, 0.00001);
 }
+
+test "each item's cross size is found once, as its alignment, limits and baseline say" {
+    var output: [5]Rect = undefined;
+    const result = try layout.arrange(.{ .x = 0, .y = 0, .width = 300, .height = 60 }, .{ .axis = .row, .alignment = .stretch }, &.{
+        // Stretched to the row, and to no more than its maximum.
+        .{ .preferred = .{ .width = 40, .height = 10 } },
+        .{ .preferred = .{ .width = 40, .height = 10 }, .constraints = .{ .max = .{ .width = std.math.inf(f32), .height = 30 } } },
+        // Its own height, centered and at the end.
+        .{ .preferred = .{ .width = 40, .height = 20 }, .alignment = .center },
+        .{ .preferred = .{ .width = 40, .height = 20 }, .alignment = .end, .constraints = .{ .min = .{ .height = 24 } } },
+        // On the baseline, at its own height whatever the alignment.
+        .{ .preferred = .{ .width = 40, .height = 16 }, .baseline = 12 },
+    }, &output);
+    try std.testing.expectEqual(@as(f32, 60), output[0].height);
+    try std.testing.expectEqual(@as(f32, 30), output[1].height);
+    try std.testing.expectEqual(@as(f32, 0), output[1].y);
+    try std.testing.expectEqual(@as(f32, 20), output[2].height);
+    try std.testing.expectEqual(@as(f32, 20), output[2].y);
+    try std.testing.expectEqual(@as(f32, 24), output[3].height);
+    try std.testing.expectEqual(@as(f32, 36), output[3].y);
+    try std.testing.expectEqual(@as(f32, 16), output[4].height);
+    try std.testing.expectEqual(@as(f32, 0), output[4].y);
+    try std.testing.expectEqual(@as(f32, 60), result.content_size.height);
+    // Across a column the same, in width.
+    _ = try layout.arrange(.{ .x = 10, .y = 0, .width = 80, .height = 300 }, .{ .axis = .column, .alignment = .center }, &.{
+        .{ .preferred = .{ .width = 20, .height = 10 } },
+        .{ .preferred = .{ .width = 20, .height = 10 }, .alignment = .stretch },
+    }, output[0..2]);
+    try std.testing.expectEqual(Rect{ .x = 40, .y = 0, .width = 20, .height = 10 }, output[0]);
+    try std.testing.expectEqual(Rect{ .x = 10, .y = 10, .width = 80, .height = 10 }, output[1]);
+}

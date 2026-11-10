@@ -411,6 +411,9 @@ const Core = struct {
     /// input lays the bars out with.
     bar_style: ui.scroll.Style = .{},
     bar_hovered: bool = false,
+    /// The bars the leaf's style shows (`Style.scrollbars` and
+    /// `Style.scrollbar_axes`), as of the last build.
+    bars: view.ScrollbarAxes = .{},
     press: Press = .none,
     pointer: Point = .{},
     pointer_inside: bool = false,
@@ -965,10 +968,25 @@ const Core = struct {
         return @max(1, (self.bounds.width - self.gap * (columns + 1)) / columns);
     }
 
+    /// Takes the bars `style` shows. Hiding the vertical bar while its
+    /// thumb is dragged ends the drag, and its release presses nothing.
+    fn setBars(self: *Core, style: view.Style) void {
+        self.bars = .{ .horizontal = style.scrollbars and style.scrollbar_axes.horizontal, .vertical = style.scrollbars and style.scrollbar_axes.vertical };
+        if (!self.bars.vertical) {
+            if (self.press == .thumb) self.press = .none;
+            self.bar_hovered = false;
+        }
+    }
+    /// Whether the pointer at `local` takes the vertical bar: it shows and
+    /// there is somewhere to scroll.
+    fn overBar(self: *const Core, local: Point) bool {
+        if (!self.bars.vertical or self.maxScroll() <= 0) return false;
+        return bodyBar(self, .{ .x = 0, .y = 0, .width = self.bounds.width, .height = self.bounds.height }, self.scroll_y).hit(local);
+    }
     /// Notes whether the pointer at `local` is over the vertical scroll
     /// bar, which shows hovered; true when that changed.
     fn hoverBar(self: *Core, local: ?Point) bool {
-        const over = if (local) |at| bodyBar(self, .{ .x = 0, .y = 0, .width = self.bounds.width, .height = self.bounds.height }, self.scroll_y).hit(at) else false;
+        const over = if (local) |at| self.bars.vertical and bodyBar(self, .{ .x = 0, .y = 0, .width = self.bounds.width, .height = self.bounds.height }, self.scroll_y).hit(at) else false;
         defer self.bar_hovered = over;
         return over != self.bar_hovered;
     }
@@ -1096,9 +1114,13 @@ fn paintScrollIndicators(frame: *ui.Frame, core: *Core, origin: Rect, content_wi
     core.bar_style = frame.scrollbarStyle();
     const color = ui.Color.rgb(palette.track);
     const dragging = core.press == .thumb;
-    const down = bodyBar(core, origin, core.scroll_y);
-    const over = if (core.hover_at) |at| down.hit(.{ .x = origin.x + at.x, .y = origin.y + at.y }) else false;
-    down.paintStyled(frame, color, .{ .dragging = dragging, .hovered = over });
+    // A hidden bar leaves the other where it is.
+    if (core.bars.vertical) {
+        const down = bodyBar(core, origin, core.scroll_y);
+        const over = if (core.hover_at) |at| down.hit(.{ .x = origin.x + at.x, .y = origin.y + at.y }) else false;
+        down.paintStyled(frame, color, .{ .dragging = dragging, .hovered = over });
+    }
+    if (!core.bars.horizontal) return;
     const body: Rect = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = view_width, .height = core.bodyHeight() };
     const across: ui.scroll.Bar = .{ .box = body, .axis = .horizontal, .view = view_width, .content = content_width, .offset = core.scroll_x, .style = core.bar_style };
     const over_across = if (core.hover_at) |at| across.hit(.{ .x = origin.x + at.x, .y = origin.y + at.y }) else false;
@@ -1924,7 +1946,7 @@ pub const TableState = struct {
         const mods = press.modifiers;
         core.pointer = point;
         // The scroll indicator drags.
-        if (core.maxScroll() > 0 and bodyBar(core, .{ .x = 0, .y = 0, .width = core.bounds.width, .height = core.bounds.height }, core.scroll_y).hit(point)) {
+        if (core.overBar(point)) {
             core.press = .{ .thumb = .{ .vertical = true, .start_scroll = core.scroll_y, .origin = point.y } };
             return true;
         }
@@ -2187,6 +2209,7 @@ fn buildTable(v: *View, state: *TableState, rows: Rows, options: TableOptions) E
     core.keep_offset = options.keep_offset;
     core.round_rows = options.round_rows;
     core.setName(options.style.name);
+    core.setBars(options.style);
     if (core.hover) |hover| if (hover >= rows.count) {
         core.hover = null;
     };
@@ -2777,6 +2800,7 @@ pub fn gridView(v: *View, state: *GridState, items: Rows, item: ItemSource, opti
     core.reorder = options.reorder;
     core.drag_rows = options.drag_rows;
     core.setName(options.style.name);
+    core.setBars(options.style);
     if (core.placed) state.layoutColumns(core.bounds.width);
     if (core.hover) |hover| if (hover >= items.count) {
         core.hover = null;

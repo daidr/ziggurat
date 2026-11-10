@@ -4459,6 +4459,17 @@ pub const Frame = struct {
         }
         return result;
     }
+    /// The part of what is drawn next that can show, in the coordinates it
+    /// is drawn in: the clips and groups open, and the frame, less the
+    /// offsets pushed. A view as tall as its content, in a scroll
+    /// container, draws only what this shows. Null under a transform, where
+    /// anything drawn may show.
+    pub fn visibleRect(self: *const Frame) ?Rect {
+        if (self.transforms != null) return null;
+        const window = self.sourceBounds();
+        const shown = if (self.clipBounds()) |clip| layout.intersect(clip, window) else window;
+        return .{ .x = shown.x - self.offset.x, .y = shown.y - self.offset.y, .width = shown.width, .height = shown.height };
+    }
     /// Visual isolation only: source bounds never become hit/semantic clipping.
     /// Parent visual clips are suspended while the body is recorded once.
     pub noinline fn gaussianScope(self: *Frame, bounds: Rect, kernel: gaussian.View, options: layers.Group, state: *anyopaque, body: *const fn (*anyopaque, *Frame) anyerror!void) anyerror!void {

@@ -484,8 +484,19 @@ pub const Style = struct {
     text_stroke: ?TextStroke = null,
     /// A scroll container shows its scroll indicator while its content
     /// overflows; false hides it, keeping the wheel, keys and assistive
-    /// technology scrolling, for a surface that draws its own.
+    /// technology scrolling, for a surface that draws its own. It hides
+    /// both axes whatever `scrollbar_axes` says.
     scrollbars: bool = true,
+    /// Which of a scroll container's two indicators show, with the
+    /// pointer's hold on them: a view that moves up and down by a control
+    /// of its own keeps the horizontal bar and hides the vertical one. A
+    /// hidden axis still scrolls by the wheel, the touchpad, the keys and
+    /// assistive technology; hiding the bar being dragged ends the drag
+    /// without pressing what is under it, and the other bar keeps its
+    /// place. It applies to `scroll` and to the tables, outlines and grid
+    /// views of `collections`, is not inherited, and a build that leaves
+    /// it out shows both again.
+    scrollbar_axes: ScrollbarAxes = .{},
     /// A scroll container's own scroll bar style, in place of the theme's
     /// (`Theme.scrollbar`): widths, corners, track and thumb colors.
     scrollbar_style: ?ui.scroll.Style = null,
@@ -636,6 +647,12 @@ pub const SnapAlign = enum { start, center, end };
 /// node along, and the next parent's comes up in its place, as a day's
 /// heading in a timeline is pushed out by the next. With both insets of
 /// an axis set and too little room for both, `top` and `left` win.
+/// The two scroll indicators of a container (`Style.scrollbar_axes`).
+pub const ScrollbarAxes = struct {
+    horizontal: bool = true,
+    vertical: bool = true,
+};
+
 pub const Sticky = struct {
     top: ?f32 = null,
     right: ?f32 = null,
@@ -8632,7 +8649,7 @@ pub const View = struct {
     }
     fn paintScrollIndicator(node: *const Node, target: anytype, theme: Theme, pointer: ?Point) void {
         const model = node.scroll orelse return;
-        if (!node.style.scrollbars) return;
+        if (!node.style.scrollbars or !node.style.scrollbar_axes.vertical) return;
         const b = node.bounds;
         if (b.width < 8 or b.height < 8) return;
         // Right to left, the indicator runs along the left edge; it takes

@@ -238,6 +238,9 @@ pub fn arrange(bounds: Rect, options: Options, items: []const Item, output: []Re
     var lengths: [max_items]f64 = undefined;
     var minimums: [max_items]f64 = undefined;
     var maximums: [max_items]f64 = undefined;
+    // The cross size does not follow the main size, so the first walk finds
+    // it, and the walk that places the items resolves none again.
+    var crosses: [max_items]f64 = undefined;
     const gaps = if (items.len > 1) @as(f64, options.gap) * @as(f64, @floatFromInt(items.len - 1)) else 0;
     var total = gaps;
     var baseline: f64 = 0;
@@ -248,6 +251,8 @@ pub fn arrange(bounds: Rect, options: Options, items: []const Item, output: []Re
         lengths[index] = value.preferred;
         total += lengths[index];
         if (item.baseline) |offset| baseline = @max(baseline, offset);
+        const alignment = item.alignment orelse options.alignment;
+        crosses[index] = if (item.baseline != null) value.cross_preferred else std.math.clamp(if (alignment == .stretch) cross_available else value.cross_preferred, value.cross_minimum, value.cross_maximum);
     }
     distribute(items, minimums[0..items.len], maximums[0..items.len], lengths[0..items.len], @abs(available - total), available >= total);
     total = gaps;
@@ -268,9 +273,8 @@ pub fn arrange(bounds: Rect, options: Options, items: []const Item, output: []Re
     var main_extent: f64 = 0;
     var pending: [max_items]Rect = undefined;
     for (items, 0..) |item, index| {
-        const value = try resolve(options.axis, item, available);
         const alignment = item.alignment orelse options.alignment;
-        const cross = if (item.baseline != null) value.cross_preferred else std.math.clamp(if (alignment == .stretch) cross_available else value.cross_preferred, value.cross_minimum, value.cross_maximum);
+        const cross = crosses[index];
         const cross_free = @max(0, cross_available - cross);
         const cross_offset: f64 = if (item.baseline) |offset| baseline - offset else switch (alignment) {
             .center => cross_free / 2,
