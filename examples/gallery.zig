@@ -139,16 +139,16 @@ const Gallery = struct {
         if (try v.button("Press me", .{})) self.presses += 1;
         _ = try v.button("Disabled", .{ .enabled = false });
         if (try v.link("Reset count", .{ .enabled = self.presses != 0 })) self.presses = 0;
+        try v.end();
+        try v.textf("Pressed {d} times", .{self.presses}, .{ .color = muted });
         // A button joined to a menu of related actions.
-        const add = try v.splitButton("Add one", .{}, .{});
+        const add = try v.splitButton("Add one", .{}, .{ .self_align = .start });
         if (add.shown) {
             if (try v.menuItem("Add ten", .{}, .{})) self.presses += 10;
             if (try v.menuItem("Add a hundred", .{}, .{})) self.presses += 100;
         }
         try v.end();
         if (add.clicked) self.presses += 1;
-        try v.end();
-        try v.textf("Pressed {d} times", .{self.presses}, .{ .color = muted });
         try v.row(.{ .gap = 8, .alignment = .center });
         if (try v.navButton(.back, .{})) self.presses -|= 1;
         if (try v.navButton(.forward, .{})) self.presses += 1;
