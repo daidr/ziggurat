@@ -111,7 +111,25 @@ fn initialize() void {
         .environ = startup.environ.process_environ,
     });
     installed = threaded.io();
+    if (builtin.is_test) keepTestSignalHandlers();
     state.store(ready, .release);
+}
+
+/// The test runner gives each test its own `std.testing.io`, whose `init`
+/// installs the no-op SIGIO and SIGPIPE handlers a `Threaded` needs and whose
+/// `deinit` puts back what it found. When this process-wide instance first
+/// starts inside a test, that test's instance found the defaults, so its
+/// `deinit` would reset both signals to terminating the process while this
+/// instance lives on: a cancelation (SIGIO to a blocked worker) or a write to
+/// a closed pipe between tests then killed the whole test binary. The test's
+/// instance is made to restore the handlers this instance relies on instead.
+fn keepTestSignalHandlers() void {
+    const P = std.posix;
+    if (P.Sigaction == void) return;
+    const testing_io = &std.testing.io_instance;
+    if (!testing_io.have_signal_handler) return;
+    if (@TypeOf(testing_io.old_sig_io) != void) P.sigaction(.IO, null, &testing_io.old_sig_io);
+    if (@TypeOf(testing_io.old_sig_pipe) != void) P.sigaction(.PIPE, null, &testing_io.old_sig_pipe);
 }
 
 pub const Mutex = struct {
@@ -710,6 +728,14 @@ test "a bundle's main program names its .app directory" {
     try std.testing.expectEqual(@as(?[]const u8, null), appBundle("/usr/local/bin/demo"));
     try std.testing.expectEqual(@as(?[]const u8, null), appBundle("/opt/Demo/Contents/MacOS/demo"));
     try std.testing.expectEqual(@as(?[]const u8, null), appBundle("/Demo.app/MacOS/demo"));
+}
+
+test "the process-wide Io keeps its signal handlers past the test's own Io" {
+    _ = io();
+    if (std.posix.Sigaction == void) return error.SkipZigTest;
+    const testing_io = &std.testing.io_instance;
+    if (@TypeOf(testing_io.old_sig_io) != void) try std.testing.expect(testing_io.old_sig_io.handler.handler != std.posix.SIG.DFL);
+    if (@TypeOf(testing_io.old_sig_pipe) != void) try std.testing.expect(testing_io.old_sig_pipe.handler.handler != std.posix.SIG.DFL);
 }
 
 test "timers and clocks advance" {
