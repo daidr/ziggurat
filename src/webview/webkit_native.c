@@ -370,32 +370,33 @@ int zwk_auth_answer(void *call_pointer,const char *user,const char *password) {
     webkit_credential_free(credential);
     call->answered=TRUE; return ZWK_OK;
 }
-/* Without the app's handler a sign-in is canceled, and its load with it.
-   The handler's no is a sign-in without credentials: the server's refusal.
-   A client certificate challenge asks the app's handler when there is one;
-   WebKitGTK lists no certificates to offer, so it is canceled either way,
-   which ends the load as a cancellation (did-finish, not did-fail) and
-   never shows WebKitGTK's chooser. */
+/* Without the app's handler a challenge is WebKitGTK's: its sign-in dialog,
+   or its certificate chooser. The handler's no to a sign-in is a sign-in
+   without credentials: the server's refusal. A client certificate challenge
+   asks the handler, but WebKitGTK lists no certificates to offer, so a
+   handler can only refuse: the challenge is canceled, which ends the load as
+   a cancellation (did-finish, not did-fail). A page being torn down cancels. */
 static gboolean authentication(WebKitWebView *view,WebKitAuthenticationRequest *request,gpointer data) {
     (void)view; ZwkState *s=data; retain(s);
     const WebKitAuthenticationScheme scheme=webkit_authentication_request_get_scheme(request);
+    if (!live(s)) { webkit_authentication_request_cancel(request); release(s); return TRUE; }
     if (scheme==WEBKIT_AUTHENTICATION_SCHEME_CLIENT_CERTIFICATE_REQUESTED) {
-        if (live(s) && s->client_certificate) {
-            const char *host=webkit_authentication_request_get_host(request);
-            (void)s->client_certificate(s->owner,host?host:"",webkit_authentication_request_get_port(request),webkit_authentication_request_is_for_proxy(request)?1:0,NULL,0);
-        }
+        if (!s->client_certificate) { release(s); return FALSE; }
+        const char *host=webkit_authentication_request_get_host(request);
+        (void)s->client_certificate(s->owner,host?host:"",webkit_authentication_request_get_port(request),webkit_authentication_request_is_for_proxy(request)?1:0,NULL,0);
         webkit_authentication_request_cancel(request);
         release(s); return TRUE;
     }
     const gboolean http=scheme==WEBKIT_AUTHENTICATION_SCHEME_DEFAULT || scheme==WEBKIT_AUTHENTICATION_SCHEME_HTTP_BASIC || scheme==WEBKIT_AUTHENTICATION_SCHEME_HTTP_DIGEST ||
         scheme==WEBKIT_AUTHENTICATION_SCHEME_NTLM || scheme==WEBKIT_AUTHENTICATION_SCHEME_NEGOTIATE;
-    if (live(s) && s->auth && http) {
+    if (!s->auth || !http) { release(s); return FALSE; }
+    {
         AuthCall call={request,FALSE};
         const char *host=webkit_authentication_request_get_host(request),*realm=webkit_authentication_request_get_realm(request);
         s->auth(s->owner,host?host:"",webkit_authentication_request_get_port(request),realm?realm:"",(uint32_t)scheme,webkit_authentication_request_is_for_proxy(request)?1:0,&call);
         call.request=NULL;
         if (!call.answered) webkit_authentication_request_authenticate(request,NULL);
-    } else webkit_authentication_request_cancel(request);
+    }
     release(s); return TRUE;
 }
 /* WebKitGTK tells the page's certificate errors only: what it loads from

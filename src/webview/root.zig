@@ -495,12 +495,15 @@ pub const Options = struct {
     autoplay: Autoplay = .user_gesture,
     /// Answers the HTTP sign-ins (Basic, Digest, NTLM, Negotiate) of a
     /// remote page and what it loads, the server's or a proxy's. Without
-    /// it every sign-in is canceled; no engine's dialog ever shows.
+    /// it each platform keeps its own handling: WebView2's sign-in dialog on
+    /// Windows, WebKitGTK's on Linux, and on macOS no prompt (the page gets
+    /// the server's refusal).
     http_auth: ?AuthHandler = null,
     /// Chooses the TLS client certificate a server, or a proxy, asks for
     /// (mutual TLS) before it serves a remote page or something the page
-    /// loads, or refuses. Without it every such challenge is refused, as
-    /// with a refusal, and no engine's certificate dialog ever shows.
+    /// loads, or refuses. Without it each platform keeps its own handling:
+    /// WebView2's certificate dialog on Windows, WebKitGTK's certificate
+    /// chooser on Linux, and on macOS WebKit's, which never asks.
     client_certificates: ?ClientCertificateHandler = null,
     /// Decides about server certificates of a remote page that do not
     /// verify. Without it, or when it says no, the load fails.

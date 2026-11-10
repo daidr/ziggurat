@@ -108,10 +108,11 @@ typedef struct ZwkOptions {
     uint32_t gestures;
     /* 0 keeps a hidden page's timers and animations going. */
     uint32_t throttling;
-    /* NULL cancels every sign-in and fails every certificate error. */
+    /* NULL leaves sign-ins to the engine (WebKitGTK's dialog; WKWebView
+     * shows the server's refusal) and fails every certificate error. */
     ZwkAuth auth;
     ZwkCertificate certificate;
-    /* NULL refuses every client certificate challenge. */
+    /* NULL leaves client certificate challenges to the engine. */
     ZwkClientCertificateOffer client_certificate;
     /* 0 no menu, 1 the engine's, 2 context_offer changes it. */
     uint32_t context_menu;

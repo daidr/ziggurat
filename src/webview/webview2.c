@@ -1322,10 +1322,12 @@ HRESULT zwv_auth_answer(void *call_pointer,const WCHAR *user,const WCHAR *passwo
     if (SUCCEEDED(hr)) call->answered=TRUE;
     return hr;
 }
-/* Every sign-in is answered: WebView2's own dialog never shows. Without the
-   app's credentials the challenge is cancelled and the load ends failed on a blank page (WebView2 does not render the 401 body). */
+/* Without the app's handler a sign-in is WebView2's: its own dialog. With
+   it, a sign-in without the app's credentials is cancelled and the load ends
+   failed on a blank page (WebView2 does not render the 401 body). */
 static HRESULT STDMETHODCALLTYPE authentication_invoke(ICoreWebView2BasicAuthenticationRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2BasicAuthenticationRequestedEventArgs *args) {
     (void)sender; State *s=((AuthenticationHandler *)p)->state; retain(s);
+    if (!s->closed&&!s->auth) { release(s); return S_OK; }
     AuthCall call={args,FALSE};
     BOOL document=FALSE;
     if (!s->closed&&s->auth) {
@@ -1372,14 +1374,15 @@ static uint8_t *client_pem_der(const WCHAR *pem,size_t *length) {
     if (!n) { free(out);return NULL; }
     *length=n;return out;
 }
-/* Without the app's handler every client certificate challenge is refused:
-   WebView2's certificate dialog never shows. With it, the app chooses one of
-   the mutually trusted certificates, or refuses as a user's dismissal of
-   the dialog does; a challenge with none to choose is refused too. The
+/* Without the app's handler a client certificate challenge is WebView2's:
+   its certificate dialog. With it, the app chooses one of the mutually
+   trusted certificates, or refuses as a user's dismissal of the dialog
+   does; a challenge with none to choose is refused too. The
    certificates the collection holds are alive until it is released, which
    is after the answer. */
 static HRESULT STDMETHODCALLTYPE certificate_invoke(ICoreWebView2ClientCertificateRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2ClientCertificateRequestedEventArgs *args) {
     (void)sender; State *s=((CertificateHandler *)p)->state; retain(s);
+    if (!s->closed&&!s->client_certificate) { release(s); return S_OK; }
     BOOL chosen=FALSE;
     if (!s->closed&&s->client_certificate) {
         enum { offer_limit=32 };
@@ -1426,10 +1429,7 @@ static HRESULT STDMETHODCALLTYPE certificate_invoke(ICoreWebView2ClientCertifica
         if (certificates) ICoreWebView2ClientCertificateCollection_Release(certificates);
         free(host);CoTaskMemFree(host_wide);
     }
-    if (!chosen) {
-        ICoreWebView2ClientCertificateRequestedEventArgs_put_Cancel(args,TRUE);
-        ICoreWebView2ClientCertificateRequestedEventArgs_put_Handled(args,TRUE);
-    }
+    if (!chosen) ICoreWebView2ClientCertificateRequestedEventArgs_put_Cancel(args,TRUE);
     release(s); return S_OK;
 }
 

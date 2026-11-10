@@ -1030,9 +1030,10 @@ static void capture_changed(ZwkPage *s,uint32_t device);
     resources_cancel_all(self);
     notify(self,8,nil,0,NULL);
 }
-/* Sign-ins and server certificates, as on Linux. Without the app's
- * handler a sign-in is canceled, and its load with it; the handler's no is
- * a sign-in without credentials, which gets the server's refusal. A
+/* Sign-ins, client and server certificates. Without the app's handler a
+ * challenge is WebKit's: no sign-in prompt (the server's refusal), no client
+ * certificate. The handler's no is a sign-in without credentials, which
+ * gets the server's refusal. A
  * certificate that does not verify fails its load unless the app's handler
  * allows it for a remote page; then it is the page's for its host. */
 - (void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition,NSURLCredential *))completion {
@@ -1047,6 +1048,8 @@ static void capture_changed(ZwkPage *s,uint32_t device);
         if (error) CFRelease(error);
         NSData *der=certificate_der(trust);
         NSString *host=space.host.lowercaseString;
+        /* Without the app's handler the certificate is WebKit's, which fails the load. */
+        if (!certificate_fn && live(self)) { completion(NSURLSessionAuthChallengePerformDefaultHandling,nil); return; }
         if (!der.length || !host.length || !live(self) || !remote || !certificate_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
         NSArray *key=@[host,der];
         BOOL allowed=[allowed_certificates containsObject:key];
@@ -1067,14 +1070,18 @@ static void capture_changed(ZwkPage *s,uint32_t device);
         return;
     }
     if ([method isEqualToString:NSURLAuthenticationMethodClientCertificate]) {
-        /* Without the app's handler the challenge is canceled and the
-         * keychain is never asked. */
-        if (!live(self) || !remote || !client_certificate_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+        /* Without the app's handler the challenge is WebKit's, which never
+         * asks, and the keychain is left alone. */
+        if (live(self) && !client_certificate_fn) { completion(NSURLSessionAuthChallengePerformDefaultHandling,nil); return; }
+        if (!live(self) || !remote) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
         client_certificate_challenge(self,space,client_certificate_fn,owner,completion);
         return;
     }
     const uint32_t scheme=auth_scheme(method);
-    if (!scheme || !live(self) || !auth_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+    if (!live(self)) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+    /* Without the app's handler, or for a method that is no sign-in, the
+     * challenge is WebKit's: no prompt, the page gets the server's refusal. */
+    if (!scheme || !auth_fn) { completion(NSURLSessionAuthChallengePerformDefaultHandling,nil); return; }
     ZwkAuthCall call={NULL,NO};
     const char *host=space.host.UTF8String, *realm=space.realm.UTF8String;
     auth_fn(owner,host?host:"",(uint32_t)MAX(space.port,0),realm?realm:"",scheme,space.isProxy?1:0,&call);
