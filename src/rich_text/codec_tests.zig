@@ -9,7 +9,7 @@ const Paragraph = rt.Paragraph;
 const Run = rt.Run;
 const gpa = testing.allocator;
 
-/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
 /// the Markdown round trip then reads back 600 random texts instead of 3000.
 fn quick() bool {
     return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");

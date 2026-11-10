@@ -605,16 +605,14 @@ pub fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
 /// The runs of every addSmokeExecutable, for configurePullRequestRuns.
 var smoke_runs: std.ArrayList(struct { run: *std.Build.Step.Run, exe: *std.Build.Step.Compile, install: *std.Build.Step }) = .empty;
 
-/// Options for pull request checks, which run often and need to finish fast.
-/// `cache_smokes` runs a smoke only when its executable changed: without
+/// For pull request checks, which run often and need to finish fast: with
+/// `cache_smokes` a smoke runs only when its executable changed. Without
 /// passthrough arguments and with its exit code checked, Zig caches the run
 /// like a test's (its standard output is dropped, standard error is still
 /// printed). Such a smoke runs the executable in the cache, not its installed
 /// copy: a fresh checkout installs a new copy, and a run whose input file was
-/// written again is never cached. `quick_tests` sets ZIGGURAT_QUICK_TESTS for every test run, so
-/// the long randomized and exhaustive tests take a shorter path; the nightly
-/// and full-ci runs leave both off.
-pub fn configurePullRequestRuns(b: *std.Build, cache_smokes: bool, quick_tests: bool) void {
+/// written again is never cached.
+pub fn configurePullRequestRuns(cache_smokes: bool) void {
     if (cache_smokes) for (smoke_runs.items) |smoke| {
         const run = smoke.run;
         var index: usize = 0;
@@ -636,15 +634,6 @@ pub fn configurePullRequestRuns(b: *std.Build, cache_smokes: bool, quick_tests: 
         };
         run.expectExitCode(0);
     };
-    if (!quick_tests) return;
-    var steps: std.array_hash_map.Auto(*std.Build.Step, void) = .empty;
-    var it = b.top_level_steps.iterator();
-    while (it.next()) |entry| collectSteps(b, &steps, &entry.value_ptr.*.step);
-    for (steps.keys()) |step| {
-        const run = step.cast(std.Build.Step.Run) orelse continue;
-        const producer = run.producer orelse continue;
-        if (producer.kind == .@"test") run.setEnvironmentVariable("ZIGGURAT_QUICK_TESTS", "1");
-    }
 }
 
 /// b.addTest with build_support/macos_test_runner.zig on macOS targets.

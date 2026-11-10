@@ -5,7 +5,7 @@ const testing = std.testing;
 const Text = rt.Text;
 const Attributes = rt.Attributes;
 
-/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
 /// the random edit test then runs 60 seeds instead of 300.
 fn quick() bool {
     return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");

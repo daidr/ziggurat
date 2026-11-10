@@ -10,7 +10,7 @@ const aac = @import("aac.zig");
 const rate = 44100;
 const length = 22050;
 
-/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
 /// the corruption test then damages each file 10 times instead of 40.
 fn quick() bool {
     return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");

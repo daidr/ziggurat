@@ -4,7 +4,7 @@ const tree = @import("tree.zig");
 const z = @import("ziggurat");
 const testing = std.testing;
 
-/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
 /// the long random walks then check their full oracle less often. Nightly
 /// and full-ci runs check it at every interval.
 fn quick() bool {

@@ -13,7 +13,7 @@ const ramp_frames = mixer.ramp_frames;
 const testing = std.testing;
 const allocator = testing.allocator;
 
-/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
 /// the pitch test then measures the first and the last of its cases.
 fn quick() bool {
     return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");

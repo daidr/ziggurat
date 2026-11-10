@@ -4,7 +4,7 @@ const v = @import("ziggurat_vector");
 const Mock = @import("text_adjust_test.zig").Mock;
 const Mode = @TypeOf((svg.PrepareOptions{ .main_thread = 0, .width = 1, .height = 1 }).compositing);
 
-/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
 /// the cancellation test then cancels at every fourth scratch free and the
 /// last one, instead of at each.
 fn quick() bool {

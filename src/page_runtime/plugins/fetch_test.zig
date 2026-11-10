@@ -7,7 +7,7 @@ const TestServer = net.fetch_api.TestServer;
 const allocator = std.testing.allocator;
 const service = "plugin:fetch";
 
-/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// Pull request CI sets ZIGGURAT_QUICK_TESTS:
 /// the streamed body is then a sixth as long, still several times the credit.
 fn quick() bool {
     return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");

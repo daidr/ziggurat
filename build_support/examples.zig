@@ -66,7 +66,10 @@ pub fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     if (target.result.os.tag != .windows and target.result.os.tag != .linux and target.result.os.tag != .macos and target.result.cpu.arch != .wasm32) return;
     const all = b.step("examples", "Compile every application example");
     const tests = b.step("test-examples", "Run the headless view tests inside the application examples");
-    b.top_level_steps.get("test").?.step.dependOn(tests);
+    // Windows pull request checks leave these out of `test`: they are the same
+    // headless tests on every platform, and Linux and macOS run them.
+    if (b.option(bool, "example-tests", "Include the examples' headless view tests in `test` (default true)") orelse true)
+        b.top_level_steps.get("test").?.step.dependOn(tests);
     var imports: [app_example_imports.len + 1]std.Build.Module.Import = undefined;
     // Browsers have fewer modules: an example is built for them when it is
     // listed in `web_examples`, with the modules there are.
