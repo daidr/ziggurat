@@ -24,14 +24,16 @@ hint）、行尾的诊断或 blame（trailing），以及光标后由模型给�
 同一字节上 hint 在前、trailing/建议在后，caret 正好在两者之间。点在提示文字上的
 任何位置都落在它所在的源字节。
 
-行内文字跟着编辑移动：经由编辑器的替换、多选区编辑、输入法提交和 undo/redo
-都按改动映射位置。在行内文字所在字节输入的文字放在它之前（提示跟到新文字后面），
-被替换掉的范围里的行内文字移到替换文字的末尾；undo 把它们按同一组改动移回。
-`setInlays` 仍以 committed 正文版本为前提；编辑器不知道改动内容的变化（宿主直接
-改 Document、restore、undo 历史已丢失）让集合过期，`status().inlays_required`
-提示宿主为新版本重新设置。只改选区保留集合。composition 期间与密码遮罩时不显示
-任何行内文字。这与 [区间标记](./editor-range-markers.md) 不同：区间标记在正文
-改变时一律过期，需要按新版本重新计算。
+行内文字跟着编辑移动：它们按 Document 的 [改动日志](./document.md#改动日志与位置映射)
+（`mapOffset(…, .right)`）映射到当前文本，所以不论改动来自编辑器、输入法、
+undo/redo 还是宿主直接修改 Document 都会跟随。在行内文字所在字节输入的文字放在
+它之前（提示跟到新文字后面），被替换掉的范围里的行内文字移到替换文字的末尾。
+`setInlays` 的 `expected_text_version` 可以是较早的版本（例如迟到的语言服务结果），
+集合会先映射到当前文本。日志不再覆盖其版本（被淘汰或 restore 之后）时集合过期，
+`status().inlays_required` 提示宿主重新设置；这时 `setInlays` 对该旧版本返回
+`StaleRevision`。只改选区保留集合。composition 期间与密码遮罩时不显示任何行内
+文字。这与 [区间标记](./editor-range-markers.md) 不同：区间标记在正文改变时一律
+过期，需要按新版本重新计算（参考框架同样如此）。
 返回 `InlayResult{version,current}`，`current=false` 表示发布后编辑器又变了。
 
 ## 建议
@@ -55,4 +57,4 @@ generation，重新 shape 可见批次；没有行内文字时与原来完全一
 
 `smoke-editor-range-markers` 检查真实系统布局下提示后与行尾前的 caret 位置、
 选到行尾不覆盖 trailing、在提示文字上的命中、方向键跨过提示、淡色绘制、Tab 接受
-建议、编辑与 undo 时跟随移动、外部改动后过期，以及 caret 移动时建议消失。
+建议、编辑、undo 与宿主直接修改时跟随移动、按旧版本设置时映射、restore 后过期，以及 caret 移动时建议消失。

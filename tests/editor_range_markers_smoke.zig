@@ -608,15 +608,32 @@ fn inlays(allocator: std.mem.Allocator, engine: *t.Engine) !void {
     defer typed.close() catch unreachable;
     try std.testing.expect(near((try adapter.positionRect(try document.version(), 7, .downstream)).?.x - origin, (try typed.caret(.{ .byte_offset = 12 })).x));
     _ = try adapter.undo();
-    // An edit the editor did not make leaves them stale: none are shown
-    // until they are set again.
-    try document.replace(.{ .start = 0, .end = 1 }, "l");
+    // An edit the editor did not make moves them too, through the
+    // Document's journal, and inlays of an older version move to the text now.
+    try document.replace(.{ .start = 0, .end = 0 }, "ab");
+    _ = try adapter.prepare(wide, parameters);
+    try std.testing.expect(!(try adapter.status()).inlays_required);
+    const shifted = (try adapter.positionRect(try document.version(), 0, .downstream)).?.x;
+    const prefixed = try engine.layout("ablet x: i32 = 1  blame\nnext\n", options);
+    defer prefixed.close() catch unreachable;
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 7, .downstream)).?.x - shifted, (try prefixed.caret(.{ .byte_offset = 12 })).x));
+    _ = try adapter.setInlays(stamp, &.{.{ .offset = 5, .text = ": i32" }});
+    _ = try adapter.prepare(wide, parameters);
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 7, .downstream)).?.x - shifted, (try prefixed.caret(.{ .byte_offset = 12 })).x));
+    // A restore's changes are unknown: the inlays stay stale until set again.
+    const saved = try document.snapshot();
+    defer saved.close() catch unreachable;
+    try document.replace(.{ .start = 0, .end = 2 }, "");
+    try document.restore(saved);
     _ = try adapter.prepare(wide, parameters);
     try std.testing.expect((try adapter.status()).inlays_required);
     const now = (try adapter.positionRect(try document.version(), 0, .downstream)).?.x;
-    try std.testing.expect(near((try adapter.positionRect(try document.version(), 5, .downstream)).?.x - now, (try plain.caret(.{ .byte_offset = 5 })).x));
+    const restored = try engine.layout("ablet x = 1\nnext\n", options);
+    defer restored.close() catch unreachable;
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 7, .downstream)).?.x - now, (try restored.caret(.{ .byte_offset = 7 })).x));
     try std.testing.expectError(error.StaleRevision, adapter.setInlays(stamp, &.{}));
     // A move of the caret drops a suggestion.
+    _ = try adapter.setSelection(.{ .anchor = 1, .caret = 1 }, .downstream);
     try adapter.setSuggestion(try document.version(), 1, "x");
     _ = try adapter.setSelection(.{ .anchor = 2, .caret = 2 }, .downstream);
     try std.testing.expect(try adapter.suggestion() == null);
