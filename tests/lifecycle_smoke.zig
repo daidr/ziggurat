@@ -127,7 +127,10 @@ fn checkLifecycle(allocator: std.mem.Allocator) !void {
     _ = c.GdiFlush();
     const base_gdi = c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS);
     const base_user = c.GetGuiResources(c.GetCurrentProcess(), c.GR_USEROBJECTS);
-    for (0..1000) |_| {
+    // Pull request CI sets ZIGGURAT_QUICK_TESTS: a leak of one object a
+    // window shows in 200 windows as well.
+    const windows: usize = if (zio.environ().containsConstant("ZIGGURAT_QUICK_TESTS")) 200 else 1000;
+    for (0..windows) |_| {
         try probe.attach(app);
         probe.paint();
         _ = try stale.destroy();
@@ -142,7 +145,7 @@ fn checkLifecycle(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(base_user, end_user);
     try std.testing.expectEqual(1, app.resourceStats().registry_slots);
     try std.testing.expectEqual(0, app.resourceStats().pending_destroys);
-    std.debug.print("lifecycle smoke passed: 1000 painted windows; records=0 slots=1 GDI {d}->{d}, USER {d}->{d}\n", .{ base_gdi, end_gdi, base_user, end_user });
+    std.debug.print("lifecycle smoke passed: {d} painted windows; records=0 slots=1 GDI {d}->{d}, USER {d}->{d}\n", .{ windows, base_gdi, end_gdi, base_user, end_user });
 }
 
 fn checkNativeQuitReentrancy(allocator: std.mem.Allocator) !void {
