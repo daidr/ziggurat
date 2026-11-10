@@ -28,6 +28,7 @@ pub const TokenStyle = theme.TokenStyle;
 pub const Highlighter = highlighter.Highlighter;
 pub const SourceLine = highlighter.SourceLine;
 pub const forFile = languages.forFile;
+pub const forText = languages.forText;
 pub const named = languages.named;
 
 /// What a token of code is, which a theme colors.

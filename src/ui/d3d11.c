@@ -7,10 +7,12 @@
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <dxgi1_3.h>
+#include <dxgi1_5.h>
 #include <d2d1_1.h>
 #include <dwrite.h>
 #include <dwrite_1.h>
 #include <stdlib.h>
+#include "pacing.h"
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
@@ -52,6 +54,11 @@ typedef struct State {
     IDXGISwapChain1 *swapchain;
     IDXGISwapChain2 *swapchain2;
     HANDLE frame_ready;
+    /* Uncapped (ZIGGURAT_UNCAPPED): the swap chain's buffers and flags, and
+       whether its frames may show torn (DXGI_FEATURE_PRESENT_ALLOW_TEARING),
+       which only a swap chain of a window's own does. */
+    UINT buffers, swap_flags;
+    int tearing;
     ID2D1Bitmap1 *target;
     /* The window's kept frame: a frame drawn while keep_plane is set draws
        into it, only where it changed when plane_valid says it holds the
@@ -533,6 +540,23 @@ static HRESULT create_swapchain(State *s, UINT width, UINT height) {
     desc.BufferCount = 2; desc.Scaling = DXGI_SCALING_STRETCH;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; desc.AlphaMode = s->composed ? DXGI_ALPHA_MODE_PREMULTIPLIED : DXGI_ALPHA_MODE_IGNORE;
     desc.Flags=DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    /* Uncapped, frames present with sync interval 0 into three buffers, and
+       where DXGI allows it, torn rather than at the next composition: the
+       next frame starts as soon as the last was presented. */
+    s->tearing=0;
+    if (zpacing_uncapped()) {
+        desc.BufferCount = 3;
+        IDXGIFactory5 *factory5 = NULL;
+        BOOL allow = FALSE;
+        if (!s->composed && SUCCEEDED(IDXGIFactory2_QueryInterface(factory, &IID_IDXGIFactory5, (void **)&factory5)) && factory5) {
+            if (SUCCEEDED(IDXGIFactory5_CheckFeatureSupport(factory5, DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow, sizeof allow)) && allow) {
+                desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+                s->tearing = 1;
+            }
+            IDXGIFactory5_Release(factory5);
+        }
+    }
+    s->buffers = desc.BufferCount; s->swap_flags = desc.Flags;
     if (s->composed) {
         /* A window without a redirection bitmap shows its material where the
            composed frames are transparent. */
@@ -559,7 +583,7 @@ static HRESULT create_swapchain(State *s, UINT width, UINT height) {
     }
     hr=IDXGISwapChain1_QueryInterface(s->swapchain,&IID_IDXGISwapChain2,(void **)&s->swapchain2); OWN(s->swapchain2);
     if (FAILED(hr)) goto done;
-    hr=IDXGISwapChain2_SetMaximumFrameLatency(s->swapchain2,1);
+    hr=IDXGISwapChain2_SetMaximumFrameLatency(s->swapchain2,zpacing_uncapped()?2:1);
     if (FAILED(hr)) goto done;
     s->frame_ready=IDXGISwapChain2_GetFrameLatencyWaitableObject(s->swapchain2);
     if (!s->frame_ready) {hr=E_FAIL;goto done;}
@@ -595,7 +619,7 @@ HRESULT zgpu_begin_composed(State *s, HWND hwnd, UINT width, UINT height, FLOAT 
     } else if (s->width != width || s->height != height) {
         release_target(s);
         if (s->fault == 2) { s->fault = 0; return failure(s, DXGI_ERROR_DEVICE_REMOVED); }
-        hr = IDXGISwapChain1_ResizeBuffers(s->swapchain, 2, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+        hr = IDXGISwapChain1_ResizeBuffers(s->swapchain, s->buffers ? s->buffers : 2, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, s->swap_flags ? s->swap_flags : DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
         if (FAILED(hr)) return failure(s, hr);
         s->width = width; s->height = height; s->resizes++;
     }
@@ -1052,7 +1076,7 @@ static HRESULT end_frame(State *s,int offscreen) {
     if(from_plane){hr=plane_copy_window(s);if(FAILED(hr))return failure(s,hr);}
     BOOL was_visible=(GetWindowLongW(s->surface,GWL_STYLE)&WS_VISIBLE)!=0;
     if (!was_visible) ShowWindow(s->surface, SW_SHOWNOACTIVATE);
-    hr = IDXGISwapChain1_Present(s->swapchain, 0, DXGI_PRESENT_DO_NOT_WAIT);
+    hr = IDXGISwapChain1_Present(s->swapchain, 0, DXGI_PRESENT_DO_NOT_WAIT | (s->tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
     if (FAILED(hr)) {
         gpu_layer_abort_metadata(s);
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {

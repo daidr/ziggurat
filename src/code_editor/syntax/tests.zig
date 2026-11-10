@@ -298,8 +298,153 @@ test "lines restarting start in state 0 whatever the line before ends in, and mo
     try std.testing.expectEqual(TokenKind.variable, tokens[0].kind);
     // A line inserted above moves the restart; one replacing it drops it.
     try highlighter.edit(0, 0, 1);
-    try std.testing.expectEqualSlices(usize, &.{ 0, 3 }, highlighter.restarts.items);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3 }, highlighter.restartLines());
     try highlighter.edit(2, 3, 2);
-    try std.testing.expectEqualSlices(usize, &.{0}, highlighter.restarts.items);
+    try std.testing.expectEqualSlices(usize, &.{0}, highlighter.restartLines());
     try std.testing.expectError(error.InvalidValue, highlighter.setRestarts(&.{ 2, 1 }));
+}
+
+test "a script's language is found by its #! line when its name tells nothing" {
+    try std.testing.expectEqualStrings("python", languages.shebangInterpreter("#!/usr/bin/python3.12\nprint()"));
+    try std.testing.expectEqualStrings("ruby", languages.shebangInterpreter("#!/usr/bin/env -S RUBYOPT=-W0 ruby -w"));
+    try std.testing.expectEqualStrings("bash", languages.shebangInterpreter("#!/bin/bash -e"));
+    try std.testing.expectEqualStrings("", languages.shebangInterpreter("# not a script"));
+    try std.testing.expectEqualStrings("", languages.shebangInterpreter("#!"));
+    const scripts = [_]struct { []const u8, []const u8, *const syntax.Language }{
+        .{ "bin/rails", "#!/usr/bin/env ruby\nrequire_relative '../config/boot'", &languages.ruby },
+        .{ "bin/setup", "#!/bin/sh\nset -e", &languages.shell },
+        .{ "run", "#!/usr/bin/env node\n", &languages.javascript },
+        .{ "tool", "#!/usr/bin/env -S deno run\n", &languages.typescript },
+        .{ "plot", "#!/usr/bin/Rscript\n", &languages.r },
+        .{ "build", "#!/usr/bin/make -f\n", &languages.makefile },
+        // The name wins over the #! line.
+        .{ "main.go", "#!/usr/bin/env python3\n", &languages.go },
+    };
+    for (scripts) |script| try std.testing.expectEqual(script[2], syntax.forText(script[0], script[1]).?);
+    try std.testing.expectEqual(@as(?*const syntax.Language, null), syntax.forText("notes", "plain"));
+    try std.testing.expectEqual(@as(?*const syntax.Language, null), syntax.forText("notes", "#!/usr/bin/env klingon"));
+    try std.testing.expectEqual(&languages.ruby, syntax.forFile("user.rbs").?);
+}
+
+test "ERB and Jinja templates lex their code in tags over the text around them" {
+    // ERB's Ruby in tags, in attribute values and across lines, its
+    // comments, and the HTML around them.
+    var state = try expectRuns(&languages.erb, "<p class=\"<%= cls %>\"><% if x -%>", 0, &.{
+        .{ "<", .punctuation }, .{ "p", .tag },     .{ "class", .attribute }, .{ "=", .operator }, .{ "\"", .string },  .{ "<%=", .meta },   .{ "cls", .variable },
+        .{ "%>", .meta },       .{ "\"", .string }, .{ ">", .punctuation },   .{ "<%", .meta },    .{ "if", .keyword }, .{ "x", .variable }, .{ "-%>", .meta },
+    });
+    state = try expectRuns(&languages.erb, "<%# a", state, &.{.{ "<%# a", .comment }});
+    try std.testing.expect(state != 0);
+    state = try expectRuns(&languages.erb, "b %><%= link_to \"a\",", state, &.{ .{ "b %>", .comment }, .{ "<%=", .meta }, .{ "link_to", .variable }, .{ "\"a\"", .string }, .{ ",", .punctuation } });
+    state = try expectRuns(&languages.erb, "  root_path %></p>", state, &.{ .{ "root_path", .variable }, .{ "%>", .meta }, .{ "</", .punctuation }, .{ "p", .tag }, .{ ">", .punctuation } });
+    try std.testing.expectEqual(@as(u64, 0), state);
+    // ERB's <%% is a literal <%, opening no tag.
+    _ = try expectRuns(&languages.erb, "<p><%% x %></p><%= y %>", 0, &.{
+        .{ "<", .punctuation }, .{ "p", .tag }, .{ ">", .punctuation }, .{ "<%% x %>", .text }, .{ "</", .punctuation }, .{ "p", .tag }, .{ ">", .punctuation }, .{ "<%=", .meta }, .{ "y", .variable }, .{ "%>", .meta },
+    });
+    // Jinja's expressions, statements with whitespace control, comments
+    // over lines, and the plain text around them.
+    state = try expectRuns(&languages.jinja, "ExecStart={{ script | default('/bin/x') }}", 0, &.{
+        .{ "ExecStart=", .text }, .{ "{{", .meta }, .{ "script", .variable }, .{ "|", .operator }, .{ "default", .function }, .{ "(", .punctuation }, .{ "'/bin/x'", .string }, .{ ")", .punctuation }, .{ "}}", .meta },
+    });
+    state = try expectRuns(&languages.jinja, "{%- for r in rules if r.port > 0 +%}", state, &.{
+        .{ "{%-", .meta },      .{ "for", .keyword },   .{ "r", .variable }, .{ "in", .keyword }, .{ "rules", .variable }, .{ "if", .keyword }, .{ "r", .variable },
+        .{ ".", .punctuation }, .{ "port", .property }, .{ ">", .operator }, .{ "0", .number },   .{ "+%}", .meta },
+    });
+    state = try expectRuns(&languages.jinja, "{# a", state, &.{.{ "{# a", .comment }});
+    state = try expectRuns(&languages.jinja, "b #}x{{ none }}", state, &.{ .{ "b #}", .comment }, .{ "x", .text }, .{ "{{", .meta }, .{ "none", .constant }, .{ "}}", .meta } });
+    try std.testing.expectEqual(@as(u64, 0), state);
+    const files = [_]struct { []const u8, *const syntax.Language }{ .{ "show.html.erb", &languages.erb }, .{ "model.rb.tt", &languages.erb }, .{ "nginx.conf.j2", &languages.jinja }, .{ "page.jinja2", &languages.jinja } };
+    for (files) |file| try std.testing.expectEqual(file[1], syntax.forFile(file[0]).?);
+    const names = [_]struct { []const u8, *const syntax.Language }{ .{ "erb", &languages.erb }, .{ "ERB", &languages.erb }, .{ "eruby", &languages.erb }, .{ "jinja", &languages.jinja }, .{ "Jinja", &languages.jinja }, .{ "jinja2", &languages.jinja }, .{ "j2", &languages.jinja } };
+    for (names) |name| try std.testing.expectEqual(name[1], syntax.named(name[0]).?);
+    try std.testing.expectEqualStrings("", languages.jinja.line_comment);
+    try std.testing.expectEqualStrings("{#", languages.jinja.block_comment[0]);
+    try std.testing.expectEqualStrings("#}", languages.jinja.block_comment[1]);
+}
+
+test "Svelte lexes expressions, blocks and TypeScript scripts in its markup" {
+    // Expressions in text, tags and values, and its blocks.
+    _ = try expectRuns(&languages.svelte, "<p class=\"a {b}\" {c}>{#if x > 1}{y}{/if}</p>", 0, &.{
+        .{ "<", .punctuation }, .{ "p", .tag },         .{ "class", .attribute }, .{ "=", .operator }, .{ "\"a ", .string },     .{ "{", .punctuation }, .{ "b", .variable },
+        .{ "}", .punctuation }, .{ "\"", .string },     .{ "{", .punctuation },   .{ "c", .variable }, .{ "}>{", .punctuation }, .{ "#if", .keyword },   .{ "x", .variable },
+        .{ ">", .operator },    .{ "1", .number },      .{ "}{", .punctuation },  .{ "y", .variable }, .{ "}{", .punctuation },  .{ "/if", .keyword },   .{ "}</", .punctuation },
+        .{ "p", .tag },         .{ ">", .punctuation },
+    });
+    var state = try expectRuns(&languages.svelte, "{fn({a: 1,", 0, &.{ .{ "{", .punctuation }, .{ "fn", .function }, .{ "({", .punctuation }, .{ "a", .variable }, .{ ":", .operator }, .{ "1", .number }, .{ ",", .punctuation } });
+    try std.testing.expect(state != 0);
+    state = try expectRuns(&languages.svelte, "b})}<i>", state, &.{ .{ "b", .variable }, .{ "})}<", .punctuation }, .{ "i", .tag }, .{ ">", .punctuation } });
+    state = try expectRuns(&languages.svelte, "<script lang=\"ts\">let x: number</script>", state, &.{
+        .{ "<", .punctuation }, .{ "script", .tag }, .{ "lang", .attribute }, .{ "=", .operator },     .{ "\"ts\"", .string }, .{ ">", .punctuation }, .{ "let", .keyword },
+        .{ "x", .variable },    .{ ":", .operator }, .{ "number", .type },    .{ "</", .punctuation }, .{ "script", .tag },    .{ ">", .punctuation },
+    });
+    try std.testing.expectEqual(@as(u64, 0), state);
+    // A line whose expressions all close leaves the state of plain text.
+    for ([_][]const u8{ "<p class=\"a {b}\">", "<p class='a {b}'>", "<p {c}>", "{x}", "<p>{#if a}{b}{/if}</p>" }) |line| {
+        var buffer: [64]Token = undefined;
+        try std.testing.expectEqual(@as(u64, 0), syntax.tokenizeLine(languages.svelte.tokenizer.?, line, 0, &buffer).state);
+    }
+    // HTML's braces are text.
+    _ = try expectRuns(&languages.html, "<p>{x}</p>", 0, &.{ .{ "<", .punctuation }, .{ "p", .tag }, .{ ">", .punctuation }, .{ "{x}", .text }, .{ "</", .punctuation }, .{ "p", .tag }, .{ ">", .punctuation } });
+    try std.testing.expectEqual(&languages.svelte, syntax.forFile("App.svelte").?);
+    try std.testing.expectEqual(&languages.html, syntax.forFile("x.vue").?);
+}
+
+test "HCL lexes blocks, attributes, interpolations, comments and heredocs" {
+    var state = try expectRuns(&languages.hcl, "resource \"aws_s3_bucket\" \"b\" {", 0, &.{ .{ "resource", .keyword }, .{ "\"aws_s3_bucket\"", .string }, .{ "\"b\"", .string }, .{ "{", .punctuation } });
+    state = try expectRuns(&languages.hcl, "  count = var.n > 0 ? 1 : 0 # c", state, &.{
+        .{ "count", .property }, .{ "=", .operator }, .{ "var", .variable }, .{ ".", .punctuation }, .{ "n", .property },  .{ ">", .operator }, .{ "0", .number },
+        .{ "?", .operator },     .{ "1", .number },   .{ ":", .operator },   .{ "0", .number },      .{ "# c", .comment },
+    });
+    state = try expectRuns(&languages.hcl, "  tags = { Name = \"x-${var.env}\" } // d", state, &.{
+        .{ "tags", .property }, .{ "=", .operator },    .{ "{", .punctuation }, .{ "Name", .property }, .{ "=", .operator }, .{ "\"x-", .string },   .{ "${", .escape },
+        .{ "var", .variable },  .{ ".", .punctuation }, .{ "env", .property },  .{ "}", .escape },      .{ "\"", .string },  .{ "}", .punctuation }, .{ "// d", .comment },
+    });
+    state = try expectRuns(&languages.hcl, "  policy = <<-EOT", state, &.{ .{ "policy", .property }, .{ "=", .operator }, .{ "<<-EOT", .string } });
+    try std.testing.expect(state != 0);
+    state = try expectRuns(&languages.hcl, "    {\"a\": \"${b}\"}", state, &.{.{ "    {\"a\": \"${b}\"}", .string }});
+    state = try expectRuns(&languages.hcl, "  EOT", state, &.{.{ "  EOT", .string }});
+    try std.testing.expectEqual(@as(u64, 0), state);
+    state = try expectRuns(&languages.hcl, "  type = list(string) /* e */", state, &.{ .{ "type", .property }, .{ "=", .operator }, .{ "list", .type }, .{ "(", .punctuation }, .{ "string", .type }, .{ ")", .punctuation }, .{ "/* e */", .comment } });
+    // A block word before a dot names a value, like var.
+    _ = try expectRuns(&languages.hcl, "  id = data.z.a.id", 0, &.{
+        .{ "id", .property }, .{ "=", .operator }, .{ "data", .variable }, .{ ".", .punctuation }, .{ "z", .property }, .{ ".", .punctuation }, .{ "a", .property }, .{ ".", .punctuation }, .{ "id", .property },
+    });
+    _ = try expectRuns(&languages.hcl, "  x = module.m.out", 0, &.{ .{ "x", .property }, .{ "=", .operator }, .{ "module", .variable }, .{ ".", .punctuation }, .{ "m", .property }, .{ ".", .punctuation }, .{ "out", .property } });
+    // A heredoc's opener in a string or comment opens none.
+    try std.testing.expectEqual(@as(u64, 0), try expectRuns(&languages.hcl, "a = \"<<EOT\"", 0, &.{ .{ "a", .property }, .{ "=", .operator }, .{ "\"<<EOT\"", .string } }));
+    try std.testing.expectEqual(@as(u64, 0), try expectRuns(&languages.hcl, "b = 1 # <<EOT", 0, &.{ .{ "b", .property }, .{ "=", .operator }, .{ "1", .number }, .{ "# <<EOT", .comment } }));
+    const files = [_][]const u8{ "main.tf", "prod.tfvars", "config.hcl" };
+    for (files) |file| try std.testing.expectEqual(&languages.hcl, syntax.forFile(file).?);
+    for ([_][]const u8{ "hcl", "terraform", "tf", "tfvars" }) |name| try std.testing.expectEqual(&languages.hcl, syntax.named(name).?);
+    try std.testing.expectEqualStrings("#", languages.hcl.line_comment);
+}
+
+test "the highlighter keeps within its budget when lines are long" {
+    const allocator = std.testing.allocator;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    // Lines of 8 KB, as minified JSON has, count as 32 lines each.
+    for (0..20) |_| {
+        try text.appendNTimes(allocator, 'a', 8 << 10);
+        try text.append(allocator, '\n');
+    }
+    // A line too long to color is not tokenized and counts as one; the
+    // line after it starts as it did.
+    try text.appendNTimes(allocator, '"', syntax.max_line + 1);
+    try text.appendSlice(allocator, "\nshort\n");
+    const source = syntax.highlighter.SliceLines{ .text = text.items };
+    var h = try syntax.Highlighter.init(allocator, languages.go.tokenizer.?);
+    defer h.deinit();
+    try std.testing.expect(!try h.highlight(source, 21, 64));
+    // The first line costs 33 of 64, the second goes past it.
+    try std.testing.expectEqual(@as(usize, 3), h.frontier);
+    while (!try h.highlight(source, 21, 64)) {}
+    try std.testing.expect(h.stateOf(21).final);
+    try std.testing.expectEqual(@as(u64, 0), h.stateOf(21).state);
+    // Short lines still cost one each.
+    var short = try syntax.Highlighter.init(allocator, languages.go.tokenizer.?);
+    defer short.deinit();
+    try std.testing.expect(!try short.highlight(syntax.highlighter.SliceLines{ .text = "a\nb\nc\nd\n" }, 3, 2));
+    try std.testing.expectEqual(@as(usize, 3), short.frontier);
 }

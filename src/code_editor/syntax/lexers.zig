@@ -162,6 +162,164 @@ pub const Toml = struct {
     }
 };
 
+/// HCL: the general lexer with heredocs, <<EOT or <<-EOT ending a line.
+/// While in one, the state is the mode `heredoc` (bits 0-7), which the
+/// general lexer never uses, and a hash of the word that ends it (bits
+/// 8-39).
+pub const Hcl = struct {
+    lexer: lex.Lexer,
+
+    const heredoc: u64 = 0xfe;
+
+    pub fn tokenizer(self: *const Hcl) Tokenizer {
+        return .{ .context = self, .call = call };
+    }
+    fn call(context: *const anyopaque, line: []const u8, state: u64, out: *Output) u64 {
+        const self: *const Hcl = @ptrCast(@alignCast(context));
+        if (state & 0xff == heredoc) {
+            out.add(line.len, .string);
+            return if (hash(std.mem.trim(u8, line, " \t\r")) == state >> 8) 0 else state;
+        }
+        const base = out.base;
+        out.base = out.len;
+        defer out.base = base;
+        const next = self.lexer.tokenize(line, state, out);
+        // A block word before a dot, as in data.x.id or module.m.out, names
+        // a value the way var.x and local.x do.
+        for (out.buffer[out.base..out.len]) |*token| {
+            if (token.kind == .keyword and token.end < line.len and line[token.end] == '.') token.kind = .variable;
+        }
+        if (next != 0) return next;
+        const body = std.mem.trimEnd(u8, line, " \t\r");
+        var j = body.len;
+        while (j > 0 and isIdentByte(body[j - 1])) j -= 1;
+        const word = body[j..];
+        var k = j;
+        if (k > 0 and body[k - 1] == '-') k -= 1;
+        if (word.len == 0 or !lex.identStart(word, "") or k < 2 or !std.mem.eql(u8, body[k - 2 .. k], "<<") or syntax.kindAt(out.items(), k - 2) != .operator) return next;
+        relabel(out, k - 2, body.len, .string);
+        return heredoc | hash(word) << 8;
+    }
+    /// A heredoc's word in 32 bits, FNV-1a.
+    fn hash(s: []const u8) u64 {
+        var value: u32 = 2166136261;
+        for (s) |c| value = (value ^ c) *% 16777619;
+        return value;
+    }
+};
+
+/// A template: text in a host language with code in tags, as ERB's <% %> or
+/// Jinja's {{ }} and {% %}, and comments in others. Outside a tag the state
+/// is the host's. In a tag that goes on to the next line, it is the code's
+/// state (bits 0-39), the host's without the state of a script or style in
+/// it (bits 40-55), and one more than the tag's index (bits 62-63).
+pub const Template = struct {
+    /// Lexes the text outside tags; null for plain text.
+    host: ?Tokenizer = null,
+    code: ?Tokenizer = null,
+    /// Tried in order where one opens, so a longer opener goes before one
+    /// it starts with, as <%# before <%. All their openers start with the
+    /// same byte, and there are at most three.
+    tags: []const Tag,
+    /// Characters after an opener that belong to it, as = and - in <%= and
+    /// <%-; `trims` before a closer, as - in -%>.
+    marks: []const u8 = "",
+    trims: []const u8 = "",
+    /// An opener written out as text, as <%% in ERB.
+    escape: []const u8 = "",
+
+    pub const Tag = struct { open: []const u8, close: []const u8, comment: bool = false };
+
+    pub fn tokenizer(self: *const Template) Tokenizer {
+        return .{ .context = self, .call = call };
+    }
+    fn call(context: *const anyopaque, line: []const u8, state: u64, out: *Output) u64 {
+        const self: *const Template = @ptrCast(@alignCast(context));
+        return self.tokenize(line, state, out);
+    }
+
+    /// Lex line[from..to] with `tokenizer` from `state` into out.
+    fn sub(lexer: ?Tokenizer, line: []const u8, from: usize, to: usize, state: u64, out: *Output) u64 {
+        if (from >= to) return state;
+        const value = lexer orelse {
+            out.add(to, .text);
+            return state;
+        };
+        var scratch: [256]Token = undefined;
+        var inner = Output.init(&scratch);
+        const next = value.tokenize(line[from..to], state, &inner);
+        for (inner.items()) |token| out.add(from + token.end, token.kind);
+        out.add(to, .text);
+        return next;
+    }
+
+    pub fn tokenize(self: *const Template, line: []const u8, state: u64, out: *Output) u64 {
+        const n = line.len;
+        // The open tag's index plus 1; 0 outside one.
+        var tag: u64 = state >> 62;
+        var host = state;
+        var code: u64 = 0;
+        if (tag != 0) {
+            code = state & ((1 << 40) - 1);
+            host = state >> 40 & 0xffff;
+        }
+        var i: usize = 0;
+        while (i < n) {
+            if (tag == 0) {
+                const open = self.opener(line, i);
+                host = sub(self.host, line, i, open.at, host, out);
+                if (open.at == n) break;
+                const opened = self.tags[open.tag];
+                var e = open.at + opened.open.len;
+                if (opened.comment) {
+                    out.add(e, .comment);
+                } else {
+                    if (e < n and std.mem.indexOfScalar(u8, self.marks, line[e]) != null) e += 1;
+                    out.add(e, .meta);
+                }
+                i = e;
+                tag = open.tag + 1;
+                code = 0;
+                continue;
+            }
+            const current = self.tags[tag - 1];
+            const end = std.mem.indexOf(u8, line[i..], current.close);
+            const stop = if (end) |value| i + value else n;
+            if (current.comment) {
+                out.add(@min(stop + current.close.len, n), .comment);
+            } else {
+                var code_end = stop;
+                if (end != null and code_end > i and std.mem.indexOfScalar(u8, self.trims, line[code_end - 1]) != null) code_end -= 1;
+                code = sub(self.code, line, i, code_end, code, out);
+                if (end != null) out.add(stop + current.close.len, .meta);
+            }
+            if (end == null) break;
+            i = stop + current.close.len;
+            tag = 0;
+            code = 0;
+        }
+        if (tag != 0) return tag << 62 | (host & 0xffff) << 40 | (code & ((1 << 40) - 1));
+        return host;
+    }
+
+    /// Where the next tag opens in line from i, and which tag, skipping
+    /// escapes; at the end of the line when none does.
+    fn opener(self: *const Template, line: []const u8, i: usize) struct { at: usize, tag: usize } {
+        const first = self.tags[0].open[0];
+        var j = i;
+        while (std.mem.indexOfScalarPos(u8, line, j, first)) |at| {
+            j = at;
+            if (self.escape.len > 0 and std.mem.startsWith(u8, line[j..], self.escape)) {
+                j += self.escape.len;
+                continue;
+            }
+            for (self.tags, 0..) |candidate, k| if (std.mem.startsWith(u8, line[j..], candidate.open)) return .{ .at = j, .tag = k };
+            j += 1;
+        }
+        return .{ .at = line.len, .tag = 0 };
+    }
+};
+
 /// CSS, SCSS and Less: selectors, at-rules, properties and their values.
 /// The state packs the mode (bits 0-3: 1 a comment) and how many blocks the
 /// line starts in (bits 8-15).
@@ -293,13 +451,22 @@ fn cssSelectorAhead(s: []const u8) bool {
 }
 
 /// HTML and XML: tags, attributes, comments, entities and, in HTML, the
-/// scripts and styles inside it with their own tokenizers. The state packs
-/// the mode (bits 0-3), what the tag being lexed opens (bits 4-5: 1 a
-/// script, 2 a style), and the state of the script or style (bits 16-55).
+/// scripts and styles inside it with their own tokenizers. With `braces`,
+/// as Svelte's, {expressions} in text, in tags and in attribute values lex
+/// with the script's tokenizer, and {#blocks} too. The state packs the mode
+/// (bits 0-3), what the tag being lexed opens (bits 4-5: 1 a script, 2 a
+/// style), whether the script is TypeScript (bit 6), the braces open in an
+/// expression (bits 8-13) and the mode it goes back to (bits 14-15: text, a
+/// tag, or a double- or single-quoted value), and the state of the script,
+/// style or expression (bits 16-55).
 pub const Markup = struct {
     html: bool = false,
     script: ?Tokenizer = null,
     style: ?Tokenizer = null,
+    /// Lex {…} as expressions, as Svelte's.
+    braces: bool = false,
+    /// Lexes a <script lang="ts">; null for none.
+    ts: ?Tokenizer = null,
 
     pub fn tokenizer(self: *const Markup) Tokenizer {
         return .{ .context = self, .call = call };
@@ -317,18 +484,92 @@ pub const Markup = struct {
     const ml_cdata = 5;
     const ml_script = 6;
     const ml_style = 7;
+    const ml_expr = 8;
+    /// The modes an expression goes back to when it ends.
+    const expr_back = [4]u64{ ml_text, ml_tag, ml_double, ml_single };
+
+    /// Where an expression's tokens are lexed: a line's tokens before it
+    /// stay as they are.
+    const Expr = struct {
+        mode: *u64,
+        back: *u64,
+        depth: *u64,
+        inner: *u64,
+
+        /// Start an expression at the { at i, going back to mode `after`
+        /// when it ends; returns where its code starts.
+        fn start(self: Expr, line: []const u8, i: usize, after: u64, out: *Output) usize {
+            out.add(i + 1, .punctuation);
+            self.mode.* = ml_expr;
+            self.back.* = after;
+            self.depth.* = 0;
+            self.inner.* = 0;
+            // A block's tag: {#if}, {:else}, {/each}, {@html}.
+            var j = i + 1;
+            if (j + 1 < line.len and std.mem.indexOfScalar(u8, "#:/@", line[j]) != null and lex.identStart(line[j + 1 ..], "")) {
+                j += 1;
+                while (j < line.len and isIdentByte(line[j])) j += 1;
+                out.add(j, .keyword);
+            }
+            return j;
+        }
+    };
 
     pub fn tokenize(self: *const Markup, line: []const u8, state: u64, out: *Output) u64 {
         var mode: u64 = state & 0xf;
         var embed: u64 = state >> 4 & 3;
+        var ts: u64 = state >> 6 & 1;
+        var depth: u64 = state >> 8 & 0x3f;
+        var back: u64 = state >> 14 & 3;
         var inner: u64 = state >> 16;
         const n = line.len;
+        const expr: Expr = .{ .mode = &mode, .back = &back, .depth = &depth, .inner = &inner };
         var i: usize = 0;
         while (i < n) {
             switch (mode) {
+                ml_expr => {
+                    var scratch: [256]Token = undefined;
+                    var sub = Output.init(&scratch);
+                    const next = if (self.script) |script| script.tokenize(line[i..], inner, &sub) & 0xffffffffff else 0;
+                    if (self.script == null) sub.add(n - i, .text);
+                    // Where the expression's } is, if on this line.
+                    var end: ?usize = null;
+                    var from: usize = 0;
+                    for (sub.items()) |token| {
+                        if (token.kind == .punctuation) {
+                            var k = from;
+                            while (k < token.end and end == null) : (k += 1) switch (line[i + k]) {
+                                '{' => depth = @min(depth + 1, 0x3f),
+                                '}' => {
+                                    if (depth == 0) end = k else depth -= 1;
+                                },
+                                else => {},
+                            };
+                        }
+                        if (end) |at| {
+                            // The token up to the expression's }.
+                            out.add(i + at, token.kind);
+                            break;
+                        }
+                        out.add(i + token.end, token.kind);
+                        from = token.end;
+                    }
+                    const at = end orelse {
+                        // The expression goes on to the next line.
+                        inner = next;
+                        i = n;
+                        continue;
+                    };
+                    out.add(i + at + 1, .punctuation);
+                    i += at + 1;
+                    mode = expr_back[back];
+                    depth = 0;
+                    back = 0;
+                    inner = 0;
+                },
                 ml_script, ml_style => {
                     const tag: []const u8 = if (mode == ml_style) "</style" else "</script";
-                    const tokenizer_value = if (mode == ml_style) self.style else self.script;
+                    const tokenizer_value = if (mode == ml_style) self.style else if (ts == 1 and self.ts != null) self.ts else self.script;
                     const end = indexFold(line[i..], tag);
                     const stop = if (end) |value| i + value else n;
                     if (tokenizer_value) |inner_tokenizer| if (stop > i) {
@@ -342,6 +583,7 @@ pub const Markup = struct {
                     if (end != null) {
                         mode = ml_text;
                         inner = 0;
+                        ts = 0;
                     }
                 },
                 ml_comment => {
@@ -365,8 +607,14 @@ pub const Markup = struct {
                     }
                 },
                 ml_double, ml_single => {
-                    const quote: u8 = if (mode == ml_single) '\'' else '"';
-                    if (std.mem.indexOfScalar(u8, line[i..], quote)) |end| {
+                    const quotes: []const u8 = if (mode == ml_single) "'{" else "\"{";
+                    const after: u64 = if (mode == ml_single) 3 else 2;
+                    if (std.mem.indexOfAny(u8, line[i..], if (self.braces) quotes else quotes[0..1])) |end| {
+                        if (line[i + end] == '{') {
+                            out.add(i + end, .string);
+                            i = expr.start(line, i + end, after, out);
+                            continue;
+                        }
                         out.add(i + end + 1, .string);
                         i += end + 1;
                         mode = ml_tag;
@@ -405,10 +653,22 @@ pub const Markup = struct {
                     } else if (c == ' ' or c == '\t' or c == '\r') {
                         out.add(i + 1, .text);
                         i += 1;
+                    } else if (c == '{' and self.braces) {
+                        i = expr.start(line, i, 1, out);
                     } else {
                         var j = i;
-                        while (j < n and std.mem.indexOfScalar(u8, " \t\r=>/\"'", line[j]) == null) j += 1;
+                        while (j < n and std.mem.indexOfScalar(u8, " \t\r=>/\"'{", line[j]) == null) j += 1;
                         if (j == i) j += 1;
+                        if (embed == 1 and self.ts != null and std.ascii.eqlIgnoreCase(line[i..j], "lang")) {
+                            ts = 0;
+                            const value = std.mem.trimStart(u8, line[j..], " \t=");
+                            if (value.len > 0 and (value[0] == '"' or value[0] == '\'')) {
+                                if (std.mem.indexOfScalar(u8, value[1..], value[0])) |e| {
+                                    const name = value[1 .. 1 + e];
+                                    if (std.mem.eql(u8, name, "ts") or std.mem.eql(u8, name, "typescript")) ts = 1;
+                                }
+                            }
+                        }
                         out.add(j, .attribute);
                         i = j;
                     }
@@ -440,6 +700,7 @@ pub const Markup = struct {
                         while (k < n and (isIdentByte(line[k]) or line[k] == '-' or line[k] == ':' or line[k] == '.')) k += 1;
                         out.add(k, .tag);
                         embed = 0;
+                        ts = 0;
                         if (self.html and line[i + 1] != '/') {
                             if (std.ascii.eqlIgnoreCase(line[j..k], "script")) embed = 1;
                             if (std.ascii.eqlIgnoreCase(line[j..k], "style")) embed = 2;
@@ -456,16 +717,18 @@ pub const Markup = struct {
                             out.add(i + 1, .text);
                             i += 1;
                         }
+                    } else if (c == '{' and self.braces) {
+                        i = expr.start(line, i, 0, out);
                     } else {
                         var j = i + 1;
-                        while (j < n and line[j] != '<' and line[j] != '&') j += 1;
+                        while (j < n and line[j] != '<' and line[j] != '&' and (line[j] != '{' or !self.braces)) j += 1;
                         out.add(j, .text);
                         i = j;
                     }
                 },
             }
         }
-        return mode | embed << 4 | inner << 16;
+        return mode | embed << 4 | ts << 6 | depth << 8 | back << 14 | inner << 16;
     }
 };
 

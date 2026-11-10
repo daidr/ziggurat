@@ -8,6 +8,9 @@
 //! `git diff` colors it (`Partial.old_starts` and `new_starts` are the
 //! highlighter's restarts, `syntax.Highlighter.setRestarts`), so that a
 //! comment or a string the hunk before ends in does not go on into it.
+//! The highlighter moves them with the edits since
+//! (`syntax.Highlighter.restartLines`, `Highlighting.restarts`), so that
+//! highlighting of the host's own can start the hunks as well.
 const std = @import("std");
 
 /// A hunk of a `FilePatch`: lines from `old_start` (from 1) of the old file,
