@@ -2012,5 +2012,10 @@ pub fn build(b: *std.Build) void {
     });
     addExamples(b, target, optimize);
     shareCommonModules(b, target, optimize, check, test_step);
+    helpers.configurePullRequestRuns(
+        b,
+        b.option(bool, "cache-smokes", "Run each smoke only when its executable changed (pull request checks)") orelse false,
+        b.option(bool, "quick-tests", "Shorten the long randomized and exhaustive tests (pull request checks)") orelse false,
+    );
     useWindowsSelfHostedBackend(b, b.option(bool, "windows-llvm", "Build Windows Debug artifacts with the LLVM backend instead of Zig's self-hosted backend") orelse false);
 }

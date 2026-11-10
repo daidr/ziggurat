@@ -3,6 +3,14 @@ const svg = @import("root.zig");
 const v = @import("ziggurat_vector");
 const Mock = @import("text_adjust_test.zig").Mock;
 const Mode = @TypeOf((svg.PrepareOptions{ .main_thread = 0, .width = 1, .height = 1 }).compositing);
+
+/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// the cancellation test then cancels at every fourth scratch free and the
+/// last one, instead of at each.
+fn quick() bool {
+    return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");
+}
+
 const Tracker = struct {
     const Allocation = struct { bytes: [*]u8, live: bool = true };
     child: std.mem.Allocator,
@@ -100,7 +108,8 @@ test "last foreign scene scratch release still cancels before Prepared publicati
             try baseline.empty();
             // The final one proves the old late-defer hole; earlier ones cover
             // mapping metadata/path/quads and temporary scene cleanup separately.
-            for (baseline.freed[0..scratch_frees]) |target| {
+            for (baseline.freed[0..scratch_frees], 0..) |target, index| {
+                if (index % 4 != 0 and index + 1 != scratch_frees and quick()) continue;
                 provider = .{};
                 var trial: Tracker = .{ .child = allocator, .cancel_on = target };
                 options.cancellation = &trial.cancellation;

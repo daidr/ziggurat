@@ -474,6 +474,7 @@ pub fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, tar
         if (std.mem.eql(u8, dependency.name, "ziggurat_webview")) run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
     }
     run.addPassthruArgs();
+    smoke_runs.append(b.allocator, run) catch @panic("OOM");
     b.step(name, "Run integration checks with hidden windows").dependOn(&run.step);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
     return exe;
@@ -599,6 +600,35 @@ pub fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
         // The packaging smoke checks icons rendered from a PNG.
         .icon = if (special) iconFile(b, b.path("tools/icon_main.zig"), b.path("assets/application.ico"), .{ .png = b.path("assets/application.png") }) else b.path("assets/application.ico"),
     }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
+}
+
+/// The runs of every addSmokeExecutable, for configurePullRequestRuns.
+var smoke_runs: std.ArrayList(*std.Build.Step.Run) = .empty;
+
+/// Options for pull request checks, which run often and need to finish fast.
+/// `cache_smokes` runs a smoke only when its executable changed: without
+/// passthrough arguments and with its exit code checked, Zig caches the run
+/// like a test's (its standard output is dropped, standard error is still
+/// printed). `quick_tests` sets ZIGGURAT_QUICK_TESTS for every test run, so
+/// the long randomized and exhaustive tests take a shorter path; the nightly
+/// and full-ci runs leave both off.
+pub fn configurePullRequestRuns(b: *std.Build, cache_smokes: bool, quick_tests: bool) void {
+    if (cache_smokes) for (smoke_runs.items) |run| {
+        for (run.argv.items, 0..) |arg, index| if (arg == .passthru) {
+            _ = run.argv.orderedRemove(index);
+            break;
+        };
+        run.expectExitCode(0);
+    };
+    if (!quick_tests) return;
+    var steps: std.array_hash_map.Auto(*std.Build.Step, void) = .empty;
+    var it = b.top_level_steps.iterator();
+    while (it.next()) |entry| collectSteps(b, &steps, &entry.value_ptr.*.step);
+    for (steps.keys()) |step| {
+        const run = step.cast(std.Build.Step.Run) orelse continue;
+        const producer = run.producer orelse continue;
+        if (producer.kind == .@"test") run.setEnvironmentVariable("ZIGGURAT_QUICK_TESTS", "1");
+    }
 }
 
 /// b.addTest with build_support/macos_test_runner.zig on macOS targets.

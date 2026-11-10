@@ -10,6 +10,12 @@ const aac = @import("aac.zig");
 const rate = 44100;
 const length = 22050;
 
+/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// the corruption test then damages each file 10 times instead of 40.
+fn quick() bool {
+    return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");
+}
+
 fn tone(frame: usize, channel: usize) f32 {
     const t = @as(f64, @floatFromInt(frame)) / rate;
     const value = if (channel == 0) 0.5 * @sin(2 * std.math.pi * 440 * t) else 0.4 * @sin(2 * std.math.pi * 660 * t);
@@ -208,7 +214,7 @@ test "corrupt MP4 and ADTS fail to open or skip packets, without leaks" {
     const allocator = std.testing.allocator;
     var prng: std.Random.DefaultPrng = .init(11);
     for ([_][]const u8{ @embedFile("testdata/tone.m4a"), @embedFile("testdata/fragmented.m4a"), @embedFile("testdata/alac.m4a"), @embedFile("testdata/tone.aac") }) |bytes| {
-        for (0..40) |_| {
+        for (0..if (quick()) @as(usize, 10) else 40) |_| {
             const copy = try allocator.dupe(u8, bytes);
             defer allocator.free(copy);
             for (0..8) |_| copy[prng.random().uintLessThan(usize, copy.len)] = prng.random().int(u8);

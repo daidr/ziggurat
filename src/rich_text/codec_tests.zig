@@ -9,6 +9,12 @@ const Paragraph = rt.Paragraph;
 const Run = rt.Run;
 const gpa = testing.allocator;
 
+/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// the Markdown round trip then reads back 600 random texts instead of 3000.
+fn quick() bool {
+    return std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");
+}
+
 /// A text of every kind of paragraph and run.
 fn sample() !Text {
     const bold: Attributes = .{ .weight = 700 };
@@ -359,7 +365,7 @@ test "random texts read back from their Markdown" {
     const words = [_][]const u8{ "foo", "bar", "a", "x1", ".", ",", "!", "?", "(", ")", "-", "#", "*", "_", "`", "~", "[", "]", "<", ">", "&", "\\", "1.", "é", "\"", "'", ":", "/" };
     const links = [_][]const u8{ "https://e.org/0", "https://e.org/1", "https://e.org/2" };
     var failures: usize = 0;
-    for (0..3000) |_| {
+    for (0..if (quick()) @as(usize, 600) else 3000) |_| {
         var arena_state: std.heap.ArenaAllocator = .init(gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();

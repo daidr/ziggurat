@@ -44,12 +44,21 @@ if ($tier -cnotmatch '^[a-z0-9]+$') { throw 'ZIGGURAT_CI_CACHE_TIER must be lowe
 $localName = if ($tier -eq 'core') { "local-$key" } else { "local-$key-$tier" }
 $local = Join-Path $root $localName
 
+# Walking the caches takes seconds, so their size is measured once and again
+# only after something was removed.
+$script:usedMb = $null
 function Remove-Cache([string]$Path) {
-    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+        $script:usedMb = $null
+    }
 }
 function Get-UsedMb {
-    $bytes = (Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-    [long](($bytes + 0) / 1MB)
+    if ($null -eq $script:usedMb) {
+        $bytes = (Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        $script:usedMb = [long](($bytes + 0) / 1MB)
+    }
+    $script:usedMb
 }
 function Get-FreeMb {
     [long]([System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($root)).AvailableFreeSpace / 1MB)

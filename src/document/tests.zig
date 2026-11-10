@@ -4,6 +4,13 @@ const tree = @import("tree.zig");
 const z = @import("ziggurat");
 const testing = std.testing;
 
+/// Pull request checks set ZIGGURAT_QUICK_TESTS (zig build -Dquick-tests):
+/// the long random walks then check their full oracle less often. Nightly
+/// and full-ci runs check it at every interval.
+fn quick() bool {
+    return testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS");
+}
+
 fn expectText(document: anytype, expected: []const u8) !void {
     var bytes: [65536]u8 = undefined;
     const length = try document.read(.{ .start = 0, .end = try document.byteLength() }, &bytes);
@@ -105,7 +112,7 @@ test "persistent AVL random edits match linear UTF and line oracle and retained 
         const inserted = inserts[random.uintLessThan(usize, inserts.len)];
         try document.replace(.{ .start = start, .end = end }, inserted);
         try linear.replaceRange(testing.allocator, start, end - start, inserted);
-        if (step % 37 == 0) try oracle(document, linear.items);
+        if (step % (if (quick()) @as(usize, 400) else 37) == 0) try oracle(document, linear.items) else if (step % 37 == 0) try expectText(document, linear.items);
     }
     try oracle(document, linear.items);
     try testing.expectEqual(@as(usize, 12000), try originals.byteLength());
@@ -124,7 +131,7 @@ test "tree structure and aggregate checks survive random boundary sharing" {
     defer tree.release(&memory, root);
     var random_source = std.Random.DefaultPrng.init(81);
     const random = random_source.random();
-    for (0..2500) |_| {
+    for (0..if (quick()) @as(usize, 500) else 2500) |_| {
         var at = random.uintLessThan(usize, tree.counts(root).bytes + 1);
         while (at < tree.counts(root).bytes and tree.byteAt(&memory, root.?, at) & 0xc0 == 0x80) at += 1;
         const halves = try tree.split(&memory, root, at);
