@@ -107,6 +107,12 @@ pub const Options = struct {
     /// `availableVersion` changed, for a preferences page, an update badge
     /// or a restart prompt that shows them.
     on_change: ?z.Task = null,
+    /// Called on the main thread once an update is installed, whether the
+    /// user installed it from the update window or it was installed in the
+    /// background (automatic downloads), before the app relaunches into
+    /// it: the new version is in place for the next launch, so an app can
+    /// move its helper processes to it early.
+    on_installed: ?z.Task = null,
     /// The application's icon, shown beside the texts; uploaded by the
     /// host and kept alive until deinit.
     icon: ?view.ImageView = null,
@@ -402,6 +408,7 @@ pub const Updater = struct {
         }
         @memcpy(self.installed[0..self.version_len], self.version[0..self.version_len]);
         self.installed_len = self.version_len;
+        if (self.options.on_installed) |task| task.call(task.context);
         if (!self.user and !self.shown) return self.finish();
         self.set(.ready);
         self.show();

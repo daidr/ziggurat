@@ -142,6 +142,24 @@ test("null-body statuses and HEAD give no body; statuses outside Response's rang
   expect(upgraded.status).toBe(101);
 });
 
+test("a clone keeps the url, redirection and status the host reported", async () => {
+  host.respond = () => ({ parts: [head(200, [["content-type", "text/plain"]], { url: "https://cdn.example.com/final", redirected: true }), chunk("body")] });
+  const res = await plugin.fetch("https://api.example.com/start");
+  const copy = res.clone();
+  expect(copy.url).toBe("https://cdn.example.com/final");
+  expect(copy.redirected).toBe(true);
+  expect(copy.status).toBe(200);
+  const again = copy.clone();
+  expect(again.url).toBe("https://cdn.example.com/final");
+  expect(again.redirected).toBe(true);
+  expect(await again.text()).toBe("body");
+  expect(await copy.text()).toBe("body");
+  expect(await res.text()).toBe("body");
+  host.respond = () => ({ parts: [head(101, [])] });
+  const upgraded = await plugin.fetch("https://api.example.com/");
+  expect(upgraded.clone().status).toBe(101);
+});
+
 test("failures reject with a TypeError that says why", async () => {
   host.respond = () => ({ parts: [], error: { code: "failed", message: "ConnectionFailed" } });
   const error = await plugin.fetch("https://unreachable.example/").catch((e: unknown) => e);

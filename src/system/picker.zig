@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
+const mime_types_windows = if (builtin.os.tag == .windows) @import("mime_types_windows.zig") else struct {};
 const Filter = extern struct { text: [*]const u16, length: u32 };
 extern fn zfp_create(?*anyopaque, u32, [*]const Filter, u32, [*]const u16, u32, *i32, *?*anyopaque) ?*anyopaque;
 extern fn zfp_start(*anyopaque) i32;
@@ -21,8 +22,10 @@ pub const Options = struct {
     /// extensions and of these types together; with types and no extensions
     /// it takes only the types. GTK matches them as it knows them (wildcards
     /// too) and macOS as UTTypes, a kind as the type it conforms to
-    /// (public.image for image/*). Only open dialogs take them, at most 16
-    /// with the extensions; Windows does not yet.
+    /// (public.image for image/*), and Windows as the extensions the
+    /// registry gives them (an extension's Content Type, a kind's
+    /// PerceivedType too). Only open dialogs take them, at most 16 with the
+    /// extensions.
     mime_types: []const []const u8 = &.{},
     suggested_name: []const u8 = "Untitled",
 };
@@ -42,6 +45,76 @@ fn mimeToken(text: []const u8) bool {
     if (!std.ascii.isAlphanumeric(text[0])) return false;
     for (text) |char| if (!std.ascii.isAlphanumeric(char) and std.mem.indexOfScalar(u8, "!#$&-^_.+", char) == null) return false;
     return true;
+}
+
+/// What the Windows registry tells of an extension: its media type
+/// (Content Type) and kind (PerceivedType), in lower case.
+pub const MimeEntry = struct { content_type: []const u8, perceived: []const u8 };
+
+/// Whether an extension of `entry` is of the media type `mime`, or for a
+/// kind ("image/*"), of a type of the kind or perceived as it.
+pub fn mimeMatches(mime: []const u8, entry: MimeEntry) bool {
+    if (std.mem.endsWith(u8, mime, "/*")) {
+        const kind = mime[0 .. mime.len - 2];
+        if (entry.content_type.len > kind.len and entry.content_type[kind.len] == '/' and std.ascii.startsWithIgnoreCase(entry.content_type, kind)) return true;
+        return std.ascii.eqlIgnoreCase(entry.perceived, kind);
+    }
+    return std.ascii.eqlIgnoreCase(entry.content_type, mime);
+}
+
+/// The extensions a Windows file picker filters by: each once, in order,
+/// ASCII case aside.
+const ExtensionSet = struct {
+    const capacity = 256;
+    text: [capacity][32]u16 = undefined,
+    filters: [capacity]Filter = undefined,
+    count: u32 = 0,
+
+    pub fn add(self: *ExtensionSet, extension: []const u16) void {
+        if (extension.len > self.text[0].len or self.count == capacity) return;
+        for (self.filters[0..self.count]) |filter| {
+            if (filter.length == extension.len and eqlIgnoreCase16(filter.text[0..filter.length], extension)) return;
+        }
+        const slot = &self.text[self.count];
+        @memcpy(slot[0..extension.len], extension);
+        self.filters[self.count] = .{ .text = slot, .length = @intCast(extension.len) };
+        self.count += 1;
+    }
+    fn addUtf8(self: *ExtensionSet, extension: []const u8) !void {
+        var wide: [32]u16 = undefined;
+        const needed = std.unicode.calcUtf16LeLen(extension) catch return error.InvalidUtf8;
+        if (needed > wide.len) return error.FileFilterTooLong;
+        _ = std.unicode.utf8ToUtf16Le(wide[0..needed], extension) catch return error.InvalidUtf8;
+        self.add(wide[0..needed]);
+    }
+};
+fn eqlIgnoreCase16(a: []const u16, b: []const u16) bool {
+    for (a, b) |x, y| {
+        const lx = if (x < 0x80) std.ascii.toLower(@intCast(x)) else x;
+        const ly = if (y < 0x80) std.ascii.toLower(@intCast(y)) else y;
+        if (lx != ly) return false;
+    }
+    return a.len == b.len;
+}
+
+test "media types match the registry's extensions" {
+    const png: MimeEntry = .{ .content_type = "image/png", .perceived = "image" };
+    const jpeg: MimeEntry = .{ .content_type = "image/jpeg", .perceived = "" };
+    const heic: MimeEntry = .{ .content_type = "", .perceived = "image" };
+    const mp3: MimeEntry = .{ .content_type = "audio/mpeg", .perceived = "audio" };
+    try std.testing.expect(mimeMatches("image/jpeg", jpeg));
+    try std.testing.expect(!mimeMatches("image/jpeg", png));
+    try std.testing.expect(mimeMatches("IMAGE/*", png));
+    try std.testing.expect(mimeMatches("image/*", jpeg));
+    try std.testing.expect(mimeMatches("image/*", heic));
+    try std.testing.expect(!mimeMatches("image/*", mp3));
+    try std.testing.expect(!mimeMatches("video/*", png));
+    try std.testing.expect(!mimeMatches("imag/*", png));
+    var set: ExtensionSet = .{};
+    try set.addUtf8(".png");
+    try set.addUtf8(".PNG");
+    try set.addUtf8(".jpg");
+    try std.testing.expectEqual(@as(u32, 2), set.count);
 }
 
 /// The filters the Linux and macOS choosers take, NUL-terminated in `text`:
@@ -140,19 +213,21 @@ pub const Picker = struct {
         if (self.native != null or self.in_native) return error.DialogAlreadyPending;
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
-        if (options.mime_types.len != 0) return error.UnsupportedFileFilter;
-        const extensions: []const []const u8 = if (options.extensions.len != 0) options.extensions else if (kind == .save_file) &.{".txt"} else &.{"*"};
-        if (extensions.len > 16) return error.InvalidFileFilters;
-        var text: [16][128]u16 = undefined;
-        var filters: [16]Filter = undefined;
-        for (extensions, 0..) |extension, index| {
+        if (options.mime_types.len != 0 and kind != .open_file and kind != .open_files) return error.InvalidFileFilters;
+        const extensions: []const []const u8 = if (options.extensions.len != 0 or options.mime_types.len != 0) options.extensions else if (kind == .save_file) &.{".txt"} else &.{"*"};
+        if (extensions.len + options.mime_types.len > 16) return error.InvalidFileFilters;
+        var set: ExtensionSet = .{};
+        for (extensions) |extension| {
             if (extension.len == 0 or (!std.mem.eql(u8, extension, "*") and (extension.len < 2 or extension[0] != '.' or std.mem.indexOfAny(u8, extension, "\\/:;*?\x00") != null))) return error.InvalidFileFilters;
             if (kind == .save_file and std.mem.eql(u8, extension, "*")) return error.InvalidFileFilters;
-            const needed = std.unicode.calcUtf16LeLen(extension) catch return error.InvalidUtf8;
-            if (needed > text[index].len) return error.FileFilterTooLong;
-            _ = std.unicode.utf8ToUtf16Le(text[index][0..needed], extension) catch return error.InvalidUtf8;
-            filters[index] = .{ .text = &text[index], .length = @intCast(needed) };
+            try set.addUtf8(extension);
         }
+        for (options.mime_types) |mime| if (!validMimeType(mime)) return error.InvalidFileFilters;
+        // The picker filters by extensions only: those of the types.
+        if (options.mime_types.len != 0) mime_types_windows.extensions(options.mime_types, &set);
+        // None of the types has an extension the system knows.
+        if (set.count == 0) return error.UnsupportedFileFilter;
+        const filters = &set.filters;
         var suggested_name: [256]u16 = undefined;
         if (std.mem.indexOfAny(u8, options.suggested_name, "\\/:*?\"<>|\x00") != null) return error.InvalidSuggestedName;
         const name_len = std.unicode.calcUtf16LeLen(options.suggested_name) catch return error.InvalidUtf8;
@@ -164,7 +239,7 @@ pub const Picker = struct {
         self.in_native = true;
         defer self.leaveNative();
         var event: ?*anyopaque = null;
-        const native = zfp_create(window.nativeHandle(), @backingInt(kind), &filters, @intCast(extensions.len), &suggested_name, @intCast(name_len), &self.last_hresult, &event) orelse return error.FilePickerCreationFailed;
+        const native = zfp_create(window.nativeHandle(), @backingInt(kind), filters, set.count, &suggested_name, @intCast(name_len), &self.last_hresult, &event) orelse return error.FilePickerCreationFailed;
         self.native = native;
         self.window = window;
         self.destination = destination;

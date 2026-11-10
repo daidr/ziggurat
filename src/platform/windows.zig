@@ -35,7 +35,7 @@ const PointerDispatch = struct {
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
 pub const AppData = struct { popup_shadow_class: c.ATOM = 0, taskbar_created: c.UINT = 0, taskbar: ?*TaskbarList = null, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
-pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, pen: PenState = .{}, held: HeldKeys = .{}, cloaked: bool = false, material: core.Vibrancy = .none, glass: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } };
+pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, through: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 }, pen: PenState = .{}, held: HeldKeys = .{}, cloaked: bool = false, revealing: bool = false, reveal_frame: u64 = 0, reveal_start: u32 = 0, material: core.Vibrancy = .none, glass: Margins = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } };
 /// The pen or finger of the last WM_POINTER message, which the mouse messages
 /// Windows makes of it carry.
 const PenState = struct {
@@ -284,11 +284,51 @@ fn uncloak(window: *core.WindowRecord, hwnd: c.HWND) void {
     if (!window.native.cloaked) return;
     window.native.cloaked = false;
     _ = c.KillTimer(hwnd, uncloak_timer);
+    if (window.native.revealing) _ = c.KillTimer(hwnd, reveal_timer);
+    window.native.revealing = false;
     // What DWM shows a refresh before the frame presents is the window's
     // own pixels, which hold the content's background.
     _ = c.GdiFlush();
     const off: u32 = 0;
     _ = DwmSetWindowAttribute(hwnd, dwm_cloak, &off, @sizeOf(u32));
+}
+/// The window's timer that waits for DWM to compose the first frame of a
+/// window whose frames show through DirectComposition.
+const reveal_timer: usize = 0x5a52;
+/// How long such a window waits for DWM at most: four refreshes at 60 Hz,
+/// time for a first frame heavy for the GPU to show.
+const reveal_most_ms: u32 = 67;
+/// Shows a cloaked window after its first frame painted. A window whose
+/// frames show through DirectComposition (no redirection bitmap, or native
+/// content composed under them) has no pixels of its own for DWM to show
+/// until the frame reaches it, a refresh or more after the present: shown at
+/// once it would show black meanwhile, so it stays cloaked until DWM
+/// composed a frame after the present, or `reveal_most_ms` passed. DwmFlush,
+/// which waits for that, may wait on the main thread until something else on
+/// the screen changes, so a timer asks DWM's frame count instead.
+fn reveal(window: *core.WindowRecord, hwnd: c.HWND) void {
+    if (!window.native.no_redirect and window.composed_under == 0) return uncloak(window, hwnd);
+    if (window.native.revealing) return;
+    window.native.reveal_frame = composedFrame() orelse return uncloak(window, hwnd);
+    window.native.reveal_start = c.GetTickCount();
+    window.native.revealing = c.SetTimer(hwnd, reveal_timer, c.USER_TIMER_MINIMUM, null) != 0;
+    if (!window.native.revealing) uncloak(window, hwnd);
+}
+fn revealTick(window: *core.WindowRecord, hwnd: c.HWND) void {
+    const frame = composedFrame();
+    // A frame composed after the one under way at the present.
+    const composed = if (frame) |value| value >= window.native.reveal_frame +% 2 else true;
+    if (composed or c.GetTickCount() -% window.native.reveal_start >= reveal_most_ms) uncloak(window, hwnd);
+}
+extern "dwmapi" fn DwmGetCompositionTimingInfo(c.HWND, *anyopaque) callconv(.winapi) c.HRESULT;
+/// The number of the frame DWM composed last (DWM_TIMING_INFO.cFrame).
+fn composedFrame() ?u64 {
+    // DWM_TIMING_INFO, which dwmapi.h packs to one byte: 292 bytes, cFrame
+    // at 56.
+    var info: [292]u8 align(8) = @splat(0);
+    std.mem.writeInt(u32, info[0..4], info.len, .little);
+    if (DwmGetCompositionTimingInfo(null, &info) < 0) return null;
+    return std.mem.readInt(u64, info[56..64], .little);
 }
 /// Whether the window is still kept out of sight until its first frame.
 pub fn cloaked(window: *core.WindowRecord) bool {
@@ -719,6 +759,11 @@ pub fn show(window: *core.WindowRecord) void {
     _ = c.ShowWindow(window.native.hwnd, if (window.options.focus_on_show) c.SW_SHOW else c.SW_SHOWNOACTIVATE);
     // A focusable popup takes the keyboard as it shows, as a menu does.
     if (window.options.popup != null) _ = c.SetForegroundWindow(window.native.hwnd);
+}
+/// Shows the window without activating it.
+pub fn showInactive(window: *core.WindowRecord) !void {
+    if (window.options.popup != null) return show(window);
+    _ = c.ShowWindow(window.native.hwnd, c.SW_SHOWNOACTIVATE);
 }
 pub fn perform(window: *core.WindowRecord, action: core.WindowAction) !void {
     const hwnd = window.native.hwnd;
@@ -1490,6 +1535,10 @@ fn windowMessage(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: 
         uncloak(window, hwnd);
         return 0;
     }
+    if (message == c.WM_TIMER and wp == reveal_timer) {
+        if (window.native.revealing) revealTick(window, hwnd) else _ = c.KillTimer(hwnd, reveal_timer);
+        return 0;
+    }
     if (message == c.WM_WINDOWPOSCHANGED and window.native.cloaked) {
         const position: *const c.WINDOWPOS = @ptrFromInt(@as(usize, @bitCast(lp)));
         if (position.flags & c.SWP_SHOWWINDOW != 0) _ = c.SetTimer(hwnd, uncloak_timer, uncloak_after_ms, null);
@@ -1701,7 +1750,7 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             // Over native content composed under them (`Window.composeUnder`)
             // the frames show their alpha through DirectComposition too.
             if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd), .transparent = window.native.no_redirect or window.composed_under != 0, .background = if (window.native.no_redirect) null else window.native.background } });
-            if (sameWindow(window, hwnd) and window.native.cloaked and c.IsWindowVisible(hwnd) != 0) uncloak(window, hwnd);
+            if (sameWindow(window, hwnd) and window.native.cloaked and c.IsWindowVisible(hwnd) != 0) reveal(window, hwnd);
             return 0;
         },
         c.WM_ERASEBKGND => {

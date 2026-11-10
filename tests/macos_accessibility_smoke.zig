@@ -1,7 +1,8 @@
 //! A window's semantic tree as VoiceOver reads it through NSAccessibility:
 //! the content view's elements, their roles, titles, values and frames,
 //! and the actions assistive technology takes on them, including an
-//! NSNumber set as a text field's AXValue.
+//! NSNumber set as a text field's AXValue, and a password field that keeps
+//! nothing assistive technology writes to it readable.
 const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
@@ -27,6 +28,8 @@ const Probe = struct {
     focused: u64 = 0,
     agree: bool = true,
     saved: bool = false,
+    pin: [64]u8 = undefined,
+    pin_len: usize = 0,
 
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *Probe = @ptrCast(@alignCast(ptr));
@@ -49,6 +52,9 @@ const Probe = struct {
         // A text box of the application's own over several lines, which
         // it does not let assistive technology edit.
         semantic.add(frame, .{ .id = 11, .role = .text_box, .name = "Notes", .value = "line", .read_only = true, .multi_line = true, .bounds = .{ .x = 220, .y = 60, .width = 90, .height = 60 } });
+        // A password field: what it holds, or what assistive technology
+        // writes to it, never reads back.
+        semantic.add(frame, .{ .id = 12, .role = .text_box, .name = "PIN", .value = self.pin[0..self.pin_len], .password = true, .bounds = .{ .x = 220, .y = 124, .width = 90, .height = 20 } });
         if (self.saved) semantic.add(frame, .{ .id = 7, .role = .status, .name = "Saved", .bounds = .{ .x = 10, .y = 170, .width = 160, .height = 20 } });
     }
     fn action(_: *anyopaque, _: u64) void {}
@@ -68,6 +74,9 @@ const Probe = struct {
             .set_value => |text| if (text.id == 2) {
                 @memcpy(self.name[0..text.text.len], text.text);
                 self.name_len = text.text.len;
+            } else if (text.id == 12) {
+                @memcpy(self.pin[0..text.text.len], text.text);
+                self.pin_len = text.text.len;
             },
             .select_text => |range| if (range.id == 2) {
                 self.selection = .{ range.start_utf16, range.end_utf16 };
@@ -117,9 +126,9 @@ pub fn main() !void {
     probe.window.show();
     probe.publish();
 
-    // The top level: six elements, the checkbox and the disabled button
+    // The top level: seven elements, the checkbox and the disabled button
     // inside the group, the rows inside the list.
-    try std.testing.expectEqual(@as(c_int, 6), zua_test_child_count(probe.handle()));
+    try std.testing.expectEqual(@as(c_int, 7), zua_test_child_count(probe.handle()));
     // VoiceOver reads the rows "120 of 10,000", not of the two built.
     try std.testing.expectEqual(@as(c_int, 10_000), zua_test_row(try probe.element("Pages"), 0));
     try std.testing.expectEqual(@as(c_int, 119), zua_test_row(try probe.element("Page 120"), 1));
@@ -158,6 +167,18 @@ pub fn main() !void {
     probe.publish();
     try probe.expect("Name", "AXTextField/||Name|42|1");
 
+    // What assistive technology writes to a password field reaches the
+    // content but stays unreadable on the element, before and after the
+    // content publishes it.
+    try probe.expect("PIN", "AXTextField/AXSecureTextField||PIN||1");
+    zua_test_act(try probe.element("PIN"), 3, 0, "hunter2");
+    try std.testing.expectEqualStrings("hunter2", probe.pin[0..probe.pin_len]);
+    try probe.expect("PIN", "AXTextField/AXSecureTextField||PIN||1");
+    zua_test_act(try probe.element("PIN"), 7, 0, "42");
+    try probe.expect("PIN", "AXTextField/AXSecureTextField||PIN||1");
+    probe.publish();
+    try probe.expect("PIN", "AXTextField/AXSecureTextField||PIN||1");
+
     // A status message announces itself once, when it appears.
     var said: [64]u8 = @splat(0);
     const before = zua_test_announcements(&said, said.len);
@@ -173,6 +194,6 @@ pub fn main() !void {
     _ = try probe.window.destroy();
     try app.dispatch();
     const counts = ui.accessibility.resourceCounts();
-    std.debug.print("macOS accessibility: roles, titles, values, frames, press/increment/value/focus/selection an NSNumber AXValue and a status announcement passed; hosts={d} elements={d} actions={d}\n", .{ counts.states, counts.providers, counts.actions });
+    std.debug.print("macOS accessibility: roles, titles, values, frames, press/increment/value/focus/selection an NSNumber AXValue, an unreadable password field and a status announcement passed; hosts={d} elements={d} actions={d}\n", .{ counts.states, counts.providers, counts.actions });
     try std.testing.expectEqual(@as(u32, 0), counts.actions);
 }

@@ -30,6 +30,7 @@ pub const WindowData = struct {
     skip_taskbar: bool = false,
     title: [256]u8 = undefined,
     title_len: usize = 0,
+    inactive_shows: usize = 0,
     pub fn shownTitle(self: *const WindowData) []const u8 {
         return self.title[0..self.title_len];
     }
@@ -79,6 +80,10 @@ pub fn quit(app: *core.App) void {
     app.native.quit_requests += 1;
 }
 pub fn show(_: *core.WindowRecord) void {}
+pub fn showInactive(record: *core.WindowRecord) !void {
+    record.native.state.visible = true;
+    record.native.inactive_shows += 1;
+}
 pub fn perform(record: *core.WindowRecord, action: core.WindowAction) !void {
     if (action == .show and record.window.app.native.fail_show) {
         record.window.app.native.fail_show = false;

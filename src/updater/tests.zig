@@ -207,15 +207,27 @@ test "a skipped version stays quiet in the background but shows when the user as
 }
 
 test "automatic downloads install in the background without a window" {
+    const Counter = struct {
+        count: usize = 0,
+        fn installed(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.count += 1;
+        }
+    };
+    var counter: Counter = .{};
+    var with = options;
+    with.on_installed = .{ .context = &counter, .call = Counter.installed };
     var f: Fixture = undefined;
-    try f.init(options);
+    try f.init(with);
     defer f.deinit();
     f.updater.setAutomaticDownloads(true);
     f.updater.timerFired();
     f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "2.0.0.0" } });
     try equal(1, f.fake.installs);
     try expect(f.updater.window == null);
+    try equal(0, counter.count);
     f.updater.installFinished(f.fake.token, null);
+    try equal(1, counter.count);
     try equal(u.Screen.idle, f.updater.screen);
     try expect(f.updater.window == null);
     f.updater.checkForUpdates();

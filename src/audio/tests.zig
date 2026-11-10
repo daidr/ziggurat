@@ -970,6 +970,7 @@ test "preserving pitch keeps a sine's frequency at 1.5x, as resampling raises it
         .{ .at = rate, .frequencies = &.{220} },
         .{ .at = rate, .frequencies = &.{ 200, 300 } },
         .{ .at = 24000, .frequencies = &.{220} },
+        .{ .at = 96000, .frequencies = &.{ 200, 300 } },
     };
     for (cases) |case| {
         const samples = try sines(case.at, 2, case.frequencies);
@@ -1088,4 +1089,181 @@ test "a stretch goes on without a click or a gap as the speed changes, over a lo
     try expectSmooth(turns, 0, 0, turns.len / 2, 300);
     try testing.expectEqual(@as(f64, 300), dominant(turns, 0, rate / 5 + 2000, 2 * rate / 5));
     try testing.expectEqual(@as(f64, 200), dominant(turns, 0, 2 * rate / 5 + 2000, 3 * rate / 5));
+}
+
+/// The peak amplitude of channel `c` of `out` at `hz`.
+fn amplitude(out: []const f32, c: usize, hz: f64) f64 {
+    var re: f64 = 0;
+    var im: f64 = 0;
+    const n = out.len / 2;
+    for (0..n) |i| {
+        const phase = 2 * std.math.pi * hz * @as(f64, @floatFromInt(i)) / @as(f64, rate);
+        const x: f64 = out[2 * i + c];
+        re += x * @cos(phase);
+        im += x * @sin(phase);
+    }
+    return 2 * std.math.hypot(re, im) / @as(f64, @floatFromInt(n));
+}
+
+/// The frequency `hz` plays at at the output's rate.
+fn fold(hz: f64) f64 {
+    const folded = @mod(hz, @as(f64, rate));
+    return @min(folded, rate - folded);
+}
+
+/// Mixes 9600 frames of `tone` at `speed`, and the last 4800 of them.
+fn renderAt(tone: *Sound, speed: f64) !struct { []f32, Player, *Engine } {
+    const engine = try manual();
+    errdefer engine.deinit();
+    const player = try engine.createPlayer(tone);
+    player.setSpeed(speed);
+    player.play();
+    return .{ try render(engine, 9600), player, engine };
+}
+
+test "downsampled, what is above 24 kHz does not fold back below it" {
+    // 30 kHz in a sound of 88.2 or 96 kHz would play at 18 kHz, and 90 kHz
+    // in one of 192 kHz at 6 kHz.
+    const cases = [_]struct { at: u32, tone: f64, alias: f64 }{
+        .{ .at = 88200, .tone = 30000, .alias = 18000 },
+        .{ .at = 96000, .tone = 30000, .alias = 18000 },
+        .{ .at = 192000, .tone = 90000, .alias = 6000 },
+    };
+    for (cases) |case| {
+        const samples = try sines(case.at, 1, &.{ 6000, case.tone });
+        defer allocator.free(samples);
+        const tone = try Sound.fromSamples(allocator, case.at, 2, samples);
+        defer tone.release();
+        const out, const player, const engine = try renderAt(tone, 1);
+        defer engine.deinit();
+        defer player.close();
+        defer allocator.free(out);
+        const heard = out[2 * 4800 ..];
+        try testing.expectApproxEqAbs(0.5, amplitude(heard, 0, 6000), 0.01);
+        try testing.expect(amplitude(heard, 1, case.alias) < 0.5 * 1e-4);
+    }
+}
+
+test "downsampled, what is below 20 kHz plays as it is and where the source is" {
+    for ([_]u32{ 88200, 96000, 192000 }) |at| {
+        for ([_][2]f64{ .{ 1000, 15000 }, .{ 6000, 20000 } }) |hz| {
+            const samples = try sines(at, 0.5, &hz);
+            defer allocator.free(samples);
+            const tone = try Sound.fromSamples(allocator, at, 2, samples);
+            defer tone.release();
+            const out, const player, const engine = try renderAt(tone, 1);
+            defer engine.deinit();
+            defer player.close();
+            defer allocator.free(out);
+            for (hz, 0..) |frequency, c| {
+                const db = 20 * std.math.log10(amplitude(out[2 * 4800 ..], c, frequency) / 0.5);
+                if (@abs(db) > 0.1) {
+                    std.debug.print("{d} Hz at {d} Hz plays at {d:.3} dB\n", .{ frequency, at, db });
+                    return error.Passband;
+                }
+            }
+            try testing.expectEqual(@as(u64, 200 * std.time.ns_per_ms), player.position());
+        }
+    }
+}
+
+test "downsampled at a sound's rate or its speed, 80 dB down from 24.5 kHz" {
+    const Case = struct { at: u32, speed: f64, pass: f64, stop: f64 };
+    var cases: [64]Case = undefined;
+    var count: usize = 0;
+    for ([_]u32{ 88200, 96000, 192000 }) |at| {
+        var hz: f64 = 24500;
+        while (hz < @as(f64, @floatFromInt(at / 2))) : (hz += 3000 + @floor(hz / 4)) {
+            cases[count] = .{ .at = at, .speed = 1, .pass = 1000, .stop = hz };
+            count += 1;
+        }
+    }
+    for ([_]Case{
+        .{ .at = 48000, .speed = 1.25, .pass = 1000, .stop = 20000 },
+        .{ .at = 44100, .speed = 2, .pass = 1000, .stop = 15000 },
+        .{ .at = 96000, .speed = 3, .pass = 1000, .stop = 9000 },
+        // Wider kernels than the ring holds.
+        .{ .at = 48000, .speed = 12, .pass = 1000, .stop = 2500 },
+        .{ .at = 96000, .speed = 16, .pass = 500, .stop = 2000 },
+        .{ .at = 192000, .speed = 16, .pass = 250, .stop = 4000 },
+        .{ .at = 96000, .speed = 16, .pass = 500, .stop = 1580 },
+    }) |case| {
+        cases[count] = case;
+        count += 1;
+    }
+    for (cases[0..count]) |case| {
+        const samples = try sines(case.at, 0.25 * case.speed, &.{ case.pass, case.stop });
+        defer allocator.free(samples);
+        const tone = try Sound.fromSamples(allocator, case.at, 2, samples);
+        defer tone.release();
+        const out, const player, const engine = try renderAt(tone, case.speed);
+        defer engine.deinit();
+        defer player.close();
+        defer allocator.free(out);
+        const heard = out[2 * 4800 ..];
+        const pass = 20 * std.math.log10(amplitude(heard, 0, case.pass * case.speed) / 0.5);
+        const alias = 20 * std.math.log10(amplitude(heard, 1, fold(case.stop * case.speed)) / 0.5);
+        if (@abs(pass) > 0.1 or alias > -80) {
+            std.debug.print("{d} Hz at {d}x: {d} Hz at {d:.3} dB, {d} Hz folds to {d} Hz at {d:.1} dB\n", .{ case.at, case.speed, case.pass * case.speed, pass, case.stop * case.speed, fold(case.stop * case.speed), alias });
+            return error.Stopband;
+        }
+    }
+}
+
+test "downsampling goes on from one buffer to the next as if mixed at once" {
+    const samples = try sines(88200, 0.2, &.{ 1000, 17000 });
+    defer allocator.free(samples);
+    // A step, which rings.
+    for (1000..1100) |i| samples[2 * i] += 0.3;
+    const tone = try Sound.fromSamples(allocator, 88200, 2, samples);
+    defer tone.release();
+    var outs: [2][]f32 = undefined;
+    for (&outs, 0..) |*out, pass| {
+        const engine = try manual();
+        defer engine.deinit();
+        const player = try engine.createPlayer(tone);
+        defer player.close();
+        player.play();
+        out.* = try allocator.alloc(f32, 9600 * 2);
+        if (pass == 0) {
+            _ = engine.render(out.*);
+            continue;
+        }
+        const sizes = [_]usize{ 1, 7, 64, 333, 2, 480, 129 };
+        var i: usize = 0;
+        var k: usize = 0;
+        while (i < 9600) : (k += 1) {
+            const m = @min(sizes[k % sizes.len], 9600 - i);
+            _ = engine.render(out.*[i * 2 .. (i + m) * 2]);
+            i += m;
+        }
+    }
+    defer for (outs) |out| allocator.free(out);
+    try testing.expectEqualSlices(f32, outs[0], outs[1]);
+}
+
+test "changing speed, a voice goes between the spline and the sinc without a click" {
+    const samples = try sines(rate, 2, &.{1000});
+    defer allocator.free(samples);
+    const tone = try Sound.fromSamples(allocator, rate, 1, samples);
+    defer tone.release();
+    const engine = try manual();
+    defer engine.deinit();
+    const player = try engine.createPlayer(tone);
+    defer player.close();
+    player.play();
+    const speeds = [_]f64{ 1, 1.5, 3, 0.8, 2, 9, 1 };
+    var out: [speeds.len * 480 * 2]f32 = undefined;
+    for (speeds, 0..) |speed, k| {
+        player.setSpeed(speed);
+        _ = engine.render(out[k * 960 ..][0..960]);
+    }
+    // The steepest a sine of 0.5 at 9 kHz is.
+    const steep = 2 * std.math.pi * 9000.0 / @as(f64, rate) * 0.5;
+    for (1..out.len / 2) |i| {
+        if (@abs(out[2 * i] - out[2 * (i - 1)]) > 1.05 * steep) {
+            std.debug.print("a click at frame {d}: {d} to {d}\n", .{ i, out[2 * (i - 1)], out[2 * i] });
+            return error.Click;
+        }
+    }
 }
