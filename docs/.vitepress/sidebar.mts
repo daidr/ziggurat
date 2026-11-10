@@ -65,6 +65,7 @@ export const sidebar: DefaultTheme.Sidebar = [
     page('版本化段落背景', '/editor-line-backgrounds'),
     page('编辑前输入门', '/editor-pre-input'),
     page('版本化正文区间标记', '/editor-range-markers'),
+    page('行内提示与建议', '/editor-inlays'),
     page('有界 snippet 会话', '/snippets'),
     page('索引文档与原生上下文', '/document'),
     page('Document 字段', '/document-fields'),
