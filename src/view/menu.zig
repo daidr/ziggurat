@@ -215,6 +215,43 @@ pub const ButtonOptions = struct {
     open: ?*bool = null,
     /// The menu's most width in DIP, as `Style.max_width` of `popoverMenu`.
     max_width: f32 = std.math.inf(f32),
+    /// How the panel of the menu, and of each submenu that opens, looks in
+    /// place of the theme's, for a menu that wears a surface of the
+    /// application's own; null keeps the theme's look. The menu keeps its
+    /// place, its gap from the button and its items' look.
+    panel: ?Panel = null,
+};
+
+/// The look of a drawn menu's panel (`ButtonOptions.panel`): each field set
+/// takes the place of the theme's.
+pub const Panel = struct {
+    /// RGB of the panel; null is the theme's background.
+    background: ?u32 = null,
+    /// RGB of its border; null is the theme's border.
+    border: ?u32 = null,
+    /// Width of the border in DIP, 0 for none; null is the theme's.
+    border_width: ?f32 = null,
+    /// Corner radius in DIP; null is the menu's 6.
+    radius: ?f32 = null,
+    /// Room around the items; null is the menu's 4 DIP on each side.
+    padding: ?Insets = null,
+
+    fn valid(self: Panel) bool {
+        if (self.background) |color| if (color > 0xffffff) return false;
+        if (self.border) |color| if (color > 0xffffff) return false;
+        if (self.border_width) |width| if (!std.math.isFinite(width) or width < 0) return false;
+        if (self.radius) |radius| if (!std.math.isFinite(radius) or radius < 0) return false;
+        return true;
+    }
+    /// Wear the look on the panel `node`.
+    fn apply(self: Panel, node: *Node) void {
+        node.menu_styled = true;
+        node.style.background = self.background;
+        node.style.border = self.border;
+        node.style.border_width = self.border_width orelse -1;
+        node.style.radius = self.radius orelse -1;
+        if (self.padding) |padding| node.style.padding = padding;
+    }
 };
 
 /// `popoverMenuButton` with its menu placed and held as `options` say.
@@ -224,8 +261,10 @@ pub fn popoverMenuButtonWith(self: *View, label: []const u8, options: ButtonOpti
     const button_id = button.id;
     const button_index: u32 = @intCast(button - self.buffers.nodes.ptr);
     const pressed = self.takeEvent(button_id) != null and button.style.enabled;
+    if (options.panel) |panel| if (!panel.valid()) return error.InvalidValue;
     var shown = try popoverMenu(self, .{ .name = if (style.name.len > 0) style.name else label, .max_width = options.max_width });
     const node = &self.buffers.nodes[self.stack[self.depth - 1]];
+    if (options.panel) |panel| panel.apply(node);
     if (options.placement) |placement| {
         node.placement = placement;
         node.menu_placed = true;
@@ -469,6 +508,7 @@ pub fn submenu(self: *View, label: []const u8, style: Style) Error!bool {
     const level = panel.level;
     const panel_id = panel.id;
     const panel_max = panel.style.max_width;
+    const look = panel.*;
     const node = try item(self, panel, label, style);
     const index: u32 = @intCast(node - self.buffers.nodes.ptr);
     const id = node.id;
@@ -481,6 +521,15 @@ pub fn submenu(self: *View, label: []const u8, style: Style) Error!bool {
     node.expanded = shown;
     if (level + 1 >= max_depth) return error.NestingTooDeep;
     const inner = try self.openNode(.menu, panelStyle(.{ .name = label, .max_width = panel_max }));
+    // A submenu wears the look of the panel it opens from.
+    if (look.menu_styled) {
+        inner.menu_styled = true;
+        inner.style.background = look.style.background;
+        inner.style.border = look.style.border;
+        inner.style.border_width = look.style.border_width;
+        inner.style.radius = look.style.radius;
+        inner.style.padding = look.style.padding;
+    }
     inner.anchor = index;
     inner.level = level + 1;
     inner.semantic_parent = panel_id;

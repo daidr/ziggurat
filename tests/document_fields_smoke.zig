@@ -459,6 +459,21 @@ const Host = struct {
                 const redo = try self.fields[1].redo();
                 try std.testing.expect(redo.text_committed);
                 try self.value(1, "a b");
+                // The application's text in place of the user's is a step of
+                // undo of its own, taken as an edit takes it; what the field
+                // holds already is no edit.
+                try std.testing.expect((try self.fields[1].replaceText(0, std.math.maxInt(usize), "x\r\ny")).text_committed);
+                try self.value(1, "x y");
+                try std.testing.expect(!(try self.fields[1].replaceText(std.math.maxInt(usize), 0, "x\ny")).text_committed);
+                try std.testing.expect((try self.fields[1].replaceText(2, 3, "zed")).text_committed);
+                try self.value(1, "x zed");
+                try std.testing.expectEqualDeep(d.Selection{ .anchor = 5, .caret = 5 }, try self.documents[1].selection());
+                try std.testing.expect((try self.fields[1].undo()).text_committed);
+                try self.value(1, "x y");
+                try std.testing.expect((try self.fields[1].undo()).text_committed);
+                try self.value(1, "a b");
+                try std.testing.expect((try self.fields[1].redo()).text_committed);
+                try self.value(1, "x y");
                 try self.key(.enter, false, false);
                 try std.testing.expectEqual(@as(usize, 1), self.submits);
                 try std.testing.expectError(error.SingleLineRequired, self.fields[1].setValue("not\na field"));

@@ -571,6 +571,10 @@ pub const Context = struct {
     /// fields, which answer for themselves; see `commandEnabled`.
     on_command_enabled: ?*const fn (*anyopaque, *Context, z.EditCommand) bool = null,
     on_accessibility_action: ?*const fn (*anyopaque, *Context, accessibility.Action) void = null,
+    /// Runs once the Context has detached from its window, as the window
+    /// closes or the content is replaced, on the main thread; the state may
+    /// let go of what it kept for the window's content.
+    on_detach: ?*const fn (*anyopaque) void = null,
     semantic_name: []const u8 = "Ziggurat",
     semantics_enabled: bool = true,
     attached_semantics_enabled: bool = false,
@@ -3494,6 +3498,7 @@ pub const Context = struct {
         if (shortcut_workspace) |workspace| workspace.release();
         if (click_workspace) |workspace| workspace.release();
         if (text_fields) |fields| fields.release();
+        if (self.on_detach) |notify| notify(self.state);
     }
 };
 
