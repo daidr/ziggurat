@@ -33,7 +33,7 @@ extern fn zsm_tray_test_title_is(*anyopaque, [*:0]const u8) c_int;
 extern fn zsm_tray_test_monospaced_digits(*anyopaque) c_int;
 extern fn zsm_tray_test_menu(*anyopaque) ?*anyopaque;
 extern fn zsm_test_tray_appearance(*anyopaque, c_int) void;
-extern fn zsp_guide_start(c_int, c_int, [*:0]const u8, [*:0]const u8, [*:0]const u8) ?*anyopaque;
+extern fn zsp_guide_start(c_int, c_int, [*:0]const u8, [*:0]const u8, [*:0]const u8, [*:0]const u8, [*:0]const u8) ?*anyopaque;
 extern fn zsp_guide_ended(*anyopaque) c_int;
 extern fn zsp_guide_stop(*anyopaque) void;
 extern fn zsp_test_guide_place(*anyopaque, f64, f64, f64, f64) c_int;
@@ -421,7 +421,9 @@ const State = struct {
                 @memcpy(title_buffer[0..title_text.len], title_text);
                 title_buffer[title_text.len] = 0;
                 const title = title_buffer[0..title_text.len :0];
-                const guide = zsp_guide_start(@backingInt(permissions.Permission.accessibility), 1, "/System/Applications/Utilities/Terminal.app", "Smoke", title) orelse return error.OutOfMemory;
+                var sentence_buffer: [256]u8 = undefined;
+                const sentence = try permissions.strings.marked(&sentence_buffer, permissions.strings.english.guide_drag);
+                const guide = zsp_guide_start(@backingInt(permissions.Permission.accessibility), 1, "/System/Applications/Utilities/Terminal.app", "Smoke", title, sentence, "Drag") orelse return error.OutOfMemory;
                 defer zsp_guide_stop(guide);
                 try expectAt(@src(), zsp_test_guide_place(guide, 200, 100, 715, 500) == 1);
                 var frame: [4]f64 = undefined;
@@ -434,6 +436,16 @@ const State = struct {
                 try expectAt(@src(), zsp_guide_ended(guide) == 0);
                 zsp_test_guide_close(guide);
                 try expectAt(@src(), zsp_guide_ended(guide) == 1);
+                // A translation keeps the names where its grammar puts them.
+                const chinese = permissions.strings.resolve("zh-CN", &.{});
+                const chinese_sentence = try permissions.strings.marked(&sentence_buffer, chinese.guide_drag);
+                const translated = zsp_guide_start(@backingInt(permissions.Permission.accessibility), 1, "/System/Applications/Utilities/Terminal.app", "Smoke", "辅助功能", chinese_sentence, "拖入") orelse return error.OutOfMemory;
+                defer zsp_guide_stop(translated);
+                try expectAt(@src(), zsp_test_guide_place(translated, 200, 100, 715, 500) == 1);
+                text = @splat(0);
+                try expectAt(@src(), zsp_test_guide_describe(translated, &frame, &text, text.len) == 1);
+                try std.testing.expectEqualStrings("将Smoke拖入上方列表以允许辅助功能。", std.mem.sliceTo(&text, 0));
+                zsp_test_guide_close(translated);
             },
             .detach => {
                 // Detaching dismisses what is pending without reporting it.

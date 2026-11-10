@@ -191,6 +191,16 @@ static void portal_stop(void) {
 }
 NativeApp *zlg_app_create(void *owner, void (*dispatch)(void *), int *error) {
     if (!g_atomic_int_compare_and_exchange(&active_app,0,1)) { *error=1; return NULL; }
+    /* The program is its executable, by whichever name started it (a link in
+       /usr/bin of another name, as the Linux packages put one for each
+       command): GTK names the windows' class and the Wayland app id after
+       the program, as the desktop entry does (StartupWMClass), and WebKitGTK
+       the directories of the pages' data, which would otherwise follow
+       argv[0]. A name the app set first (identity.setProcessIdentity) stays. */
+    if (!g_get_prgname()) {
+        gchar *executable=g_file_read_link("/proc/self/exe",NULL);
+        if (executable) { gchar *base=g_path_get_basename(executable); g_set_prgname(base); g_free(base); g_free(executable); }
+    }
     if (!gtk_init_check(NULL,NULL)) { g_atomic_int_set(&active_app,0); *error=2; return NULL; }
     NativeApp *app=g_try_new0(NativeApp,1);
     if (!app) { g_atomic_int_set(&active_app,0); *error=3; return NULL; }

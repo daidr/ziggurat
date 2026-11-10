@@ -265,3 +265,45 @@ int zsh_type_icon(const char *extension, int size, uint32_t background, unsigned
     if (icon) g_object_unref(icon);
     return status;
 }
+
+/* The content type of the file at path, as GIO finds it from its name and
+   first bytes (inode/directory for a folder), or what its whole name tells
+   where there is no such file, as "Makefile" or "notes.txt". Owned. */
+static char *content_type(const char *path) {
+    GFile *file = g_file_new_for_path(path);
+    GFileInfo *info = g_file_query_info(file, G_FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE, G_FILE_QUERY_INFO_NONE, NULL, NULL);
+    g_object_unref(file);
+    if (info) {
+        const char *type = g_file_info_get_content_type(info);
+        char *owned = type ? g_strdup(type) : NULL;
+        g_object_unref(info);
+        if (owned) return owned;
+    }
+    char *base = g_path_get_basename(path);
+    char *guessed = g_content_type_guess(base, NULL, 0, NULL);
+    g_free(base);
+    return guessed;
+}
+
+/* The application that opens a URL of `scheme`, or else the file at `path`:
+   the default handler of the scheme, or of the file's content type. It is
+   visited once with the display name, desktop file ID and entry path that
+   zsh_apps gives. */
+int zsh_default_app(const char *url, const char *scheme, const char *path, ZshAppVisit visit, void *context, ZshFailure *failure) {
+    (void)url; (void)failure;
+    GAppInfo *info = NULL;
+    if (scheme) info = g_app_info_get_default_for_uri_scheme(scheme);
+    else if (path) {
+        char *type = content_type(path);
+        if (!type) return ZSH_NOT_SUPPORTED;
+        info = g_app_info_get_default_for_type(type, FALSE);
+        g_free(type);
+    } else return ZSH_INVALID;
+    if (!info) return ZSH_NOT_SUPPORTED;
+    const char *id = g_app_info_get_id(info);
+    const char *entry = G_IS_DESKTOP_APP_INFO(info) ? g_desktop_app_info_get_filename(G_DESKTOP_APP_INFO(info)) : NULL;
+    const char *name = g_app_info_get_display_name(info);
+    int status = visit(context, name ? name : "", id ? id : "", entry ? entry : id ? id : "");
+    g_object_unref(info);
+    return status;
+}

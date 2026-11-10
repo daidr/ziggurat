@@ -18,6 +18,7 @@ const builtin = @import("builtin");
 const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const shell = @import("shell.zig");
+pub const strings = @import("permission_strings.zig");
 
 const os = builtin.os.tag;
 const native_macos = os == .macos and !builtin.is_test;
@@ -102,23 +103,27 @@ pub const Error = error{
 /// "Screen Recording". macOS 27 names Accessibility "Device Control and Data
 /// Access".
 pub fn title(permission: Permission) []const u8 {
-    if (permission == .accessibility and native_macos and zsp_macos_major() >= 27) return "Device Control and Data Access";
-    return titleOf(permission);
+    return titleIn(strings.english, permission);
 }
-fn titleOf(permission: Permission) []const u8 {
+/// The name of the permission in `text`, such as `strings.resolve("ja", &.{})`.
+pub fn titleIn(text: strings.Strings, permission: Permission) []const u8 {
+    if (permission == .accessibility and native_macos and zsp_macos_major() >= 27) return text.device_control_and_data_access;
+    return titleOf(text, permission);
+}
+fn titleOf(text: strings.Strings, permission: Permission) []const u8 {
     return switch (permission) {
-        .accessibility => "Accessibility",
-        .screen_recording => "Screen Recording",
-        .input_monitoring => "Input Monitoring",
-        .full_disk_access => "Full Disk Access",
-        .app_management => "App Management",
-        .developer_tools => "Developer Tools",
-        .microphone => "Microphone",
-        .camera => "Camera",
-        .calendars => "Calendars",
-        .reminders => "Reminders",
-        .bluetooth => "Bluetooth",
-        .media_apple_music => "Media & Apple Music",
+        .accessibility => text.accessibility,
+        .screen_recording => text.screen_recording,
+        .input_monitoring => text.input_monitoring,
+        .full_disk_access => text.full_disk_access,
+        .app_management => text.app_management,
+        .developer_tools => text.developer_tools,
+        .microphone => text.microphone,
+        .camera => text.camera,
+        .calendars => text.calendars,
+        .reminders => text.reminders,
+        .bluetooth => text.bluetooth,
+        .media_apple_music => text.media_apple_music,
     };
 }
 
@@ -325,6 +330,12 @@ pub const GuideOptions = struct {
     /// The name the panel gives the app: the app's file name without its
     /// extension when null.
     name: ?[]const u8 = null,
+    /// BCP 47 tag or POSIX locale of the panel's language, such as
+    /// "zh-Hans" or "ja_JP": its texts follow the closest language
+    /// `strings.languages` ships, then `languages`, then English.
+    locale: []const u8 = "en",
+    /// The application's texts, which override the shipped ones per field.
+    languages: []const strings.Language = &.{},
 };
 pub const max_guide_path_bytes = 1024;
 pub const max_guide_name_bytes = 256;
@@ -377,9 +388,14 @@ pub const Guide = struct {
             self.app = null;
         }
         if (native_macos) {
-            var title_buffer: [64]u8 = undefined;
-            const permission_title = try terminated(&title_buffer, title(permission));
-            self.native = zsp_guide_start(@backingInt(permission), @intFromBool(draggable(permission)), path, name, permission_title) orelse return error.OutOfMemory;
+            const text = strings.resolve(options.locale, options.languages);
+            var title_buffer: [256]u8 = undefined;
+            var sentence_buffer: [1024]u8 = undefined;
+            var hint_buffer: [256]u8 = undefined;
+            const permission_title = try terminated(&title_buffer, titleIn(text, permission));
+            const sentence = try strings.marked(&sentence_buffer, text.guide_drag);
+            const hint = try terminated(&hint_buffer, text.guide_drag_hint);
+            self.native = zsp_guide_start(@backingInt(permission), @intFromBool(draggable(permission)), path, name, permission_title, sentence, hint) orelse return error.OutOfMemory;
         }
         errdefer if (self.native) |native| {
             zsp_guide_stop(native);
@@ -609,7 +625,7 @@ comptime {
 extern fn zsp_macos_major() c_int;
 extern fn zsp_check(c_int) c_int;
 extern fn zsp_request(c_int, *c_int, *c_int) c_int;
-extern fn zsp_guide_start(c_int, c_int, [*:0]const u8, [*:0]const u8, [*:0]const u8) ?*anyopaque;
+extern fn zsp_guide_start(c_int, c_int, [*:0]const u8, [*:0]const u8, [*:0]const u8, [*:0]const u8, [*:0]const u8) ?*anyopaque;
 extern fn zsp_guide_ended(*anyopaque) c_int;
 extern fn zsp_guide_stop(*anyopaque) void;
 
@@ -618,7 +634,9 @@ test "settings pages and titles" {
     try std.testing.expectEqualStrings("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture", macSettingsUrl(.screen_recording));
     try std.testing.expectEqualStrings("ms-settings:privacy-webcam", windowsSettingsUrl(.camera).?);
     try std.testing.expect(windowsSettingsUrl(.accessibility) == null);
-    try std.testing.expectEqualStrings("Media & Apple Music", titleOf(.media_apple_music));
+    try std.testing.expectEqualStrings("Media & Apple Music", title(.media_apple_music));
+    try std.testing.expectEqualStrings("媒体与 Apple Music", titleIn(strings.resolve("zh-CN", &.{}), .media_apple_music));
+    for (all) |p| try std.testing.expect(titleIn(strings.resolve("ja", &.{}), p).len > 0);
     for (all) |p| try shell.validateUrl(macSettingsUrl(p), settings_schemes);
     try shell.validateUrl(windowsSettingsUrl(.microphone).?, settings_schemes);
     try std.testing.expect(!draggable(.camera) and draggable(.accessibility) and draggable(.bluetooth));
@@ -630,6 +648,10 @@ test "consent store" {
     try std.testing.expectEqual(Status.granted, windowsConsent(&.{ L("Allow"), null, L("Allow") }));
     try std.testing.expectEqual(Status.denied, windowsConsent(&.{ L("Allow"), L("deny"), null }));
     try std.testing.expectEqual(Status.denied, windowsConsent(&.{ null, null, L("Deny") }));
+}
+
+test {
+    _ = strings;
 }
 
 test "app names" {

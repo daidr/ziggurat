@@ -159,6 +159,11 @@ test "a release found in the background offers to install, downloads and offers 
     try equal(3, f.harness.count(.{ .kind = .button }));
     try f.harness.click(.{ .kind = .checkbox });
     try f.click("Install Update");
+    // Install checks again first; nothing newer, so the release shown.
+    try equal(u.Screen.checking, f.updater.screen);
+    try equal(2, f.fake.checks);
+    try equal(0, f.fake.installs);
+    f.updater.checkFinished(f.fake.token, .current);
     try equal(1, f.fake.installs);
     try strings("1.1.0.0", f.fake.installing[0..f.fake.installing_len]);
     // The checkbox is saved as the user's choice.
@@ -179,7 +184,7 @@ test "a release found in the background offers to install, downloads and offers 
     // Installed: background checks stop, and the user is offered the restart again.
     try equal(@as(?u64, null), f.timer.armed);
     f.updater.timerFired();
-    try equal(1, f.fake.checks);
+    try equal(2, f.fake.checks);
     f.updater.checkForUpdates();
     try equal(u.Screen.ready, f.updater.screen);
 }
@@ -243,6 +248,7 @@ test "cancelling a download or closing the window stops the job and ignores its 
     f.updater.checkForUpdates();
     f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.1.0.0" } });
     try f.click("Install Update");
+    f.updater.checkFinished(f.fake.token, .current);
     const stale = f.fake.token;
     try f.click("Cancel");
     try equal(1, f.fake.cancels);
@@ -288,6 +294,7 @@ test "failures show their cause to the user and retry sooner in the background" 
     f.updater.checkForUpdates();
     f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.1.0.0" } });
     try f.click("Install Update");
+    f.updater.checkFinished(f.fake.token, .current);
     f.updater.installFinished(f.fake.token, error.DiskFull);
     try expect(try f.has("The update could not be downloaded or installed."));
 }
@@ -333,6 +340,77 @@ test "automatic checks follow the user's choice and changes are announced" {
     try expect(u.prefs.load(temp.dir).automatic_checks.?);
 }
 
+test "a release that comes out while the window is open takes the offered one's place" {
+    var f: Fixture = undefined;
+    try f.init(options);
+    defer f.deinit();
+    f.updater.timerFired();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.1.0.0", .notes = "Faster start." } });
+    try expect(try f.has("Notes 1.1.0.0 is available. You have 1.0.0.0."));
+    // Asked again while the window offers 1.1: it checks again and keeps
+    // the window on the offer meanwhile.
+    f.updater.checkForUpdates();
+    try equal(2, f.fake.checks);
+    try equal(u.Screen.available, f.updater.screen);
+    // Asked once more during that check: no second check.
+    f.updater.checkForUpdates();
+    try equal(2, f.fake.checks);
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.2.0.0", .notes = "Sync." } });
+    try equal(u.Screen.available, f.updater.screen);
+    try expect(try f.has("Notes 1.2.0.0 is available. You have 1.0.0.0."));
+    try expect(try f.has("Sync."));
+    try strings("1.2.0.0", f.updater.availableVersion());
+    // A check that finds an older release or fails keeps the newer offer.
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.1.0.0" } });
+    try expect(try f.has("Notes 1.2.0.0 is available."));
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .{ .failed = error.ConnectionRefused });
+    try expect(try f.has("Notes 1.2.0.0 is available."));
+    try strings("1.2.0.0", f.updater.availableVersion());
+    // Install checks again and installs the newest version it finds.
+    try f.click("Install Update");
+    try equal(u.Screen.checking, f.updater.screen);
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.3.0.0" } });
+    try equal(1, f.fake.installs);
+    try strings("1.3.0.0", f.fake.installing[0..f.fake.installing_len]);
+    try equal(u.Screen.downloading, f.updater.screen);
+}
+
+test "the check before installing installs the release shown when it fails, and Cancel ends it" {
+    var f: Fixture = undefined;
+    try f.init(options);
+    defer f.deinit();
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.1.0.0" } });
+    try f.click("Install Update");
+    f.updater.checkFinished(f.fake.token, .{ .failed = error.ConnectionRefused });
+    try strings("1.1.0.0", f.fake.installing[0..f.fake.installing_len]);
+    try f.click("Cancel");
+    try f.settle();
+    // Cancelled while it checks: nothing installs, and the late answer is
+    // ignored.
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.1.0.0" } });
+    try f.click("Install Update");
+    const stale = f.fake.token;
+    try f.click("Cancel");
+    try equal(u.Screen.idle, f.updater.screen);
+    f.updater.checkFinished(stale, .{ .available = .{ .version = "1.2.0.0" } });
+    try equal(1, f.fake.installs);
+    try equal(u.Screen.idle, f.updater.screen);
+    // Remind Me Later during a check asked for again ends it too.
+    try f.settle();
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.1.0.0" } });
+    f.updater.checkForUpdates();
+    const asked = f.fake.token;
+    try f.click("Remind Me Later");
+    try equal(u.Screen.idle, f.updater.screen);
+    f.updater.checkFinished(asked, .{ .available = .{ .version = "1.2.0.0" } });
+    try equal(u.Screen.idle, f.updater.screen);
+}
+
 test "availableVersion reports a pending update, told through on_change" {
     const Counter = struct {
         count: usize = 0,
@@ -375,6 +453,7 @@ test "availableVersion reports a pending update, told through on_change" {
     f.updater.checkForUpdates();
     f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.3.0.0" } });
     try f.click("Install Update");
+    f.updater.checkFinished(f.fake.token, .current);
     f.updater.installFinished(f.fake.token, null);
     try strings("1.3.0.0", f.updater.availableVersion());
     // Up to date: nothing pending.
@@ -516,8 +595,8 @@ test "the feed backend checks a signed feed and installs into the managed root" 
     try strings("1.1.0.0", f.updater.releaseVersion());
     try strings("Faster start.", f.updater.releaseNotes());
 
-    // A newer release appeared between the check and the install: the
-    // install refuses to fetch something other than what the user accepted.
+    // A newer release appeared after the window opened: Install checks
+    // again and installs it instead.
     manifest.version.minor = 2;
     const newer = try update.sign(allocator, manifest, key);
     defer allocator.free(newer);
@@ -526,8 +605,10 @@ test "the feed backend checks a signed feed and installs into the managed root" 
     try temp.dir.writeFile(zio.io(), .{ .sub_path = "feed.json", .data = newer_feed });
     try f.click("Install Update");
     try waitDone(&backend, f.app);
+    try strings("1.2.0.0", f.updater.releaseVersion());
+    // The test's address serves no archive.
+    try waitDone(&backend, f.app);
     try equal(u.Screen.install_failed, f.updater.screen);
-    try expect(try f.has("ReleaseChanged"));
     try f.click("OK");
     try temp.dir.writeFile(zio.io(), .{ .sub_path = "feed.json", .data = feed });
 
@@ -618,6 +699,7 @@ test "the feed backend reads the app's own source, and prereleases only when off
     try equal(@as(?bool, true), memory.asked_prereleases);
     try strings("1.2.0.1", f.updater.releaseVersion());
     try f.click("Install Update");
+    try waitDone(&backend, f.app);
     try waitDone(&backend, f.app);
     try equal(u.Screen.ready, f.updater.screen);
     try equal(@as(usize, 1), memory.opens);

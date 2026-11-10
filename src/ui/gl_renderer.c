@@ -897,6 +897,7 @@ static void reset_frame(ZlRenderer *s){
 #ifdef __wasm__
 static void layout_for(ZlRenderer *s){(void)s;}
 #else
+void *zfont_gray_map(void);
 static void layout_for(ZlRenderer *s){
     if(s->layout&&s->layout_scale==s->scale)return;
     if(s->layout)g_object_unref(s->layout);
@@ -907,7 +908,11 @@ static void layout_for(ZlRenderer *s){
     /* Laid out at the frame's scale, as the software renderer lays out. */
     cairo_surface_t *scratch=cairo_image_surface_create(CAIRO_FORMAT_ARGB32,1,1);cairo_t *cr=cairo_create(scratch);
     cairo_scale(cr,s->scale,s->scale);
-    s->layout=pango_cairo_create_layout(cr);s->layout_spacing=0;
+    /* On the grayscale font map: see zfont_gray. */
+    PangoFontMap *gray=zfont_gray_map();
+    if(gray){PangoContext *context=pango_font_map_create_context(gray);pango_cairo_update_context(cr,context);s->layout=pango_layout_new(context);g_object_unref(context);}
+    else s->layout=pango_cairo_create_layout(cr);
+    s->layout_spacing=0;
     cairo_destroy(cr);cairo_surface_destroy(scratch);
     /* Text draws into transparent textures in grayscale, as glyph coverage
        the frame tints: where the desktop's settings leave antialiasing to

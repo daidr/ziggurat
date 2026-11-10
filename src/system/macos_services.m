@@ -375,6 +375,25 @@ int zsh_apps(ZshAppVisit visit, void *context) {
         return ZSH_OK;
     }
 }
+/* The application the system opens `url` with, or the file at `path` when
+   there is no URL: the .app bundle Launch Services picks, visited once with
+   the name, bundle identifier (or path) and path that zsh_apps gives. */
+int zsh_default_app(const char *url, const char *scheme, const char *path, ZshAppVisit visit, void *context, ZshFailure *failure) {
+    (void)scheme;
+    @autoreleasepool {
+        NSURL *target = url ? [NSURL URLWithString:ztext(url) ?: @""] : path ? [NSURL fileURLWithPath:ztext(path) ?: @""] : nil;
+        if (!target) return ZSH_INVALID;
+        NSURL *application = [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:target];
+        if (!application) { failure->domain = 5; failure->code = (uint32_t)kLSApplicationNotFoundErr; return ZSH_NOT_SUPPORTED; }
+        NSString *bundlePath = [application path];
+        if (![bundlePath length]) return ZSH_NOT_SUPPORTED;
+        NSString *name = [[NSFileManager defaultManager] displayNameAtPath:bundlePath];
+        if ([[name pathExtension] isEqualToString:@"app"]) name = [name stringByDeletingPathExtension];
+        NSString *identifier = [[NSBundle bundleWithPath:bundlePath] bundleIdentifier];
+        if (![identifier length]) identifier = bundlePath;
+        return visit(context, [name length] ? [name UTF8String] : "", [identifier UTF8String], [bundlePath fileSystemRepresentation]);
+    }
+}
 /* Starts an app, or brings it to the front when it runs. */
 int zsh_launch_app(const char *path, ZshFailure *failure) {
     @autoreleasepool {

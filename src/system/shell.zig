@@ -13,6 +13,7 @@ const gio = if (builtin.os.tag == .linux or builtin.os.tag == .macos) struct {
     extern fn zsh_trash(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
     extern fn zsh_apps(visit: *const fn (?*anyopaque, [*:0]const u8, [*:0]const u8, [*:0]const u8) callconv(.c) c_int, context: ?*anyopaque) c_int;
     extern fn zsh_launch_app(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
+    extern fn zsh_default_app(url: ?[*:0]const u8, scheme: ?[*:0]const u8, path: ?[*:0]const u8, visit: *const fn (?*anyopaque, [*:0]const u8, [*:0]const u8, [*:0]const u8) callconv(.c) c_int, context: ?*anyopaque, failure: *NativeShellFailure) c_int;
     extern fn zsh_file_icon(path: [*:0]const u8, size: c_int, background: u32, out: [*]u8, failure: *NativeShellFailure) c_int;
     extern fn zsh_type_icon(extension: [*:0]const u8, size: c_int, background: u32, out: [*]u8) c_int;
 } else struct {};
@@ -121,6 +122,7 @@ pub const capabilities = .{
     .type_icon = builtin.os.tag == .windows or posix_shell,
     .installed_applications = builtin.os.tag == .windows or posix_shell,
     .launch_application = builtin.os.tag == .windows or posix_shell,
+    .default_application = builtin.os.tag == .windows or posix_shell,
 };
 
 /// An application as a launcher lists it. `id` is the AppUserModelID (or a
@@ -138,6 +140,61 @@ pub const InstalledApps = struct {
         self.* = undefined;
     }
 };
+
+/// The application `defaultApp` found, owning its strings.
+pub const DefaultApp = struct {
+    arena: std.heap.ArenaAllocator,
+    app: InstalledApp,
+    pub fn deinit(self: *DefaultApp) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+/// What `defaultApp` asks the system about: the handler of a URL scheme,
+/// or of a file, by its path (a file URL's, decoded).
+pub const DefaultTarget = union(enum) { scheme: []const u8, path: []const u8 };
+
+/// Reads `url` as `defaultApp` does: a file URL (`file:///path`, or
+/// `file://localhost/path`) names the file at its percent-decoded path; any
+/// other URL with a scheme of two characters or more names its scheme; text
+/// without one, as `/home/me/notes.txt` or `C:\notes.txt`, is a path.
+/// `storage` holds a decoded path and must be as long as `url`.
+pub fn defaultTarget(storage: []u8, url: []const u8) !DefaultTarget {
+    if (url.len == 0) return error.InvalidUrl;
+    const colon = std.mem.indexOfScalar(u8, url, ':');
+    if (colon) |at| if (std.ascii.eqlIgnoreCase(url[0..at], "file")) {
+        var rest = url[at + 1 ..];
+        if (std.mem.startsWith(u8, rest, "//")) {
+            rest = rest[2..];
+            const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.InvalidUrl;
+            const host = rest[0..slash];
+            if (host.len != 0 and !std.ascii.eqlIgnoreCase(host, "localhost")) return error.InvalidUrl;
+            rest = rest[slash..];
+        }
+        var length: usize = 0;
+        var index: usize = 0;
+        while (index < rest.len) : (index += 1) {
+            var byte = rest[index];
+            if (byte == '%') {
+                if (index + 2 >= rest.len) return error.InvalidUrl;
+                byte = std.fmt.parseInt(u8, rest[index + 1 .. index + 3], 16) catch return error.InvalidUrl;
+                if (byte == 0) return error.EmbeddedNul;
+                index += 2;
+            }
+            storage[length] = byte;
+            length += 1;
+        }
+        var path = storage[0..length];
+        // file:///C:/notes.txt names C:/notes.txt on Windows.
+        if (builtin.os.tag == .windows and path.len >= 3 and path[0] == '/' and std.ascii.isAlphabetic(path[1]) and path[2] == ':') path = path[1..];
+        if (path.len == 0) return error.InvalidUrl;
+        if (!std.unicode.utf8ValidateSlice(path)) return error.InvalidUtf8;
+        return .{ .path = path };
+    };
+    if (colon) |at| if (schemeSyntax(url[0..at])) return .{ .scheme = url[0..at] };
+    return .{ .path = url };
+}
 
 /// Orders by case-folded name, then path, as launchers sort.
 pub fn sortApps(items: []InstalledApp) void {
@@ -487,6 +544,62 @@ pub const Worker = struct {
             };
         } else return error.UnsupportedCapability;
     }
+    /// The application the system opens `url` with, the default handler for
+    /// it: the browser for a web URL, the editor for a text file, the file
+    /// manager for a folder. `url` is a web URL such as https://example.com,
+    /// any URL whose scheme the system knows a handler for, a file URL, or a
+    /// path (see `defaultTarget`). The app has the name, id and path that
+    /// `installedApps` gives: Launch Services' choice on macOS; on Linux the
+    /// default desktop entry for the scheme, or for the type GIO finds the
+    /// file to be (a folder, a file by its first bytes, or where there is no
+    /// such file, by its whole name); on Windows the association of the
+    /// scheme or the file's extension, a packaged app as its
+    /// `shell:AppsFolder` item and a desktop app as its Start menu item, or
+    /// by its executable where it has none. `NoAssociation` when nothing
+    /// opens it. Reads system associations: call it on this worker, off the
+    /// main thread. Owned by the caller.
+    pub fn defaultApp(self: *Worker, allocator: std.mem.Allocator, url: []const u8) !DefaultApp {
+        try self.require();
+        if (url.len > max_url_bytes) return error.ArgumentTooLong;
+        try validateText(url);
+        var decoded: [max_url_bytes]u8 = undefined;
+        const target = try defaultTarget(&decoded, url);
+        var result: DefaultApp = .{ .arena = .init(allocator), .app = undefined };
+        errdefer result.arena.deinit();
+        const arena = result.arena.allocator();
+        if (builtin.os.tag == .windows) {
+            try self.ensureApartment();
+            result.app = try windowsDefaultApp(self, arena, target);
+        } else if (posix_shell) {
+            var url_storage: [max_url_bytes + 1]u8 = undefined;
+            var target_storage: [max_url_bytes + 1]u8 = undefined;
+            const url_z = narrowZ(&url_storage, url);
+            var list: std.ArrayList(InstalledApp) = .empty;
+            var collector: AppCollector = .{ .allocator = arena, .list = &list };
+            var failure: NativeShellFailure = .{};
+            const status: GioStatus = @fromBackingInt(@intCast(switch (target) {
+                .scheme => |scheme| gio.zsh_default_app(url_z.ptr, narrowZ(&target_storage, scheme).ptr, null, AppCollector.visit, &collector, &failure),
+                // macOS asks Launch Services about a file URL as it is.
+                .path => |path| gio.zsh_default_app(if (builtin.os.tag == .macos and path.ptr != url.ptr) url_z.ptr else null, null, narrowZ(&target_storage, path).ptr, AppCollector.visit, &collector, &failure),
+            }));
+            if (collector.failure) |err| return err;
+            switch (status) {
+                .ok => {},
+                .not_supported, .not_found => {
+                    self.recordGio(failure);
+                    return error.NoAssociation;
+                },
+                .invalid => return error.InvalidUrl,
+                else => {
+                    self.recordGio(failure);
+                    return error.OpenFailed;
+                },
+            }
+            if (list.items.len != 1) return error.NoAssociation;
+            result.app = list.items[0];
+        } else return error.UnsupportedCapability;
+        return result;
+    }
     fn shellExecute(self: *Worker, target: [*:0]const u16) !void {
         var info = std.mem.zeroes(win.SHELLEXECUTEINFOW);
         info.cbSize = @sizeOf(win.SHELLEXECUTEINFOW);
@@ -705,6 +818,164 @@ fn appsFolder(worker: *Worker, allocator: std.mem.Allocator, list: *std.ArrayLis
         const path = try std.mem.concat(allocator, u8, &.{ apps_folder_prefix, id });
         try list.append(allocator, .{ .name = name, .id = id, .path = path });
     }
+}
+
+const iid_shell_item2: Guid = .{ .data1 = 0x7e9fb0d3, .data2 = 0x919f, .data3 = 0x4307, .data4 = .{ 0xab, 0x2e, 0x9b, 0x18, 0x60, 0x31, 0x0c, 0x93 } };
+const iid_persist_file: Guid = .{ .data1 = 0x0000010b, .data2 = 0, .data3 = 0, .data4 = .{ 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+const iid_shell_link: Guid = .{ .data1 = 0x000214f9, .data2 = 0, .data3 = 0, .data4 = .{ 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+const clsid_shell_link: Guid = .{ .data1 = 0x00021401, .data2 = 0, .data3 = 0, .data4 = .{ 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+const PropertyKey = extern struct { format: Guid, id: u32 };
+const link_target_parsing_path: PropertyKey = .{ .format = .{ .data1 = 0xb9b4b3fc, .data2 = 0x2b51, .data3 = 0x4a42, .data4 = .{ 0xb5, 0xd8, 0x32, 0x41, 0x46, 0xaf, 0xcf, 0x25 } }, .id = 2 };
+/// A COM object called by the index of its vtable entry.
+const ComObject = extern struct {
+    vtable: [*]const *const anyopaque,
+    fn method(self: *ComObject, comptime T: type, index: usize) T {
+        return @ptrCast(self.vtable[index]);
+    }
+    fn release(self: *ComObject) void {
+        _ = self.method(*const fn (*ComObject) callconv(.winapi) u32, 2)(self);
+    }
+    fn query(self: *ComObject, iid: *const Guid) ?*ComObject {
+        var out: ?*anyopaque = null;
+        if (self.method(*const fn (*ComObject, *const Guid, *?*anyopaque) callconv(.winapi) i32, 0)(self, iid, &out) < 0) return null;
+        return @ptrCast(@alignCast(out orelse return null));
+    }
+};
+const assoc_str_executable = 2;
+const assoc_str_friendly_app_name = 4;
+const assoc_str_app_id = 21;
+const shell_assoc = if (builtin.os.tag == .windows) struct {
+    extern "shlwapi" fn AssocQueryStringW(flags: u32, string: u32, assoc: [*:0]const u16, extra: ?[*:0]const u16, out: ?[*]u16, length: *u32) callconv(.winapi) i32;
+    extern "ole32" fn CoCreateInstance(class: *const Guid, outer: ?*anyopaque, context: u32, iid: *const Guid, out: *?*anyopaque) callconv(.winapi) i32;
+} else struct {};
+
+/// Whether `path` is the system's Open With dialog, which an association
+/// without an application names.
+pub fn isOpenWithExecutable(path: []const u8) bool {
+    const start = if (std.mem.lastIndexOfAny(u8, path, "\\/")) |slash| slash + 1 else 0;
+    return std.ascii.eqlIgnoreCase(path[start..], "OpenWith.exe");
+}
+
+/// The installed app whose executable is `executable`, compared without
+/// case as Windows paths are, from `targets` (one per app).
+pub fn appByExecutable(apps: []const InstalledApp, targets: []const []const u8, executable: []const u8) ?InstalledApp {
+    for (apps, targets) |app, target| if (target.len != 0 and std.ascii.eqlIgnoreCase(target, executable)) return app;
+    return null;
+}
+
+/// What a Windows association string names, `buffer`-backed UTF-8, or null.
+fn assocQuery(arena: std.mem.Allocator, kind: u32, assoc: [:0]const u16) ?[]const u8 {
+    if (builtin.os.tag != .windows) return null;
+    var buffer: [4096]u16 = undefined;
+    var length: u32 = buffer.len;
+    if (shell_assoc.AssocQueryStringW(0, kind, assoc.ptr, null, &buffer, &length) != 0) return null;
+    const units = std.mem.sliceTo(buffer[0..@min(length, buffer.len)], 0);
+    if (units.len == 0) return null;
+    return std.unicode.wtf16LeToWtf8Alloc(arena, units) catch null;
+}
+
+/// AssocQueryStringW for the scheme or the extension: a packaged app by its
+/// AppUserModelID as the Applications folder lists it, else the
+/// executable, matched to the Start menu item that runs it.
+fn windowsDefaultApp(worker: *Worker, arena: std.mem.Allocator, target: DefaultTarget) !InstalledApp {
+    if (builtin.os.tag != .windows) return error.UnsupportedCapability;
+    const text = switch (target) {
+        .scheme => |scheme| scheme,
+        .path => |path| std.fs.path.extension(path),
+    };
+    if (text.len == 0 or std.mem.eql(u8, text, ".")) return error.InvalidUrl;
+    var storage: [max_url_bytes + 1]u16 = undefined;
+    const assoc = try wideZ(&storage, text);
+    if (assocQuery(arena, assoc_str_app_id, assoc)) |id| {
+        const name = assocQuery(arena, assoc_str_friendly_app_name, assoc) orelse id;
+        return .{ .name = name, .id = id, .path = try std.mem.concat(arena, u8, &.{ apps_folder_prefix, id }) };
+    }
+    const executable = assocQuery(arena, assoc_str_executable, assoc) orelse return error.NoAssociation;
+    if (isOpenWithExecutable(executable)) return error.NoAssociation;
+    var list: std.ArrayList(InstalledApp) = .empty;
+    var targets: std.ArrayList([]const u8) = .empty;
+    if (appsFolderTargets(worker, arena, &list, &targets)) |_| {
+        if (appByExecutable(list.items, targets.items, executable)) |app| return app;
+    } else |_| {}
+    const name = assocQuery(arena, assoc_str_friendly_app_name, assoc) orelse executable;
+    return .{ .name = name, .id = executable, .path = executable };
+}
+
+/// The Applications folder's apps with the executable each runs: a
+/// shortcut's target, else the item's own file path.
+fn appsFolderTargets(worker: *Worker, arena: std.mem.Allocator, list: *std.ArrayList(InstalledApp), targets: *std.ArrayList([]const u8)) !void {
+    if (builtin.os.tag != .windows) return error.UnsupportedCapability;
+    var folder_object: ?*anyopaque = null;
+    var result = shell_apps.SHGetKnownFolderItem(&folder_apps, 0, null, &iid_shell_item, &folder_object);
+    if (result < 0 or folder_object == null) {
+        worker.last_failure = .{ .domain = .hresult, .code = @bitCast(result) };
+        return error.ApplicationsUnavailable;
+    }
+    const folder: *ShellItem = @ptrCast(@alignCast(folder_object.?));
+    defer _ = folder.vtable.release(folder);
+    var enum_object: ?*anyopaque = null;
+    result = folder.vtable.bind_to_handler(folder, null, &handler_enum_items, &iid_enum_shell_items, &enum_object);
+    if (result < 0 or enum_object == null) return error.ApplicationsUnavailable;
+    const items: *EnumShellItems = @ptrCast(@alignCast(enum_object.?));
+    defer _ = items.vtable.release(items);
+    while (true) {
+        var item: ?*ShellItem = null;
+        var fetched: u32 = 0;
+        if (items.vtable.next(items, 1, &item, &fetched) != 0 or fetched == 0) break;
+        const shell_item = item orelse break;
+        defer _ = shell_item.vtable.release(shell_item);
+        var name_wide: ?[*:0]u16 = null;
+        var id_wide: ?[*:0]u16 = null;
+        _ = shell_item.vtable.get_display_name(shell_item, 0, &name_wide);
+        defer shell_apps.CoTaskMemFree(name_wide);
+        _ = shell_item.vtable.get_display_name(shell_item, 0x80018001, &id_wide);
+        defer shell_apps.CoTaskMemFree(id_wide);
+        const name_units = std.mem.span(name_wide orelse continue);
+        const id_units = std.mem.span(id_wide orelse continue);
+        if (name_units.len == 0 or id_units.len == 0) continue;
+        const id = try std.unicode.wtf16LeToWtf8Alloc(arena, id_units);
+        try list.append(arena, .{ .name = try std.unicode.wtf16LeToWtf8Alloc(arena, name_units), .id = id, .path = try std.mem.concat(arena, u8, &.{ apps_folder_prefix, id }) });
+        try targets.append(arena, itemExecutable(arena, @ptrCast(shell_item)) orelse "");
+    }
+}
+
+fn itemExecutable(arena: std.mem.Allocator, item: *ComObject) ?[]const u8 {
+    if (builtin.os.tag != .windows) return null;
+    if (item.query(&iid_shell_item2)) |item2| {
+        defer item2.release();
+        var value: ?[*:0]u16 = null;
+        // IShellItem2::GetString
+        if (item2.method(*const fn (*ComObject, *const PropertyKey, *?[*:0]u16) callconv(.winapi) i32, 17)(item2, &link_target_parsing_path, &value) >= 0) if (value) |units| {
+            defer shell_apps.CoTaskMemFree(units);
+            if (std.mem.span(units).len != 0) return std.unicode.wtf16LeToWtf8Alloc(arena, std.mem.span(units)) catch null;
+        };
+    }
+    var path_wide: ?[*:0]u16 = null;
+    const file_system_path = 0x80058000;
+    if (item.method(*const fn (*ComObject, u32, *?[*:0]u16) callconv(.winapi) i32, 5)(item, file_system_path, &path_wide) < 0) return null;
+    const units = path_wide orelse return null;
+    defer shell_apps.CoTaskMemFree(units);
+    const path = std.unicode.wtf16LeToWtf8Alloc(arena, std.mem.span(units)) catch return null;
+    if (!std.ascii.eqlIgnoreCase(std.fs.path.extension(path), ".lnk")) return path;
+    return shortcutTarget(arena, std.mem.span(units));
+}
+
+fn shortcutTarget(arena: std.mem.Allocator, path: [:0]const u16) ?[]const u8 {
+    if (builtin.os.tag != .windows) return null;
+    var link_object: ?*anyopaque = null;
+    if (shell_assoc.CoCreateInstance(&clsid_shell_link, null, 1, &iid_shell_link, &link_object) < 0) return null;
+    const link: *ComObject = @ptrCast(@alignCast(link_object orelse return null));
+    defer link.release();
+    const persist = link.query(&iid_persist_file) orelse return null;
+    defer persist.release();
+    // IPersistFile::Load, read-only.
+    if (persist.method(*const fn (*ComObject, [*:0]const u16, u32) callconv(.winapi) i32, 5)(persist, path.ptr, 0) < 0) return null;
+    var target: [260]u16 = undefined;
+    // IShellLinkW::GetPath
+    if (link.method(*const fn (*ComObject, [*]u16, c_int, ?*anyopaque, u32) callconv(.winapi) i32, 3)(link, &target, target.len, null, 0) < 0) return null;
+    const units = std.mem.sliceTo(&target, 0);
+    if (units.len == 0) return null;
+    return std.unicode.wtf16LeToWtf8Alloc(arena, units) catch null;
 }
 
 /// An extension without its dot: one name of 1 to `max_extension_bytes`
@@ -937,4 +1208,39 @@ test "shell URLs pass only absolute allowlisted schemes" {
         try std.testing.expect(root("\\\\server\\share\\"));
         try std.testing.expect(!root("\\\\server\\share\\x"));
     }
+}
+
+test "defaultApp reads a scheme, a file URL or a path" {
+    var storage: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("https", (try defaultTarget(&storage, "https://example.com/")).scheme);
+    try std.testing.expectEqualStrings("x-custom+app", (try defaultTarget(&storage, "x-custom+app:open")).scheme);
+    try std.testing.expectEqualStrings("mailto", (try defaultTarget(&storage, "mailto:someone@example.com")).scheme);
+    const decoded = (try defaultTarget(&storage, "file:///home/me/my%20notes/Makefile")).path;
+    try std.testing.expectEqualStrings("/home/me/my notes/Makefile", decoded);
+    try std.testing.expectEqualStrings("/srv/a.txt", (try defaultTarget(&storage, "file://localhost/srv/a.txt")).path);
+    try std.testing.expectEqualStrings("/folder", (try defaultTarget(&storage, "file:/folder")).path);
+    try std.testing.expectEqualStrings("/home/me/notes.txt", (try defaultTarget(&storage, "/home/me/notes.txt")).path);
+    // A drive letter is not a scheme.
+    try std.testing.expectEqualStrings("C:\\notes.txt", (try defaultTarget(&storage, "C:\\notes.txt")).path);
+    try std.testing.expectError(error.InvalidUrl, defaultTarget(&storage, ""));
+    try std.testing.expectError(error.InvalidUrl, defaultTarget(&storage, "file://server/share/a.txt"));
+    try std.testing.expectError(error.InvalidUrl, defaultTarget(&storage, "file://"));
+    try std.testing.expectError(error.InvalidUrl, defaultTarget(&storage, "file:///a%2"));
+    try std.testing.expectError(error.EmbeddedNul, defaultTarget(&storage, "file:///a%00b"));
+    if (builtin.os.tag == .windows) try std.testing.expectEqualStrings("C:/a.txt", (try defaultTarget(&storage, "file:///C:/a.txt")).path);
+}
+
+test "a Windows default handler maps to the Start menu item that runs it" {
+    const apps = [_]InstalledApp{
+        .{ .name = "Other", .id = "C:\\Start Menu\\Other.lnk", .path = "shell:AppsFolder\\Other" },
+        .{ .name = "Editor", .id = "C:\\Start Menu\\Editor.lnk", .path = "shell:AppsFolder\\Editor" },
+    };
+    const targets = [_][]const u8{ "C:\\Apps\\Other.exe", "C:\\Apps\\Editor.exe" };
+    try std.testing.expectEqualStrings("Editor", appByExecutable(&apps, &targets, "c:\\apps\\EDITOR.EXE").?.name);
+    try std.testing.expect(appByExecutable(&apps, &targets, "C:\\Apps\\Missing.exe") == null);
+    try std.testing.expect(appByExecutable(&apps, &.{ "", "" }, "") == null);
+    try std.testing.expect(isOpenWithExecutable("C:\\Windows\\System32\\OpenWith.exe"));
+    try std.testing.expect(isOpenWithExecutable("openwith.EXE"));
+    try std.testing.expect(!isOpenWithExecutable("C:\\Apps\\Excel.exe"));
+    try std.testing.expectEqual(21, assoc_str_app_id);
 }

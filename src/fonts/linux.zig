@@ -81,3 +81,29 @@ pub fn systemFamilies(allocator: std.mem.Allocator) !List {
     list.items = list.entries.items;
     return list;
 }
+
+extern fn zfont_test_rgba(gray: c_int, text: [*:0]const u8, color: *c_int) c_int;
+extern fn zfont_test_load_rule(xml: [*:0]const u8) c_int;
+
+test "text drawn in gray asks fonts for no subpixel order, which fontconfig gives them, and keeps color emoji" {
+    if (builtin.os.tag != .linux) return;
+    // Where fontconfig gives every font subpixel antialiasing, as a rule of
+    // target "font" does, and old cairo would draw ordinary glyphs as color
+    // glyphs in the subpixels' colors.
+    const rgb_rule = "<?xml version=\"1.0\"?><!DOCTYPE fontconfig SYSTEM \"fonts.dtd\"><fontconfig><match target=\"font\"><edit name=\"rgba\" mode=\"assign\"><const>rgb</const></edit></match></fontconfig>";
+    try std.testing.expectEqual(0, zfont_test_load_rule(rgb_rule));
+    const fc_rgba_rgb = 1;
+    const fc_rgba_none = 5;
+    var color: c_int = 0;
+    // A plain font map keeps the subpixel order, for subpixel text.
+    const plain = zfont_test_rgba(0, "Candle", &color);
+    if (plain < 0) return error.SkipZigTest; // no fonts
+    try std.testing.expectEqual(fc_rgba_rgb, plain);
+    for ([_][*:0]const u8{ "Candle", "显示右侧边栏" }) |text| {
+        try std.testing.expectEqual(fc_rgba_none, zfont_test_rgba(1, text, &color));
+        try std.testing.expectEqual(0, color);
+    }
+    // A color emoji font still has its color glyphs.
+    const emoji = zfont_test_rgba(1, "\u{1f600}", &color);
+    if (emoji >= 0 and color == 1) try std.testing.expectEqual(fc_rgba_none, emoji);
+}

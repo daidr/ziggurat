@@ -114,4 +114,24 @@ if command -v dpkg-deb >/dev/null 2>&1; then
     test ! -e /usr/lib/fixture
   fi
 fi
+
+# RPM package of the same release: inspected where rpm is installed.
+"$bin/ziggurat" package rpm --zip "$work/v2.zip" --command "fixture,fx" --output "$work/fixture.rpm" >/dev/null
+if command -v rpm >/dev/null 2>&1; then
+  rpm -K "$work/fixture.rpm" >/dev/null
+  test "$(rpm -qp --queryformat '%{NAME} %{VERSION} %{RELEASE}' "$work/fixture.rpm")" = "fixture 1.1.0.0 1"
+  rpm -qlp "$work/fixture.rpm" > "$work/rpm-contents"
+  grep -qx '/usr/lib/fixture/fixture' "$work/rpm-contents"
+  grep -qx '/usr/lib/fixture' "$work/rpm-contents"
+  grep -qx "/usr/share/applications/$id.desktop" "$work/rpm-contents"
+  rpm -qlvp "$work/fixture.rpm" | grep -q '/usr/bin/fx -> ../lib/fixture/fixture'
+  rpm -qp --requires "$work/fixture.rpm" | grep -q '^libgtk-3.so.0'
+fi
+
+# Every format at once, into one directory; the PKGBUILD stays by its source.
+rm -f "$work/PKGBUILD"
+"$bin/ziggurat" package linux --zip "$work/v2.zip" --maintainer "Ziggurat tests <tests@example.invalid>" --output "$work/linux" >/dev/null
+test -f "$work/linux/fixture_1.1.0.0_amd64.deb"
+test -f "$work/linux/fixture-1.1.0.0-1.x86_64.rpm"
+test -f "$work/PKGBUILD"
 echo "setup smoke passed"
