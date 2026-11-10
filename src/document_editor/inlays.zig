@@ -60,6 +60,45 @@ pub fn capture(allocator: std.mem.Allocator, definitions: []const Inlay, limit: 
     return .{ .entries = entries, .bytes = bytes };
 }
 
+/// One replacement of an edit: source bytes `start..end` became `len` bytes.
+/// An edit's changes ascend and do not overlap.
+pub const Change = struct { start: usize, end: usize, len: usize };
+
+/// Move the inlays of `set` with an edit's `changes`, or back with them when
+/// `inverse` (an undo), as text typed at an inlay's byte goes before it and
+/// an inlay in replaced text goes to the replacement's end.
+pub fn move(set: *Set, changes: []const Change) void {
+    moveDirected(set, changes, false);
+}
+pub fn moveBack(set: *Set, changes: []const Change) void {
+    moveDirected(set, changes, true);
+}
+fn moveDirected(set: *Set, changes: []const Change, inverse: bool) void {
+    const Span = struct { src_start: usize, src_end: usize, dst_end: usize };
+    var next: usize = 0;
+    var shift: i128 = 0;
+    var last: ?Span = null;
+    for (set.entries) |*entry| {
+        while (next < changes.len) {
+            const change = changes[next];
+            const moved: usize = @intCast(@as(i128, change.start) + shift);
+            const src_start = if (inverse) moved else change.start;
+            if (src_start > entry.offset) break;
+            const dst_start = if (inverse) change.start else moved;
+            last = .{
+                .src_start = src_start,
+                .src_end = src_start + if (inverse) change.len else change.end - change.start,
+                .dst_end = dst_start + if (inverse) change.end - change.start else change.len,
+            };
+            shift += @as(i128, change.len) - @as(i128, change.end - change.start);
+            next += 1;
+        }
+        const span = last orelse continue;
+        const after = entry.offset > span.src_end or (entry.offset == span.src_end and span.src_end > span.src_start);
+        entry.offset = if (after) span.dst_end + (entry.offset - span.src_end) else span.dst_end;
+    }
+}
+
 /// The text a suggestion shows: its first line, and " …" when there are more,
 /// cut at a character to fit `buffer`, which holds at least 8 bytes.
 pub fn suggestionShown(value: []const u8, buffer: []u8) []const u8 {
@@ -101,6 +140,25 @@ pub fn select(allocator: std.mem.Allocator, out: *std.ArrayList(cache.Inlay), se
             return a.at < b.at or (a.at == b.at and !a.ghost and b.ghost);
         }
     }.less);
+}
+
+test "inlays move with edits and back with their undo" {
+    const allocator = std.testing.allocator;
+    var set = try capture(allocator, &.{ .{ .offset = 0, .text = "a" }, .{ .offset = 3, .text = "b" }, .{ .offset = 5, .text = "c" }, .{ .offset = 9, .text = "d" } }, 8);
+    defer set.free(allocator);
+    // Insert 2 bytes at 3, replace 5..7 by 4 bytes.
+    const changes = [_]Change{ .{ .start = 3, .end = 3, .len = 2 }, .{ .start = 5, .end = 7, .len = 4 } };
+    move(&set, &changes);
+    const offsets = struct {
+        fn f(value: *const Set) [4]usize {
+            var out: [4]usize = undefined;
+            for (value.entries, &out) |entry, *item| item.* = entry.offset;
+            return out;
+        }
+    }.f;
+    try std.testing.expectEqual([4]usize{ 0, 5, 11, 13 }, offsets(&set));
+    moveBack(&set, &changes);
+    try std.testing.expectEqual([4]usize{ 0, 3, 7, 9 }, offsets(&set));
 }
 
 test "inlays are checked, copied in order and chosen by batch" {

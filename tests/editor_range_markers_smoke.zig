@@ -584,9 +584,35 @@ fn inlays(allocator: std.mem.Allocator, engine: *t.Engine) !void {
     try std.testing.expectEqualStrings("let x = 1;\nfoo()\nnext\n", buffer[0..length]);
     try std.testing.expect(try adapter.suggestion() == null);
     try std.testing.expect(!try adapter.acceptSuggestion());
-    // The edit leaves the inlays stale: none are shown until they are set again.
-    try std.testing.expect((try adapter.status()).inlays_required);
+    // Inlays move with edits: the trailing text at the old line end goes
+    // after the inserted text, the hint stays after `x`, and undo takes them
+    // back.
+    try std.testing.expect(!(try adapter.status()).inlays_required);
+    var text_now: [64]u8 = undefined;
+    const moved = try engine.layout("let x: i32 = 1;\nfoo()  blame\nnext\n", options);
+    defer moved.close() catch unreachable;
     _ = try adapter.prepare(wide, parameters);
+    const line1 = (try document.line(1)).start;
+    const second = (try adapter.positionRect(try document.version(), line1, .downstream)).?.x;
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 5, .downstream)).?.x - origin, after_hint));
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), line1 + 5, .downstream)).?.x - second, (try moved.caret(.{ .byte_offset = line1 + 10 })).x - (try moved.caret(.{ .byte_offset = line1 + 5 })).x));
+    _ = try adapter.undo();
+    try std.testing.expectEqualStrings(text, text_now[0..try document.read(.{ .start = 0, .end = try document.byteLength() }, &text_now)]);
+    try std.testing.expect(!(try adapter.status()).inlays_required);
+    _ = try adapter.prepare(wide, parameters);
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 9, .downstream)).?.x - origin, before_trailing));
+    // Typing at a hint's byte goes before the hint.
+    _ = try adapter.replace(.{ .start = 5, .end = 5 }, "yz");
+    _ = try adapter.prepare(wide, parameters);
+    const typed = try engine.layout("let xyz: i32 = 1  blame\nnext\n", options);
+    defer typed.close() catch unreachable;
+    try std.testing.expect(near((try adapter.positionRect(try document.version(), 7, .downstream)).?.x - origin, (try typed.caret(.{ .byte_offset = 12 })).x));
+    _ = try adapter.undo();
+    // An edit the editor did not make leaves them stale: none are shown
+    // until they are set again.
+    try document.replace(.{ .start = 0, .end = 1 }, "l");
+    _ = try adapter.prepare(wide, parameters);
+    try std.testing.expect((try adapter.status()).inlays_required);
     const now = (try adapter.positionRect(try document.version(), 0, .downstream)).?.x;
     try std.testing.expect(near((try adapter.positionRect(try document.version(), 5, .downstream)).?.x - now, (try plain.caret(.{ .byte_offset = 5 })).x));
     try std.testing.expectError(error.StaleRevision, adapter.setInlays(stamp, &.{}));
