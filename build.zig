@@ -2020,9 +2020,12 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-fonts", "tests/fonts_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat_fonts", .module = fonts }, .{ .name = "ziggurat_text_layout", .module = text_layout },
     });
+    // The formatting check runs beside the build in pull request checks.
+    b.step("fmt-check", "Check that the sources are formatted").dependOn(&b.addFmt(.{ .paths = &.{ b.path("build.zig"), b.path("build_support"), b.path("src"), b.path("examples"), b.path("tests"), b.path("tools") }, .check = true }).step);
     addExamples(b, target, optimize);
     shareCommonModules(b, target, optimize, check, test_step);
     helpers.configurePullRequestRuns(b.option(bool, "cache-smokes", "Run each smoke only when its executable changed (pull request checks)") orelse false);
+    helpers.selectPortableTests(b, b.option(bool, "portable-tests", "Include the tests whose results do not depend on the platform (default true)") orelse true);
     helpers.limitSmokeRuns(b, b.option(u32, "smoke-timeout", "End a smoke that runs longer than this many seconds (0, the default: no limit)") orelse 0);
     useWindowsSelfHostedBackend(b, b.option(bool, "windows-llvm", "Build Windows Debug artifacts with the LLVM backend instead of Zig's self-hosted backend") orelse false);
 }
