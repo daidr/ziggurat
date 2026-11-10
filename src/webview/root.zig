@@ -124,6 +124,8 @@ pub const ContextMenuPolicy = union(enum) {
 pub const AuthChallenge = http_auth.Challenge;
 pub const Credentials = http_auth.Credentials;
 pub const CertificateError = http_auth.CertificateError;
+pub const ClientCertificate = http_auth.ClientCertificate;
+pub const ClientCertificateRequest = http_auth.ClientCertificateRequest;
 const page_sessions = @import("page_session.zig");
 pub const PageSession = page_sessions.Type(View, SessionHooks);
 test {
@@ -493,8 +495,16 @@ pub const Options = struct {
     autoplay: Autoplay = .user_gesture,
     /// Answers the HTTP sign-ins (Basic, Digest, NTLM, Negotiate) of a
     /// remote page and what it loads, the server's or a proxy's. Without
-    /// it every sign-in is canceled; no engine's dialog ever shows.
+    /// it each platform keeps its own handling: WebView2's sign-in dialog on
+    /// Windows, WebKitGTK's on Linux, and on macOS no prompt (the page gets
+    /// the server's refusal).
     http_auth: ?AuthHandler = null,
+    /// Chooses the TLS client certificate a server, or a proxy, asks for
+    /// (mutual TLS) before it serves a remote page or something the page
+    /// loads, or refuses. Without it each platform keeps its own handling:
+    /// WebView2's certificate dialog on Windows, WebKitGTK's certificate
+    /// chooser on Linux, and on macOS WebKit's, which never asks.
+    client_certificates: ?ClientCertificateHandler = null,
     /// Decides about server certificates of a remote page that do not
     /// verify. Without it, or when it says no, the load fails.
     certificate_errors: ?CertificateHandler = null,
@@ -538,6 +548,23 @@ pub const AuthHandler = struct {
     /// that server and realm, so this is not asked for every request. To ask
     /// the user, return null, prompt, and reload once there is an answer.
     answer: *const fn (*anyopaque, *View, AuthChallenge) ?Credentials,
+};
+pub const ClientCertificateHandler = struct {
+    context: *anyopaque,
+    /// Synchronous, on the App owner thread while the load waits: the index
+    /// of the request's certificate to give, or null to refuse, which fails
+    /// the load as a user's dismissal of a browser's prompt does. An index
+    /// the request did not offer refuses too. To ask the user, refuse,
+    /// prompt, and reload once there is an answer.
+    /// Windows offers WebView2's mutually trusted certificates
+    /// (ICoreWebView2_5's ClientCertificateRequested; a runtime without it
+    /// never asks). macOS lists the keychain's identities, only while this
+    /// handler is set, for the keychain may ask the user about them; the
+    /// server's acceptable issuers are the app's to filter by. Linux offers
+    /// none, as WebKitGTK lists none, so a handler there can only refuse;
+    /// the refusal ends the load as a cancellation, which PageEvent
+    /// .completed reports and Event.failed does not.
+    choose: *const fn (*anyopaque, *View, ClientCertificateRequest) ?usize,
 };
 pub const CertificateHandler = struct {
     context: *anyopaque,
@@ -602,7 +629,7 @@ const NativeActions = extern struct {
     download_offer: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, [*:0]const u16, i64, *anyopaque) callconv(.c) void = null,
     download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
-const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, audio_muted: bool = false, content_verdict: ?ContentVerdict = null, content_style: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null, context_menu: u32 = 0, context_offer: ?*const fn (*anyopaque, *const NativeContextTarget, [*]const NativeContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null, gestures: u32 = 0, composition: bool = false };
+const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, audio_muted: bool = false, content_verdict: ?ContentVerdict = null, content_style: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null, client_certificate: ?http_auth.ClientCertificateOffer = null, context_menu: u32 = 0, context_offer: ?*const fn (*anyopaque, *const NativeContextTarget, [*]const NativeContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null, gestures: u32 = 0, composition: bool = false };
 const NativeContextItem = extern struct { name: [*:0]const u16, label: [*:0]const u16, kind: u32, flags: u32 };
 const NativeContextTarget = extern struct { link: ?[*:0]const u16, link_text: ?[*:0]const u16, image: ?[*:0]const u16, media: ?[*:0]const u16, selection: ?[*:0]const u16, frame: ?[*:0]const u16, editable: u32 };
 const PermissionScratch = struct {
@@ -1821,7 +1848,7 @@ pub const View = struct {
         defer if (content_style) |value| self.allocator.free(value);
         const facts = try self.factsScript(.windows);
         defer if (facts) |value| self.allocator.free(value);
-        const settings: NativeSettings = .{ .context_menu = @backingInt(config.options.context_menu), .context_offer = if (config.options.context_menu == .handler) View.windowsContextMenu else null, .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = browserArguments(config.options), .gestures = gestureFlags(config.options), .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null, .composition = self.region != null };
+        const settings: NativeSettings = .{ .context_menu = @backingInt(config.options.context_menu), .context_offer = if (config.options.context_menu == .handler) View.windowsContextMenu else null, .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .client_certificate = if (config.options.client_certificates != null) View.clientCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = browserArguments(config.options), .gestures = gestureFlags(config.options), .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null, .composition = self.region != null };
         // Pages take the app's forced appearance from their first document.
         followForcedAppearance(window.app);
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
@@ -1910,7 +1937,7 @@ pub const View = struct {
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
         var download_scratch: WebkitDownloadScratch = undefined;
-        const native_options = webkitDownloads(.{ .context_menu = @backingInt(options.context_menu), .context_offer = if (options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container), .permission = if (options.permissions != null) View.webkitPermission else null, .media = if (is_macos) 0 else mediaKinds(options.permissions) }, options.downloads, &download_scratch);
+        const native_options = webkitDownloads(.{ .context_menu = @backingInt(options.context_menu), .context_offer = if (options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .client_certificate = if (options.client_certificates != null) View.clientCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container), .permission = if (options.permissions != null) View.webkitPermission else null, .media = if (is_macos) 0 else mediaKinds(options.permissions) }, options.downloads, &download_scratch);
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -2577,6 +2604,16 @@ pub const View = struct {
         const scope = self.beginNativeAttachment() orelse return 0;
         defer scope.end();
         return @intFromBool(handler.allow(handler.context, self, .{ .uri = uri, .host = place.host, .reason = http_auth.webview2Reason(status), .certificate = der }));
+    }
+    fn clientCertificate(ptr: *anyopaque, host: [*:0]const u8, port: u32, proxy: c_int, offered: ?[*]const http_auth.NativeClientCertificate, count: u32) callconv(.c) i32 {
+        const self = authView(ptr) orelse return -1;
+        const handler = self.config.?.options.client_certificates orelse return -1;
+        const native_port = std.math.cast(u16, port) orelse return -1;
+        var certificates: http_auth.ClientCertificates = .{};
+        certificates.fill(if (offered) |list| list[0..count] else &.{});
+        const scope = self.beginNativeAttachment() orelse return -1;
+        defer scope.end();
+        return certificates.answer(handler.choose(handler.context, self, .{ .host = std.mem.span(host), .port = native_port, .proxy = proxy != 0, .certificates = certificates.slice() }));
     }
     fn webkitAuth(ptr: *anyopaque, host: [*:0]const u8, port: u32, realm: [*:0]const u8, native_scheme: u32, proxy: c_int, call: *anyopaque) callconv(.c) void {
         if (!is_webkit) return;

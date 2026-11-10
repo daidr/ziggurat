@@ -10,23 +10,27 @@ const linux = builtin.os.tag == .linux;
 /// WebKitGTK and WKWebView: explicit ephemeral storage, no WebView2 folder.
 const webkit = linux or builtin.os.tag == .macos;
 
-/// Run by tests/http_auth_host.py with its two loopback origins. The app
+/// Run by tests/http_auth_host.py with its three loopback origins. The app
 /// signs in to one realm, goes without credentials in another and sees the
 /// server's refusal, then refuses a certificate nothing trusts, sees the
-/// load fail, and allows it the second time by its DER.
+/// load fail, and allows it the second time by its DER. Last, a server that
+/// requires a client certificate asks for one; the app refuses, and the load
+/// ends without the page.
 const Probe = struct {
     app: *z.App,
     view: web.View = undefined,
     plain: []const u8,
     secure: []const u8,
     der: []const u8,
+    mutual: []const u8,
     store: []const u8,
     extension: []const u8,
-    grants: [2]web.OriginGrant = undefined,
+    grants: [3]web.OriginGrant = undefined,
     url: [512]u8 = undefined,
-    step: enum { welcome, denied, refused, trusted, done } = .welcome,
+    step: enum { welcome, denied, refused, trusted, client, done } = .welcome,
     challenges: u32 = 0,
     certificates: u32 = 0,
+    client_requests: u32 = 0,
     failure: ?anyerror = null,
 
     fn fail(self: *Probe, err: anyerror) void {
@@ -35,7 +39,7 @@ const Probe = struct {
         self.app.quit();
     }
     fn options(self: *Probe) web.Options {
-        self.grants = .{ .{ .origin = self.plain }, .{ .origin = self.secure } };
+        self.grants = .{ .{ .origin = self.plain }, .{ .origin = self.secure }, .{ .origin = self.mutual } };
         return .{
             .html = "",
             .storage = if (webkit) .ephemeral else .profile,
@@ -44,6 +48,7 @@ const Probe = struct {
             .request_policy_extension = if (linux) .{ .directory = self.extension } else null,
             .http_auth = .{ .context = self, .answer = answer },
             .certificate_errors = .{ .context = self, .allow = allow },
+            .client_certificates = .{ .context = self, .choose = choose },
             .page_listener = .{ .context = self, .event = page },
         };
     }
@@ -71,6 +76,9 @@ const Probe = struct {
     }
     fn allow(ptr: *anyopaque, _: *web.View, problem: web.CertificateError) bool {
         const self: *Probe = @ptrCast(@alignCast(ptr));
+        // The mutual TLS server presents the same certificate, which an
+        // engine may ask about again for its port.
+        if (self.step == .client) return std.mem.eql(u8, problem.certificate, self.der);
         self.certificates += 1;
         if (!std.mem.eql(u8, problem.host, "127.0.0.1") or !std.mem.startsWith(u8, problem.uri, self.secure) or problem.reason.len == 0) {
             std.debug.print("certificate error {s} {s} {s}\n", .{ problem.uri, problem.host, problem.reason });
@@ -82,6 +90,25 @@ const Probe = struct {
             return false;
         }
         return self.step == .trusted;
+    }
+    fn choose(ptr: *anyopaque, _: *web.View, request: web.ClientCertificateRequest) ?usize {
+        const self: *Probe = @ptrCast(@alignCast(ptr));
+        self.client_requests += 1;
+        if (self.step != .client or !std.mem.eql(u8, request.host, "127.0.0.1") or request.port != port(self.mutual) or request.proxy) {
+            std.debug.print("client certificate request {s}:{d} proxy {} in step {s}\n", .{ request.host, request.port, request.proxy, @tagName(self.step) });
+            self.fail(error.WrongClientCertificateRequest);
+            return null;
+        }
+        // WebKitGTK lists no certificates to offer.
+        if (linux and request.certificates.len != 0) {
+            self.fail(error.LinuxOfferedCertificates);
+            return null;
+        }
+        for (request.certificates) |certificate| if (certificate.certificate.len == 0) {
+            self.fail(error.EmptyClientCertificate);
+            return null;
+        };
+        return null;
     }
     fn page(ptr: *anyopaque, view: *web.View, input: web.PageEvent) void {
         const self: *Probe = @ptrCast(@alignCast(ptr));
@@ -99,11 +126,20 @@ const Probe = struct {
                     view.navigateRemote(self.at(self.secure, "/tls")) catch |err| self.fail(err);
                 } else if (std.mem.eql(u8, title, "trusted")) {
                     if (self.step != .trusted) return self.fail(error.RefusedCertificateLoaded);
-                    self.step = .done;
-                    self.app.quit();
+                    self.step = .client;
+                    view.navigateRemote(self.at(self.mutual, "/mutual")) catch |err| self.fail(err);
                 }
             },
             .completed => |info| {
+                if (self.step == .client) {
+                    // Refusing ends the load without the page: a failure, or
+                    // on Linux a cancellation that completes the load.
+                    if (self.client_requests == 0) return;
+                    std.debug.print("http auth load after refusing a client certificate: success {} status {d}\n", .{ info.success, info.native_status });
+                    self.step = .done;
+                    self.app.quit();
+                    return;
+                }
                 if (self.step == .welcome) std.debug.print("http auth load while signing in: success {} status {d}\n", .{ info.success, info.native_status });
                 if (self.step == .denied) {
                     std.debug.print("http auth load after declining: success {} status {d}\n", .{ info.success, info.native_status });
@@ -141,7 +177,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = gpa.allocator();
     const args = try zio.argsAlloc(allocator, init.args);
     defer zio.argsFree(allocator, args);
-    if (args.len != @as(usize, if (linux) 5 else 4)) return error.InvalidArgument;
+    if (args.len != @as(usize, if (linux) 6 else 5)) return error.InvalidArgument;
     const file = try std.Io.Dir.cwd().openFile(zio.io(), args[3], .{});
     const pem = try zio.readToEndAlloc(file, allocator, 65536);
     file.close(zio.io());
@@ -154,12 +190,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         break :blk try std.fs.path.join(allocator, &.{ local, "Ziggurat", "HttpAuthSmoke" });
     };
     defer allocator.free(store);
-    const extension = if (linux) args[4] else "";
+    const extension = if (linux) args[5] else "";
     const app = try z.App.init(allocator);
     defer app.deinit();
     const window = try app.createWindow(.{ .width = 320, .height = 200 });
     defer _ = window.destroy() catch {};
-    var probe: Probe = .{ .app = app, .plain = args[1], .secure = args[2], .der = der, .store = store, .extension = extension };
+    var probe: Probe = .{ .app = app, .plain = args[1], .secure = args[2], .der = der, .mutual = args[4], .store = store, .extension = extension };
     probe.view = web.View.init(allocator, &probe, Probe.event);
     try probe.view.attach(window, probe.options());
     var watchdog: Watchdog = .{ .app = app };
@@ -168,8 +204,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try app.run();
     watchdog.stop();
     if (probe.failure) |err| return err;
-    if (watchdog.expired or probe.step != .done or probe.challenges != 2 or probe.certificates != 2)
-        std.debug.print("http auth ended: expired {} step {s} challenges {d} certificates {d} native {any}\n", .{ watchdog.expired, @tagName(probe.step), probe.challenges, probe.certificates, probe.view.nativeFailure() });
-    try std.testing.expect(!watchdog.expired and probe.step == .done and probe.challenges == 2 and probe.certificates == 2);
-    std.debug.print("http auth: signed in, refusal without credentials, certificate refused then allowed by its DER\n", .{});
+    if (watchdog.expired or probe.step != .done or probe.challenges != 2 or probe.certificates != 2 or probe.client_requests == 0)
+        std.debug.print("http auth ended: expired {} step {s} challenges {d} certificates {d} client certificate requests {d} native {any}\n", .{ watchdog.expired, @tagName(probe.step), probe.challenges, probe.certificates, probe.client_requests, probe.view.nativeFailure() });
+    try std.testing.expect(!watchdog.expired and probe.step == .done and probe.challenges == 2 and probe.certificates == 2 and probe.client_requests != 0);
+    std.debug.print("http auth: signed in, refusal without credentials, certificate refused then allowed by its DER, client certificate refused\n", .{});
 }
