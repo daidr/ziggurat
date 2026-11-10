@@ -68,6 +68,14 @@ typedef struct NativeWindow {
     /* Present only while a system menu bar is attached: a vertical box that
        holds the bar above the window's ordinary child. */
     GtkWidget *menu_box, *menu_bar;
+    /* A hidden title bar (WindowOptions.title_bar): an overlay, the window's
+       child, holds everything else and, over it, a header bar for each side
+       of the desktop's button layout that has buttons (zlg_window_title_bar).
+       title_room is the room they take in DIP: height, left, right, bottom. */
+    GtkWidget *title_overlay, *title_bars[2];
+    int title_bar_height;
+    double title_room[4];
+    gulong title_layout_handler;
     /* WindowTraits the window manager cannot enforce on its own. */
     gboolean immovable, no_maximize;
     /* Popup role (WindowOptions.popup): ZLG_POPUP_* flags. An X11 popup is an
@@ -330,10 +338,11 @@ static __attribute__((noinline)) void pointer_motion_enabled(NativeWindow *s, co
 
 /* Included here so the adapter can retain the private NativeWindow state
  * across GTK operations that synchronously destroy the parent. */
-static GtkContainer *root_container(NativeWindow *s) { return GTK_CONTAINER(s->menu_box?s->menu_box:s->window); }
+static GtkWidget *outer_container(NativeWindow *s) { return s->title_overlay?s->title_overlay:s->window; }
+static GtkContainer *root_container(NativeWindow *s) { return GTK_CONTAINER(s->menu_box?s->menu_box:outer_container(s)); }
 static void root_add(NativeWindow *s, GtkWidget *child) {
     if (s->menu_box) gtk_box_pack_start(GTK_BOX(s->menu_box),child,TRUE,TRUE,0);
-    else gtk_container_add(GTK_CONTAINER(s->window),child);
+    else gtk_container_add(GTK_CONTAINER(outer_container(s)),child);
 }
 #include "linux_content_impl.h"
 #include "linux_regions_impl.h"
@@ -488,6 +497,7 @@ static void restore_geometry(NativeWindow *s) {
     if (s->destroyed) return;
     if (s->saved_minimized) request_mode(s,MODE_MINIMIZED);
 }
+static void title_bars_shown(NativeWindow *s);
 static gboolean state_changed(GtkWidget *widget, GdkEventWindowState *event, gpointer data) {
     (void)widget; (void)event; NativeWindow *s=data; retain(s);
     uint64_t operation=pointer_revoke(s,TRUE);
@@ -497,6 +507,7 @@ static gboolean state_changed(GtkWidget *widget, GdkEventWindowState *event, gpo
     if (observed&GDK_WINDOW_STATE_ICONIFIED) s->mode_request&=~(guint)MODE_MINIMIZED;
     restore_geometry(s);
     if (!s->destroyed && s->pointer_operation==operation) remember_normal(s);
+    if (!s->destroyed && s->title_overlay) title_bars_shown(s);
     if (!s->destroyed && s->pointer_operation==operation) notify_state(s);
     release(s); return FALSE;
 }
@@ -674,6 +685,9 @@ static void destroyed(GtkWidget *widget, gpointer data) {
     g_object_set_data(G_OBJECT(s->window),"ziggurat-native-window",NULL);
     if (s->menu_bar) { g_object_unref(s->menu_bar); s->menu_bar=NULL; }
     if (s->menu_box) { g_object_unref(s->menu_box); s->menu_box=NULL; }
+    if (s->title_layout_handler) { g_signal_handler_disconnect(gtk_settings_get_for_screen(gtk_widget_get_screen(s->window)),s->title_layout_handler); s->title_layout_handler=0; }
+    for (int side=0;side<2;side++) if (s->title_bars[side]) { g_signal_handlers_disconnect_by_data(s->title_bars[side],s); g_object_unref(s->title_bars[side]); s->title_bars[side]=NULL; }
+    if (s->title_overlay) { g_object_unref(s->title_overlay); s->title_overlay=NULL; }
     if (gtk_widget_has_grab(s->area)) gtk_grab_remove(s->area);
     popup_ungrab(s);
     GtkIMContext *im=s->im;s->im=NULL;
@@ -1419,7 +1433,7 @@ int zlg_window_set_menubar(GtkWidget *toplevel, GtkWidget *bar) {
         gtk_box_reorder_child(GTK_BOX(s->menu_box),bar,0);
         gtk_widget_show(bar);
     } else if (bar || s->menu_box) {
-        GtkWidget *from=s->menu_box?s->menu_box:s->window, *child=NULL;
+        GtkWidget *from=s->menu_box?s->menu_box:outer_container(s), *child=NULL;
         GList *children=gtk_container_get_children(GTK_CONTAINER(from));
         if (children) child=g_object_ref(children->data);
         g_list_free(children);
@@ -1429,11 +1443,11 @@ int zlg_window_set_menubar(GtkWidget *toplevel, GtkWidget *bar) {
             s->menu_box=gtk_box_new(GTK_ORIENTATION_VERTICAL,0); g_object_ref_sink(s->menu_box); track(G_OBJECT(s->menu_box));
             s->menu_bar=g_object_ref(bar);
             gtk_box_pack_start(GTK_BOX(s->menu_box),bar,FALSE,FALSE,0);
-            gtk_container_add(GTK_CONTAINER(s->window),s->menu_box);
+            gtk_container_add(GTK_CONTAINER(outer_container(s)),s->menu_box);
             gtk_widget_show(bar); gtk_widget_show(s->menu_box);
         } else if (s->menu_box) {
             GtkWidget *box=s->menu_box; s->menu_box=NULL;
-            if (content_live(s)) gtk_container_remove(GTK_CONTAINER(s->window),box);
+            if (content_live(s)) gtk_container_remove(GTK_CONTAINER(outer_container(s)),box);
             gtk_widget_destroy(box); g_object_unref(box);
         }
         if (child) { if (content_live(s) && !gtk_widget_get_parent(child)) root_add(s,child); g_object_unref(child); }
@@ -1443,6 +1457,129 @@ int zlg_window_set_menubar(GtkWidget *toplevel, GtkWidget *bar) {
 done:;
     int result=s->destroyed?2:0; release(s); return result;
 }
+/* Hidden title bars. GTK's own title buttons go over the content in an
+   overlay: a header bar for each side of the desktop's button layout
+   (gtk-decoration-layout) that has buttons, its background cleared. They look
+   and act as the desktop's header bars' buttons do, and only those the
+   layout names show: GNOME, KDE and Xfce keep it in step with their window
+   managers, and users of tiling window managers empty it to have none. GTK
+   shows maximize only while the window is resizable. */
+static const char title_bar_css[]=
+    "headerbar.ziggurat-window-controls { background: none; border: none; box-shadow: none; }\n"
+    "headerbar.ziggurat-window-controls.ziggurat-sized { min-height: 0; }\n";
+/* The window buttons a side of a decoration layout names, comma separated:
+   minimize, maximize and close, in its order. */
+static void title_buttons(const char *side, size_t length, char *out, size_t capacity) {
+    out[0]=0; size_t used=0;
+    size_t start=0;
+    while (start<length) {
+        size_t end=start; while (end<length && side[end]!=',') end++;
+        size_t n=end-start;
+        static const char *const names[]={"minimize","maximize","close"};
+        for (int i=0;i<3;i++) if (n==strlen(names[i]) && strncmp(side+start,names[i],n)==0 && used+n+2<capacity) {
+            if (used) out[used++]=',';
+            memcpy(out+used,names[i],n); used+=n; out[used]=0;
+        }
+        start=end+1;
+    }
+}
+static void title_room_measure(NativeWindow *s) {
+    double room[4]={s->title_bar_height,0,0,0};
+    for (int side=0;side<2;side++) {
+        GtkWidget *bar=s->title_bars[side];
+        if (!bar || !gtk_widget_get_visible(bar)) continue;
+        GtkAllocation a; gtk_widget_get_allocation(bar,&a);
+        int width=a.width, height=a.height;
+        if (width<=1) { int minimum=0; gtk_widget_get_preferred_width(bar,&minimum,&width); gtk_widget_get_preferred_height(bar,&minimum,&height); }
+        room[side?2:1]=width;
+        if (!s->title_bar_height && height>room[0]) room[0]=height;
+    }
+    if (room[1]>0 || room[2]>0) room[3]=room[0]; else room[0]=0;
+    if (memcmp(room,s->title_room,sizeof room)!=0) {
+        memcpy(s->title_room,room,sizeof room);
+        if (!s->destroyed) notify_state(s);
+    }
+}
+static void title_bar_allocated(GtkWidget *widget, GdkRectangle *allocation, gpointer data) { (void)widget; (void)allocation; title_room_measure(data); }
+static void title_bars_layout(NativeWindow *s) {
+    char *layout=NULL;
+    g_object_get(gtk_settings_get_for_screen(gtk_widget_get_screen(s->window)),"gtk-decoration-layout",&layout,NULL);
+    const char *text=layout?layout:"menu:close";
+    const char *colon=strchr(text,':');
+    size_t start_length=colon?(size_t)(colon-text):strlen(text);
+    const char *end_side=colon?colon+1:"";
+    char sides[2][64];
+    title_buttons(text,start_length,sides[0],sizeof sides[0]);
+    title_buttons(end_side,strlen(end_side),sides[1],sizeof sides[1]);
+    g_free(layout);
+    gboolean fullscreen=(window_state(s)&GDK_WINDOW_STATE_FULLSCREEN)!=0;
+    for (int side=0;side<2;side++) {
+        GtkWidget *bar=s->title_bars[side];
+        if (!sides[side][0]) {
+            if (bar) { s->title_bars[side]=NULL; gtk_widget_destroy(bar); g_object_unref(bar); }
+            continue;
+        }
+        if (!bar) {
+            bar=gtk_header_bar_new(); g_object_ref_sink(bar); track(G_OBJECT(bar));
+            gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(bar),TRUE);
+            gtk_header_bar_set_has_subtitle(GTK_HEADER_BAR(bar),FALSE);
+            GtkStyleContext *style=gtk_widget_get_style_context(bar);
+            gtk_style_context_add_class(style,"ziggurat-window-controls");
+            if (s->title_bar_height>0) { gtk_style_context_add_class(style,"ziggurat-sized"); gtk_widget_set_size_request(bar,-1,s->title_bar_height); }
+            gtk_widget_set_halign(bar,side?GTK_ALIGN_END:GTK_ALIGN_START);
+            gtk_widget_set_valign(bar,GTK_ALIGN_START);
+            gtk_overlay_add_overlay(GTK_OVERLAY(s->title_overlay),bar);
+            g_signal_connect(bar,"size-allocate",G_CALLBACK(title_bar_allocated),s);
+            s->title_bars[side]=bar;
+        }
+        char layout_text[80];
+        g_snprintf(layout_text,sizeof layout_text,side?":%s":"%s:",sides[side]);
+        /* Also rebuilds the buttons for the window's state. */
+        gtk_header_bar_set_decoration_layout(GTK_HEADER_BAR(bar),layout_text);
+        gtk_widget_show_all(bar);
+        gtk_widget_set_visible(bar,!fullscreen);
+    }
+    title_room_measure(s);
+}
+/* The buttons hide in full screen, and show after. */
+static void title_bars_shown(NativeWindow *s) {
+    gboolean fullscreen=(window_state(s)&GDK_WINDOW_STATE_FULLSCREEN)!=0;
+    for (int side=0;side<2;side++) if (s->title_bars[side]) gtk_widget_set_visible(s->title_bars[side],!fullscreen);
+}
+static void title_layout_changed(GObject *settings, GParamSpec *spec, gpointer data) { (void)settings; (void)spec; NativeWindow *s=data; if (!s->destroyed && s->title_overlay) title_bars_layout(s); }
+/* Gives a window the system's title buttons over its content (a hidden title
+   bar). height is the title bar's in DIP, 0 for the theme's. Returns 0, 1
+   when the window already has content or a menu bar, or 2 when it is closing. */
+int zlg_window_title_bar(NativeWindow *s, int height) {
+    if (s->destroyed) return 2;
+    if (s->title_overlay || s->menu_box || gtk_widget_get_parent(s->area)!=s->window) return 1;
+    static gboolean styled=FALSE;
+    if (!styled) {
+        GtkCssProvider *provider=gtk_css_provider_new();
+        gtk_css_provider_load_from_data(provider,title_bar_css,-1,NULL);
+        gtk_style_context_add_provider_for_screen(gtk_widget_get_screen(s->window),GTK_STYLE_PROVIDER(provider),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(provider); styled=TRUE;
+    }
+    s->title_bar_height=height;
+    s->title_overlay=gtk_overlay_new(); g_object_ref_sink(s->title_overlay); track(G_OBJECT(s->title_overlay));
+    g_object_ref(s->area);
+    gtk_container_remove(GTK_CONTAINER(s->window),s->area);
+    gtk_container_add(GTK_CONTAINER(s->window),s->title_overlay);
+    gtk_container_add(GTK_CONTAINER(s->title_overlay),s->area);
+    g_object_unref(s->area);
+    gtk_widget_show(s->title_overlay);
+    gtk_widget_realize(s->area);
+    if (s->im) gtk_im_context_set_client_window(s->im,gtk_widget_get_window(s->area));
+    title_bars_layout(s);
+    s->title_layout_handler=g_signal_connect(gtk_settings_get_for_screen(gtk_widget_get_screen(s->window)),"notify::gtk-decoration-layout",G_CALLBACK(title_layout_changed),s);
+    return 0;
+}
+/* The room of the title buttons in DIP: height, left, right, bottom. */
+void zlg_window_title_room(NativeWindow *s, double *out) {
+    gboolean fullscreen=(window_state(s)&GDK_WINDOW_STATE_FULLSCREEN)!=0;
+    for (int i=0;i<4;i++) out[i]=s->title_overlay && !fullscreen?s->title_room[i]:0;
+}
+
 /* Applies WindowTraits. Minimize, maximize and move reach the window manager
    as Motif function hints on X11; other displays keep the GTK part only.
    Returns 0, or 2 when the window is closing. */

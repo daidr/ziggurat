@@ -73,6 +73,14 @@ pub const Options = struct {
     /// part of a sidebar starting something new. A press still moves the
     /// window, which a pointer area without `drag_window` would not.
     window_double_click: bool = false,
+    /// The area is the window's maximize button, which the view draws in a
+    /// window with a hidden title bar without the system's buttons
+    /// (`z.WindowOptions.hide_window_buttons`): on Windows 11 resting the
+    /// pointer over it shows the snap layouts, as over the system's
+    /// (`z.Window.setMaximizeButton`). It takes the pointer as any area
+    /// does; the app maximizes the window when it is clicked. The first
+    /// such area of a frame counts.
+    maximize_button: bool = false,
 };
 
 /// What a `drag_window` area asks of the window, which the host does while
@@ -183,6 +191,7 @@ pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
     node.observe = options.observe;
     node.drag_window = options.drag_window;
     node.window_double_click = options.drag_window and options.window_double_click;
+    node.maximize_button = options.maximize_button;
     var result: PointerArea = .{ .id = node.id };
     const known = entry(v, node.id);
     if (known) |area| result.bounds = area.bounds;

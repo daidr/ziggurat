@@ -408,3 +408,35 @@ test "a drag_window handle's double click goes to the window unless the view tak
         try testing.expectEqual(@as(usize, 2), h.window_moves);
     }
 }
+
+const MaximizeApp = struct {
+    marked: bool = true,
+    clicks: usize = 0,
+    fn build(self: *MaximizeApp, v: *View) anyerror!void {
+        try v.row(.{ .width = 300, .height = 40 });
+        const first = try v.pointerArea(.{ .maximize_button = self.marked }, .{ .width = 46, .height = 32 });
+        try v.end();
+        _ = try v.pointerArea(.{ .maximize_button = self.marked }, .{ .width = 46, .height = 32 });
+        try v.end();
+        try v.end();
+        if (first.clicked) self.clicks += 1;
+    }
+};
+
+test "the first maximize_button area of a frame is where the window's maximize button is, and still clicks" {
+    var storage: Storage = .{};
+    var app: MaximizeApp = .{};
+    var h = Harness.init(&app, MaximizeApp.build, storage.buffers(), .{});
+    try h.render();
+    // The second area, after the first, does not count.
+    const rect = h.view.maximize_button.?;
+    try testing.expectEqual(@as(f32, 46), rect.width);
+    try testing.expectEqual(@as(f32, 32), rect.height);
+    try testing.expect(rect.x < 46);
+    try h.press(rect.x + 10, rect.y + 10, .{});
+    try h.release(rect.x + 10, rect.y + 10);
+    try testing.expectEqual(@as(usize, 1), app.clicks);
+    app.marked = false;
+    try h.render();
+    try testing.expect(h.view.maximize_button == null);
+}

@@ -93,7 +93,7 @@ void zlm_app_destroy(NativeApp *app){app->owner=NULL;if(current_app==app)current
 typedef struct NativeWindow {
     NSWindow *window;ZigView *view;ZigDelegate *delegate;
     void *owner;Emit emit;int refs,destroyed;
-    int decoration,popup,enabled,keyboard,fullscreen_requested,topmost_requested,shown;
+    int decoration,popup,enabled,keyboard,fullscreen_requested,topmost_requested,shown,fullscreen_moving;
     /* Hide ordered the window out while it was in the Dock: it no longer
        counts as visible until it shows or deminiaturizes again. */
     int hid_miniaturized;
@@ -140,6 +140,11 @@ typedef struct NativeWindow {
        shows what the frame paints over the glass from overlay_context, a
        bitmap of overlay_width by overlay_height pixels. */
     NSMutableArray *glass_hosts;NSView *overlay;CGContextRef overlay_context;uint32_t overlay_width,overlay_height;double overlay_scale;
+    /* A hidden title bar (zlm_window_title_bar) keeps the buttons of a
+       frameless window over its content: title_style 1 hidden, 2 hidden
+       inset; with lights_set its close button's top-left corner is at
+       (lights_x, lights_y) from the window's. */
+    int title_style,lights_set;double lights_x,lights_y;
 } NativeWindow;
 static void region_follow(NativeWindow *s);static void region_unlist(NativeWindow *s);static void region_watch(void);
 static void apply_tint(NativeWindow *s);static void drop_native_glass(NativeWindow *s);
@@ -166,6 +171,37 @@ static void notify_size(NativeWindow *s){
     emit(s,&event);
 }
 static void notify_state(NativeWindow *s){NativeEvent event={0};event.kind=16;emit(s,&event);}
+/* Puts the close button's top-left corner at the requested position, and
+   the other buttons after it, in a title bar with as much room below them
+   as above. AppKit lays the title bar out again when the window resizes,
+   leaves full screen, its title or its appearance changes, so this runs
+   after each of them. */
+static void fullscreen_settled(NativeWindow *s){
+    s->fullscreen_moving=0;
+    if(s->destroyed||s->popup)return;
+    retain_window(s);
+    dispatch_async(dispatch_get_main_queue(),^{
+        if(!s->destroyed&&!s->fullscreen_moving){
+            const int current=([s->window styleMask]&NSWindowStyleMaskFullScreen)!=0;
+            if(current!=!!s->fullscreen_requested)@autoreleasepool{[s->window toggleFullScreen:nil];}
+            else notify_state(s);
+        }
+        release_window(s);
+    });
+}
+static void layout_lights(NativeWindow *s){
+    if(!s||s->destroyed||!s->title_style||!s->lights_set||([s->window styleMask]&NSWindowStyleMaskFullScreen))return;
+    NSButton *close=[s->window standardWindowButton:NSWindowCloseButton],*mini=[s->window standardWindowButton:NSWindowMiniaturizeButton];
+    NSView *container=[[close superview] superview];
+    if(!close||!mini||!container)return;
+    NSRect button=[close frame];
+    double height=button.size.height+2*s->lights_y;
+    NSRect frame=[container frame];
+    frame.size.height=height;frame.origin.y=[s->window frame].size.height-height;
+    [container setFrame:frame];
+    double gap=[mini frame].origin.x-button.origin.x;
+    for(NSWindowButton b=NSWindowCloseButton;b<=NSWindowZoomButton;b++)[[s->window standardWindowButton:b] setFrameOrigin:NSMakePoint(s->lights_x+(double)b*gap,s->lights_y)];
+}
 static int input_allowed(NativeWindow *s){NativeEvent gate={0};gate.kind=17;return s->enabled&&emit(s,&gate);}
 static int query_hit(NativeWindow *s,NSPoint point){
     if(!s->decoration)return 0;
@@ -281,7 +317,12 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 - (void)setFrameSize:(NSSize)size{[super setFrameSize:size];if(native){native->shadow_stale=1;notify_size(native);}}
 - (void)viewDidChangeBackingProperties{[super viewDidChangeBackingProperties];if(native)notify_size(native);}
 /* A tint for the dark appearance follows the window's as it changes. */
-- (void)viewDidChangeEffectiveAppearance{[super viewDidChangeEffectiveAppearance];if(native&&!native->destroyed&&native->tint_dark)apply_tint(native);}
+- (void)viewDidChangeEffectiveAppearance{
+    [super viewDidChangeEffectiveAppearance];
+    if(native&&!native->destroyed&&native->tint_dark)apply_tint(native);
+    /* AppKit lays the title bar out again after telling. */
+    if(native&&!native->destroyed&&native->lights_set){NativeWindow *s=native;retain_window(s);dispatch_async(dispatch_get_main_queue(),^{layout_lights(s);release_window(s);});}
+}
 - (void)updateTrackingAreas{
     for(NSTrackingArea *area in [self trackingAreas])[self removeTrackingArea:area];
     /* A window with an input region follows the pointer's moves over it
@@ -594,7 +635,7 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
 
 @implementation ZigDelegate
 - (BOOL)windowShouldClose:(NSWindow *)window{(void)window;NativeWindow *s=native;if(s){NativeEvent close={0};close.kind=10;emit(s,&close);}return NO;}
-- (void)windowDidResize:(NSNotification *)note{(void)note;NativeWindow *s=native;if(s){region_follow(s);notify_size(s);notify_state(s);}}
+- (void)windowDidResize:(NSNotification *)note{(void)note;NativeWindow *s=native;if(s){layout_lights(s);region_follow(s);notify_size(s);notify_state(s);}}
 - (void)windowWillMove:(NSNotification *)note{zlmw_drag_will_move([note object]);}
 - (void)windowDidMove:(NSNotification *)note{(void)note;NativeWindow *s=native;if(s){region_follow(s);NativeEvent moved={0};moved.kind=22;emit(s,&moved);}}
 - (void)windowDidBecomeKey:(NSNotification *)note{(void)note;NativeWindow *s=native;if(!s)return;NativeEvent focus={0};focus.kind=7;focus.flags=1;emit(s,&focus);notify_state(s);}
@@ -609,8 +650,21 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
 }
 - (void)windowDidMiniaturize:(NSNotification *)note{(void)note;if(native)notify_state(native);}
 - (void)windowDidDeminiaturize:(NSNotification *)note{(void)note;if(native){native->hid_miniaturized=0;notify_state(native);}}
-- (void)windowDidEnterFullScreen:(NSNotification *)note{(void)note;if(native)notify_state(native);}
-- (void)windowDidExitFullScreen:(NSNotification *)note{(void)note;if(native)notify_state(native);}
+/* AppKit ignores toggleFullScreen while a transition animates, so a
+   request made then is applied once the transition settles. */
+- (void)windowWillEnterFullScreen:(NSNotification *)note{(void)note;if(native){native->fullscreen_moving=1;native->fullscreen_requested=1;}}
+- (void)windowWillExitFullScreen:(NSNotification *)note{(void)note;if(native){native->fullscreen_moving=1;native->fullscreen_requested=0;}}
+- (void)windowDidEnterFullScreen:(NSNotification *)note{(void)note;if(native){fullscreen_settled(native);notify_state(native);}}
+- (void)windowDidExitFullScreen:(NSNotification *)note{(void)note;if(native){layout_lights(native);fullscreen_settled(native);notify_state(native);}}
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window{(void)window;if(native){native->fullscreen_requested=0;fullscreen_settled(native);notify_state(native);}}
+- (void)windowDidFailToExitFullScreen:(NSWindow *)window{(void)window;if(native){native->fullscreen_requested=1;fullscreen_settled(native);notify_state(native);}}
+/* The toolbar that insets the buttons holds no items: in full screen it
+   hides with the menu bar instead of covering the top of the content. */
+- (NSApplicationPresentationOptions)window:(NSWindow *)window willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)proposed{
+    NSApplicationPresentationOptions hide=NSApplicationPresentationFullScreen|NSApplicationPresentationAutoHideMenuBar;
+    if([window toolbar]&&(proposed&hide)==hide)return proposed|NSApplicationPresentationAutoHideToolbar;
+    return proposed;
+}
 - (void)windowDidChangeBackingProperties:(NSNotification *)note{(void)note;if(native)notify_size(native);}
 @end
 
@@ -768,7 +822,7 @@ int zlm_window_fullscreen(NativeWindow *s,int enabled){
     if(s->popup)return 1;
     s->fullscreen_requested=enabled;
     const int current=([s->window styleMask]&NSWindowStyleMaskFullScreen)!=0;
-    if(current!=!!enabled)@autoreleasepool{[s->window toggleFullScreen:nil];}
+    if(!s->fullscreen_moving&&current!=!!enabled)@autoreleasepool{[s->window toggleFullScreen:nil];}
     return 0;
 }
 int zlm_window_topmost(NativeWindow *s,int enabled){
@@ -776,7 +830,53 @@ int zlm_window_topmost(NativeWindow *s,int enabled){
     if(!s->popup)[s->window setLevel:enabled?NSFloatingWindowLevel:NSNormalWindowLevel];
     notify_state(s);return 0;
 }
-void zlm_window_title(NativeWindow *s,const char *title){@autoreleasepool{[s->window setTitle:[NSString stringWithUTF8String:title]?:@""];}}
+void zlm_window_title(NativeWindow *s,const char *title){@autoreleasepool{[s->window setTitle:[NSString stringWithUTF8String:title]?:@""];layout_lights(s);}}
+/* Shows the buttons of a frameless window over its content: style 1
+   hidden, 2 hidden inset, which an empty toolbar moves in and down; with
+   lights the close button's top-left corner goes to (x, y). */
+void zlm_window_title_bar(NativeWindow *s,int style,int lights,double x,double y){
+    if(s->destroyed||!s->frameless)return;
+    @autoreleasepool{
+        s->title_style=style;s->lights_set=lights;s->lights_x=x;s->lights_y=y;
+        for(NSWindowButton button=NSWindowCloseButton;button<=NSWindowZoomButton;button++)[[s->window standardWindowButton:button] setHidden:NO];
+        if(style==2){
+            NSToolbar *toolbar=[[NSToolbar alloc] initWithIdentifier:@"ziggurat.titlebar"];
+            /* No line under the title bar before macOS 15, which draws none. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            [toolbar setShowsBaselineSeparator:NO];
+#pragma clang diagnostic pop
+            [s->window setToolbar:toolbar];[toolbar release];
+        }
+        layout_lights(s);
+    }
+}
+/* The room the buttons take: the title bar's height, the zoom button's
+   right edge and the buttons' bottom edge, from the window's top-left
+   corner; zero in full screen. */
+void zlm_window_title_room(NativeWindow *s,double *out){
+    out[0]=out[1]=out[2]=out[3]=0;
+    if(s->destroyed||!s->title_style)return;
+    @autoreleasepool{
+        NSWindow *window=s->window;
+        if([window styleMask]&NSWindowStyleMaskFullScreen)return;
+        NSButton *close=[window standardWindowButton:NSWindowCloseButton],*zoom=[window standardWindowButton:NSWindowZoomButton];
+        if(!close||!zoom)return;
+        NSRect c=[close frame],z=[zoom frame];
+        if(s->lights_set){
+            /* Where layout_lights puts them, which may not have run yet. */
+            out[0]=round(c.size.height+2*s->lights_y);
+            out[1]=ceil(s->lights_x+z.origin.x-c.origin.x+z.size.width);
+            out[3]=ceil(s->lights_y+c.size.height);
+            return;
+        }
+        NSRect frame=[window frame],content=[window contentLayoutRect];
+        NSRect lights=[close convertRect:NSMakeRect(0,0,c.size.width,c.size.height) toView:nil];
+        out[0]=round(frame.size.height-content.origin.y-content.size.height);
+        out[1]=ceil(z.origin.x+z.size.width);
+        out[3]=ceil(frame.size.height-lights.origin.y);
+    }
+}
 void zlm_window_resize(NativeWindow *s,uint32_t width,uint32_t height){@autoreleasepool{[s->window setContentSize:NSMakeSize(width,height)];}}
 void zlm_window_invalidate(NativeWindow *s){[s->view setNeedsDisplay:YES];}
 void zlm_window_invalidate_rect(NativeWindow *s,int left,int top,int right,int bottom){[s->view setNeedsDisplayInRect:NSMakeRect(left,top,right-left,bottom-top)];}
@@ -977,7 +1077,8 @@ int zlm_window_traits(NativeWindow *s,int resizable,int movable,int minimizable,
             style=closable?style|NSWindowStyleMaskClosable:style&~NSWindowStyleMaskClosable;
             [window setStyleMask:style];
             [[window standardWindowButton:NSWindowZoomButton] setEnabled:maximizable&&resizable];
-            if(s->frameless)for(NSWindowButton button=NSWindowCloseButton;button<=NSWindowZoomButton;button++)[[window standardWindowButton:button] setHidden:YES];
+            if(s->frameless&&!s->title_style)for(NSWindowButton button=NSWindowCloseButton;button<=NSWindowZoomButton;button++)[[window standardWindowButton:button] setHidden:YES];
+            layout_lights(s);
         }else if(!s->popup)[window setStyleMask:resizable?style|NSWindowStyleMaskResizable:style&~NSWindowStyleMaskResizable];
         [window setMovable:movable];
         if(!s->popup)[window setCollectionBehavior:maximizable?NSWindowCollectionBehaviorFullScreenPrimary:NSWindowCollectionBehaviorFullScreenNone];

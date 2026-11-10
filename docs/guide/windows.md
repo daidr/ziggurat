@@ -29,6 +29,10 @@ window.show();
 | `transparent` | false | 透明背景，绘制留空的地方透出桌面 |
 | `vibrancy` / `vibrancy_tint` | `.none` | 窗口后面的系统材质（macOS 的 Liquid Glass 等，Windows 11 的 Mica/Acrylic） |
 | `corner_radius` | 0 | `.borderless`/`.custom` 窗口的圆角 |
+| `title_bar` | `.default` | `.custom` 窗口的 `.hidden`/`.hidden_inset`：内容铺满窗口，系统窗口按钮留在内容之上（`Window.titleBar()`） |
+| `title_bar_height` | 0 | 隐藏标题栏的高度（Windows 默认 32、Linux 按 GTK 头栏），macOS 忽略 |
+| `traffic_light_position` | null | macOS 红绿灯（关闭按钮左上角）的位置 |
+| `hide_window_buttons` | false | 隐藏标题栏时连窗口按钮也不显示 |
 | `opacity`、`skip_taskbar` | 1、false | 整体不透明度、不在任务栏显示 |
 | `focus_on_show` | true | false 时显示窗口不抢走键盘，适合后台工作弹出的提示 |
 | `popup` | null | 弹出窗口角色：浮出层、菜单式列表、悬停卡片 |
@@ -88,6 +92,22 @@ const window = try app.createWindow(.{
     .hit_test = .{ .context = &chrome, .hit = Chrome.hit },
 });
 ```
+
+### 隐藏标题栏，保留系统窗口按钮
+
+`.custom` 窗口再设 `title_bar = .hidden`（或 `.hidden_inset`），内容照样铺满整个窗口，但系统的窗口按钮留在内容之上：macOS 的红绿灯在左上角，Windows 的最小化、最大化/还原、关闭按 Windows 11 的样子画在右上角（悬停最大化按钮出现贴靠布局），Linux 按桌面的 `gtk-decoration-layout` 放 GTK 的按钮。`Window.titleBar()` 以 DIP 报告按钮占的位置，`Event.window_state` 在它变化时通知，布局据此让开：
+
+```zig
+const window = try app.createWindow(.{
+    .decoration = .custom,
+    .title_bar = .hidden_inset,
+    .traffic_light_position = .{ .x = 20, .y = 18 }, // 仅 macOS
+    .title_bar_height = 40, // Windows 与 Linux
+});
+const bar = try window.titleBar(); // height、left、right、bottom
+```
+
+`height` 是标题栏高度，`left`/`right` 是左右两侧按钮占的宽度，`bottom` 是按钮下沿到窗口顶边的距离。全屏时按钮隐藏、全部为 0；`hide_window_buttons = true` 连按钮也不要，同样全为 0。`.hidden_inset` 在 macOS 上加一条空工具栏，让红绿灯更靠里、更靠下；`traffic_light_position` 把关闭按钮的左上角放到指定位置，标题栏高度随之变为上下留白相等。网页窗口里这些值还以 CSS 变量给页面：`--ziggurat-titlebar-height`、`--ziggurat-titlebar-inset-left`、`--ziggurat-titlebar-inset-right`、`--ziggurat-titlebar-controls-bottom`（CSS 像素，已除以缩放），见[网页](../pages.md#隐藏标题栏的-css-变量)。
 
 用声明式视图时更简单：给标题区域的指针区域设 `drag_window`，Host 会在空白处按下时调用 `Window.startMove`，双击时执行系统的标题栏双击动作。完整示例见 `examples/frameless.zig`（`zig build run-frameless`），不支持自定义边框的环境（例如 Wayland）会退回系统边框。
 
