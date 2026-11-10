@@ -629,15 +629,18 @@ test "layers of masks composite from the bottom up" {
 test "a clip growing in every paint takes the memory of its mask before" {
     const masks = try Masks.create(std.testing.allocator);
     defer masks.destroy(null);
-    const visible: Rect = .{ .x = 0, .y = 0, .width = 2400, .height = 1500 };
+    // Pull request CI sets ZIGGURAT_QUICK_TESTS: a quarter of the size
+    // grows the same way at a sixteenth of the pixels.
+    const scale: f32 = if (std.testing.environ.containsConstant("ZIGGURAT_QUICK_TESTS")) 0.25 else 1;
+    const visible: Rect = .{ .x = 0, .y = 0, .width = 2400 * scale, .height = 1500 * scale };
     // A card opening out over 40 frames, from a cover to the window.
     var allocations: u64 = 0;
     for (0..40) |frame| {
         masks.beginPaint(null);
         const t: f32 = @as(f32, @floatFromInt(frame)) / 39;
-        const rect: Rect = .{ .x = 100 * (1 - t), .y = 100 * (1 - t), .width = 200 + 2200 * t, .height = 120 + 1380 * t };
+        const rect: Rect = .{ .x = 100 * scale * (1 - t), .y = 100 * scale * (1 - t), .width = (200 + 2200 * t) * scale, .height = (120 + 1380 * t) * scale };
         const before = masks.stats.recycled;
-        const view = (try masks.shape(rect, 24, null, visible, 1, null)).?;
+        const view = (try masks.shape(rect, 24 * scale, null, visible, 1, null)).?;
         if (masks.stats.recycled == before) allocations += 1;
         // The mask is of the clip, whatever memory it took.
         const c = view.coverage;

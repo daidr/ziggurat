@@ -80,6 +80,8 @@ const Client = struct {
     fn send(self: *Client, method: []const u8, params: []const u8) !?std.json.ObjectMap {
         const id = self.next;
         self.next += 1;
+        watchdog.asking(method, params);
+        defer watchdog.answered();
         const w = &self.writer.interface;
         try w.print("{{\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}\n", .{ id, method, params });
         try w.flush();
@@ -242,7 +244,9 @@ fn drive(path: []const u8) !void {
     try client.expectError("eval", "{\"script\":\"1\"}", "unsupported");
     try client.expectError("fly", "{}", "unknown_method");
 
+    watchdog.enter("out of sight");
     try outOfSight(client, arena, add);
+    watchdog.enter("menus");
 
     if (!has_menus) {
         // No menu bar to choose from: the app quits through a task instead.
@@ -267,11 +271,7 @@ fn drive(path: []const u8) !void {
 /// and a capture tell what the window shows now.
 fn outOfSight(client: *Client, arena: std.mem.Allocator, add: std.json.ObjectMap) !void {
     try quit_app.?.post(.{ .context = quit_app.?, .call = hideTask });
-    while (true) {
-        const windows = (try client.result("windows", "{}")).get("windows").?.array.items;
-        if (!windows[0].object.get("visible").?.bool) break;
-        zio.sleep(10 * std.time.ns_per_ms);
-    }
+    try waitVisible(client, false);
     try client.idle();
     const before = if (comptime builtin.os.tag == .macos) (try client.result("capture", "{}")).get("png").?.string else "";
     _ = try client.result("act", "{\"key\":\"add\",\"action\":\"press\"}");
@@ -286,13 +286,76 @@ fn outOfSight(client: *Client, arena: std.mem.Allocator, add: std.json.ObjectMap
     _ = try client.result("input", try std.fmt.allocPrint(arena, "{{\"window\":1,\"events\":[{{\"type\":\"click\",\"x\":{d},\"y\":{d}}}]}}", .{ point[0], point[1] }));
     try expectCount(client, 6);
     try quit_app.?.post(.{ .context = quit_app.?, .call = showTask });
-    while (true) {
-        const windows = (try client.result("windows", "{}")).get("windows").?.array.items;
-        if (windows[0].object.get("visible").?.bool) break;
-        zio.sleep(10 * std.time.ns_per_ms);
-    }
+    try waitVisible(client, true);
     try expectCount(client, 6);
 }
+
+/// Waits at most 10 seconds for the window to show or to be out of sight.
+fn waitVisible(client: *Client, visible: bool) !void {
+    for (0..1000) |_| {
+        const windows = (try client.result("windows", "{}")).get("windows").?.array.items;
+        if (windows[0].object.get("visible").?.bool == visible) return;
+        zio.sleep(10 * std.time.ns_per_ms);
+    }
+    std.debug.print("the window is still {s} after 10 s\n", .{if (visible) "out of sight" else "shown"});
+    return error.Timeout;
+}
+
+/// Ends the smoke, saying where it stands, when a request goes unanswered
+/// for a minute or the whole smoke takes more than three: a hang fails
+/// with the step it hung in.
+const watchdog = struct {
+    var mutex: zio.Mutex = .{};
+    var method: [32]u8 = undefined;
+    var method_len: usize = 0;
+    var params: [160]u8 = undefined;
+    var params_len: usize = 0;
+    var waiting: bool = false;
+    /// Counts requests and phases, so the watchdog sees progress.
+    var steps: u64 = 0;
+    var phase: []const u8 = "starting";
+
+    fn asking(name: []const u8, request: []const u8) void {
+        mutex.lock();
+        defer mutex.unlock();
+        method_len = @min(name.len, method.len);
+        @memcpy(method[0..method_len], name[0..method_len]);
+        params_len = @min(request.len, params.len);
+        @memcpy(params[0..params_len], request[0..params_len]);
+        waiting = true;
+        steps += 1;
+    }
+    fn answered() void {
+        mutex.lock();
+        defer mutex.unlock();
+        waiting = false;
+        steps += 1;
+    }
+    fn enter(name: []const u8) void {
+        mutex.lock();
+        defer mutex.unlock();
+        phase = name;
+        steps += 1;
+    }
+    fn run() void {
+        var seen: u64 = 0;
+        var still: u32 = 0;
+        var total: u32 = 0;
+        while (true) {
+            zio.sleep(std.time.ns_per_s);
+            total += 1;
+            mutex.lock();
+            if (steps == seen) still += 1 else still = 0;
+            seen = steps;
+            const stuck = (waiting and still >= 60) or total >= 180;
+            if (stuck) {
+                std.debug.print("automation smoke stuck after {d} s ({s}): last request {s} {s}, {s}\n", .{ total, phase, method[0..method_len], params[0..params_len], if (waiting) "unanswered" else "answered" });
+                std.process.exit(1);
+            }
+            mutex.unlock();
+        }
+    }
+};
 
 fn hideTask(_: *anyopaque) void {
     shown_window.?.perform(.hide) catch {};
@@ -373,10 +436,16 @@ pub fn main() !void {
     defer allocator.free(path);
     const server = (try automation.start(allocator, app, .{ .path = path })).?;
     var driving: Driving = .{ .path = path };
+    const guard = try std.Thread.spawn(.{}, watchdog.run, .{});
+    guard.detach();
+    watchdog.enter("driving");
     const thread = try std.Thread.spawn(.{}, Driving.run, .{&driving});
     try app.run();
+    watchdog.enter("stopping the server");
     server.stop();
+    watchdog.enter("joining the driving thread");
     thread.join();
+    watchdog.enter("finishing");
     try driving.result;
     if (has_menus) owner.detach() catch {};
 
