@@ -612,6 +612,7 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 - 这些事件各自在单独的一遍交付，和控件返回 true 一样，应用在那一遍里处理；之后的绘制遍只保留 `hovered`、`pressed`、`position` 与 `bounds`。`bounds` 是上一次排列的窗口边界，第一帧之前为 null。
 - 按下先交给控件：落在区域内按钮上的按下属于按钮，副键与中键在控件上也不交给区域。最内层的区域得到按下。窗口失去焦点或捕获被取消时按下作废，不计为单击。禁用的区域只报告 `bounds`。
 - `AreaOptions.observe` 让区域只观察指针，不参与按下的路由：按下照常落到它里面的控件和其他区域上，它仍报告 `hovered` 与 `position`，并在里面的控件被按住期间报告 `pressed`，例如聊天行在按住其中的按钮时画出按下的样子。
+- `AreaOptions.maximize_button` 把区域标成窗口的最大化按钮，给隐藏了系统按钮（`hide_window_buttons`）、自己画按钮的窗口用：Windows 11 上指针停在上面会弹出贴靠布局，与系统按钮一样（`Window.setMaximizeButton`）。区域照常接收指针，点击后由应用最大化窗口；每帧只有第一个这样的区域生效，其他平台忽略。
 - `AreaOptions.drag_window` 把区域变成拖动窗口的把手，给自绘标题栏的窗口（`.custom` 或 `.borderless` 装饰）用：区域里没有控件的地方主键按下交给窗口（Host 在交付这次按下时调用 `Window.startMove`），区域不报告主键的按下与单击；双击做系统标题栏双击做的事（`Window.titleBarDoubleClick`：macOS 按“连按窗口标题栏以”缩放、最小化或不操作，Windows 与 Linux 最大化或还原，不可最大化的窗口不变）。把手的双击另有含义时（例如侧栏空白处双击新建一项），再设 `AreaOptions.window_double_click`：双击在 `PointerArea.window_double_clicked` 报告给应用，窗口不再缩放，单击仍拖动窗口（普通区域的 `double_clicked` 做不到这一点，因为它不拖窗口）。第三次连击重新拖动窗口。Harness 用 `window_moves` 与 `title_bar_double_clicks` 记下把手交给窗口的拖动与双击：
 
 ```zig

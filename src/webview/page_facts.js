@@ -105,6 +105,33 @@
     ready(() => { loaded = true; report(current()); });
   }
 
+  // The room of the window controls over a page in a window with a hidden
+  // title bar, in CSS variables of the root, which the View updates through
+  // __zigguratTitleBar as it changes.
+  if (options.titleBar) {
+    let sheet = null;
+    let style = null;
+    const apply = (bar) => {
+      const text = ":root{--ziggurat-titlebar-height:" + bar.height + "px;--ziggurat-titlebar-inset-left:" + bar.left +
+        "px;--ziggurat-titlebar-inset-right:" + bar.right + "px;--ziggurat-titlebar-controls-bottom:" + bar.bottom + "px}";
+      try {
+        if (!sheet) {
+          sheet = new CSSStyleSheet();
+          document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+        }
+        sheet.replaceSync(text);
+        return;
+      } catch {}
+      if (!style) style = document.createElement("style");
+      style.textContent = text;
+      const attach = () => { if (!style.isConnected) (document.head || document.documentElement)?.appendChild(style); };
+      if (document.documentElement) attach();
+      else ready(attach);
+    };
+    apply(options.titleBar);
+    Object.defineProperty(window, "__zigguratTitleBar", { value: apply });
+  }
+
   const limits = options.fit;
   if (limits) {
     // The root is laid out at its content's width within the limits, so that

@@ -1737,6 +1737,9 @@ pub const Node = struct {
     /// and one of those that takes its double click.
     drag_window: bool = false,
     window_double_click: bool = false,
+    /// A pointer area that is the window's maximize button
+    /// (`AreaOptions.maximize_button`).
+    maximize_button: bool = false,
     /// A container that observes the input inside it (`observeInput`).
     observes: bool = false,
     /// The node or one around it is `Style.hidden`, or it floats from an
@@ -2380,6 +2383,9 @@ pub const View = struct {
     /// What the last press on a `drag_window` area asks of the window, until
     /// the host takes it (`takeWindowGesture`).
     window_gesture: ?pointer_controls.WindowGesture = null,
+    /// Where the first area marked `maximize_button` shows, as the last
+    /// frame recorded it.
+    maximize_button: ?Rect = null,
     /// The control the primary button went down on, until it comes up, for
     /// the areas observing it to show its press.
     control_press: ?u64 = null,
@@ -6445,6 +6451,7 @@ pub const View = struct {
     fn record(self: *View, measurer: Measurer) void {
         const all = self.buffers.nodes[0..self.len];
         const overlay = &self.overlay;
+        self.maximize_button = null;
         overlay.popup = null;
         overlay.popover = null;
         overlay.item_count = 0;
@@ -6490,6 +6497,7 @@ pub const View = struct {
                 .pointer_area => if (node.style.enabled and overlay.area_count < max_pointer_areas) if (self.visible(node)) |rect| {
                     overlay.areas[overlay.area_count] = .{ .id = node.id, .index = @intCast(index), .bounds = node.bounds, .rect = rect, .track = node.track, .observe = node.observe, .drag_window = node.drag_window, .window_double_click = node.window_double_click };
                     overlay.area_count += 1;
+                    if (node.maximize_button and self.maximize_button == null and rect.width > 0 and rect.height > 0) self.maximize_button = rect;
                 },
                 .embed => if (node.embed.?.input != null and node.style.enabled and overlay.embed_count < max_interactive_embeds) if (self.visible(node)) |rect| {
                     overlay.embeds[overlay.embed_count] = .{ .id = node.id, .bounds = node.bounds, .rect = rect, .embed = node.embed.? };
@@ -8996,6 +9004,9 @@ pub const Host = struct {
     /// after the next frame.
     pending_focus: ?u64 = null,
     focus_queued: bool = false,
+    /// The maximize button the window was told of
+    /// (`z.Window.setMaximizeButton`).
+    maximize_sent: ?Rect = null,
     /// `hiddenTask` is posted.
     hidden_queued: bool = false,
     /// The pending focus waited one more frame, for a text field that
@@ -9986,6 +9997,11 @@ pub const Host = struct {
             tools.frameTimes(built, laid, if (lap) |*timer| timer.lap() else 0);
         }
         if (self.options.after_frame) |hook| hook.run(hook.context);
+        // The window hit-tests its maximize button in its own DIPs.
+        if (!std.meta.eql(self.view.maximize_button, self.maximize_sent)) if (self.context.window) |window| {
+            self.maximize_sent = self.view.maximize_button;
+            window.setMaximizeButton(self.view.maximize_button) catch {};
+        };
         // What lies under a still pointer may have changed shape or moved;
         // the next pass that builds the areas sees it.
         _ = self.view.pointerMoved(self.view.pointer);
