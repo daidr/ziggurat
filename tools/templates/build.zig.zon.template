@@ -4,7 +4,6 @@
     .fingerprint = @@FINGERPRINT@@,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        .ziggurat = .{ .path = "@@FRAMEWORK@@" },
-    },
+@@DEPENDENCY@@    },
     .paths = .{ "build.zig", "build.zig.zon", "src", "ziggurat.json" },
 }

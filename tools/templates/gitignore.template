@@ -2,3 +2,5 @@
 zig-out/
 dist/
 .ziggurat/
+zig-pkg/
+.deps/

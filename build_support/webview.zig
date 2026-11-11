@@ -143,7 +143,9 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
     const declarative_view = c.declarative_view;
     if (target.result.cpu.arch != .x86_64)
         @panic("The first WebView2 backend supports Windows x86_64 only");
-    const sdk = b.option([]const u8, "webview2-sdk", "Path to the extracted WebView2 SDK") orelse ".deps/webview2";
+    // A path given on the command line is relative to the working directory;
+    // an application that fetched the framework passes its own b.path.
+    const sdk = b.option(std.Build.LazyPath, "webview2-sdk", "Path to the extracted WebView2 SDK") orelse b.path(".deps/webview2");
     const view = b.addModule("ziggurat_webview", .{
         .root_source_file = b.path("src/webview/root.zig"),
         .target = target,
@@ -155,7 +157,7 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
     view.addImport("ziggurat_tls_pem", tls_pem);
     for ([_][]const u8{ "webview2.c", "page_host.c", "windows_cookies.c" }) |file| {
         const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{"-std=c11"}, target, optimize);
-        native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+        native.addIncludePath(sdk.path(b, "build/native/include"));
         native.addIncludePath(b.path("src/webview/include"));
     }
     addWindowsProfileNative(b, view, "webview", sdk, target, optimize);
@@ -178,8 +180,12 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
     });
     view_tests.* = addTest(b, .{ .root_module = view });
     const web_runtime = b.step("webview-runtime", "Install the optional WebView2 loader and SDK license");
-    web_runtime.dependOn(&b.addInstallFileWithDir(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/x64/WebView2Loader.dll" })), .bin, "WebView2Loader.dll").step);
-    web_runtime.dependOn(&b.addInstallFileWithDir(sourcePath(b, b.pathJoin(&.{ sdk, "LICENSE.txt" })), .bin, "WebView2-SDK-LICENSE.txt").step);
+    web_runtime.dependOn(&b.addInstallFileWithDir(sdk.path(b, "build/native/x64/WebView2Loader.dll"), .bin, "WebView2Loader.dll").step);
+    web_runtime.dependOn(&b.addInstallFileWithDir(sdk.path(b, "LICENSE.txt"), .bin, "WebView2-SDK-LICENSE.txt").step);
+    // An application's build installs these beside its executable
+    // (addApplicationResources): this install step is not part of its build.
+    b.addNamedLazyPath("webview2-loader", sdk.path(b, "build/native/x64/WebView2Loader.dll"));
+    b.addNamedLazyPath("webview2-sdk-license", sdk.path(b, "LICENSE.txt"));
     b.getInstallStep().dependOn(web_runtime);
     // Test-only certificate oracle compiles the real adapter in isolation.
     // Production View never links this fixture or a TLS exception entry.
@@ -193,7 +199,7 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
     credentials_view.addImport("ziggurat_tls_pem", tls_pem);
     for ([_][]const u8{ "tests/windows_request_credentials_adapter.c", "src/webview/page_host.c" }) |file| {
         const native = native_support.add(b, credentials_view, b.fmt("credential-probe-{s}", .{std.fs.path.stem(file)}), file, &.{"-std=c11"}, target, optimize);
-        native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+        native.addIncludePath(sdk.path(b, "build/native/include"));
         native.addIncludePath(b.path("src/webview/include"));
     }
     addWindowsProfileNative(b, credentials_view, "credential-probe", sdk, target, optimize);
@@ -239,7 +245,7 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
     initializers_view.addImport("ziggurat_tls_pem", tls_pem);
     for ([_][]const u8{ "tests/windows_document_initializers_adapter.c", "src/webview/page_host.c" }) |file| {
         const native = native_support.add(b, initializers_view, b.fmt("initializer-probe-{s}", .{std.fs.path.stem(file)}), file, &.{"-std=c11"}, target, optimize);
-        native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+        native.addIncludePath(sdk.path(b, "build/native/include"));
         native.addIncludePath(b.path("src/webview/include"));
     }
     addWindowsProfileNative(b, initializers_view, "initializer-probe", sdk, target, optimize);
@@ -316,7 +322,7 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
     page_authorization.root_module.addCSourceFile(.{ .file = b.path("tests/page_authorization_smoke.c"), .flags = &.{"-std=c11"} });
     page_authorization.root_module.addCSourceFile(.{ .file = b.path("src/webview/page_host.c"), .flags = &.{"-std=c11"} });
     _ = native_support.add(b, page_authorization.root_module, "page-authorization-stream-native", "src/file_stream/windows_core.c", &.{"-std=c11"}, target, optimize);
-    page_authorization.root_module.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+    page_authorization.root_module.addIncludePath(sdk.path(b, "build/native/include"));
     page_authorization.root_module.addIncludePath(b.path("src/webview/include"));
     addWindowsProfileNative(b, page_authorization.root_module, "page-authorization", sdk, target, optimize);
     for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32", "comctl32" }) |library| page_authorization.root_module.linkSystemLibrary(library, .{});
@@ -325,7 +331,7 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
     b.step("smoke-page-authorization", "Check page authorization through native callback ABI without a Runtime").dependOn(&page_authorization_run.step);
     const remote_origins = b.addExecutable(.{ .name = "test-remote-origin", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
     remote_origins.root_module.addCSourceFile(.{ .file = b.path("tests/remote_origin_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-    remote_origins.root_module.addSystemIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+    remote_origins.root_module.addSystemIncludePath(sdk.path(b, "build/native/include"));
     remote_origins.root_module.addIncludePath(b.path("src/webview/include"));
     for ([_][]const u8{ "ole32", "oleaut32", "urlmon" }) |library| remote_origins.root_module.linkSystemLibrary(library, .{});
     check.dependOn(&remote_origins.step);
@@ -339,7 +345,7 @@ pub fn addWindows(b: *std.Build, c: anytype) void {
     // bounded SDK double. It does not create a browser or open a window.
     initializer_native.root_module.addCSourceFile(.{ .file = b.path("tests/document_initializers_native_test.c"), .flags = &.{"-std=c11"} });
     _ = native_support.add(b, initializer_native.root_module, "initializer-stream-native", "src/file_stream/windows_core.c", &.{"-std=c11"}, target, optimize);
-    initializer_native.root_module.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+    initializer_native.root_module.addIncludePath(sdk.path(b, "build/native/include"));
     initializer_native.root_module.addIncludePath(b.path("src/webview/include"));
     addWindowsProfileNative(b, initializer_native.root_module, "initializer-native", sdk, target, optimize);
     for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32", "comctl32" }) |library| initializer_native.root_module.linkSystemLibrary(library, .{});

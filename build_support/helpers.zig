@@ -269,9 +269,9 @@ pub fn addWebNativeBoundarySmoke(b: *std.Build, target: std.Build.ResolvedTarget
 /// The WebView2 adapter references the owned Profile lifetime, storage and
 /// session objects. Every module that compiles or includes the adapter links
 /// them once, together with their security and certificate libraries.
-pub fn addWindowsProfileNative(b: *std.Build, owner: *std.Build.Module, prefix: []const u8, sdk: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+pub fn addWindowsProfileNative(b: *std.Build, owner: *std.Build.Module, prefix: []const u8, sdk: std.Build.LazyPath, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const native = native_support.add(b, owner, b.fmt("{s}-windows_profile.c", .{prefix}), "src/webview/windows_profile.c", &.{"-std=c11"}, target, optimize);
-    native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+    native.addIncludePath(sdk.path(b, "build/native/include"));
     native.addIncludePath(b.path("src/webview/include"));
     owner.linkSystemLibrary("crypt32", .{});
     addWindowsProfileStorageNative(b, owner, prefix, target, optimize);
@@ -490,15 +490,25 @@ pub const ApplicationIcon = union(enum) {
 };
 
 /// For applications that depend on this package: embed the Windows manifest,
-/// version resource and icon. Other targets need no resources.
+/// version resource and icon, and install the WebView2 loader of a framework
+/// built with -Dwebview=true. Other targets need no resources.
 pub fn addApplicationResources(b: *std.Build, exe: *std.Build.Step.Compile, dependency: *std.Build.Dependency, metadata: packaging.Metadata) void {
     addApplicationResourcesWithIcon(b, exe, dependency, metadata, .default);
 }
+
+var webview_runtime_installed = false;
 
 /// As `addApplicationResources`, with the app's own icon.
 pub fn addApplicationResourcesWithIcon(b: *std.Build, exe: *std.Build.Step.Compile, dependency: *std.Build.Dependency, metadata: packaging.Metadata, icon: ApplicationIcon) void {
     if (exe.root_module.resolved_target.?.result.cpu.arch == .wasm32) return addBrowserSite(b, exe, dependency);
     if (exe.root_module.resolved_target.?.result.os.tag != .windows) return;
+    // A framework built with -Dwebview=true names the WebView2 loader, which
+    // the executable loads from its own directory.
+    if (dependency.builder.named_lazy_paths.get("webview2-loader")) |loader| if (!webview_runtime_installed) {
+        webview_runtime_installed = true;
+        b.getInstallStep().dependOn(&b.addInstallBinFile(loader, "WebView2Loader.dll").step);
+        b.getInstallStep().dependOn(&b.addInstallBinFile(dependency.namedLazyPath("webview2-sdk-license"), "WebView2-SDK-LICENSE.txt").step);
+    };
     const file = iconFile(b, dependency.path("tools/icon_main.zig"), dependency.path("assets/application.ico"), icon);
     _ = packaging.addWindowsResources(b, exe, .{ .metadata = metadata, .icon = file }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
 }
