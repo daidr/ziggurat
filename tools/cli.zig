@@ -19,7 +19,7 @@ const install_ps1 = @import("install_ps1.zig");
 const pkgbuild = @import("pkgbuild.zig");
 
 const usage =
-    \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
+    \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH | --fetch URL]
     \\ziggurat dev [--web [--port PORT]] [--background] [--sign IDENTITY] [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
     \\ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
     \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--install-dir-name NAME] [--hook-init CMD] [--hook-install CMD] [--hook-uninstall CMD] [--command LIST] [--output FILE]
@@ -39,7 +39,8 @@ const usage =
     \\ziggurat vet [DIR]
     \\ziggurat doctor [--webview]
     \\
-    \\init writes a project that depends on this framework checkout by path.
+    \\init writes a project that depends on this framework checkout by path, or with
+    \\--fetch on a framework archive or git URL, recorded by `zig fetch --save`.
     \\dev runs `zig build` and the installed executable, and rebuilds and restarts
     \\when src/, build.zig, build.zig.zon or a --watch directory changes; --frontend starts a frontend
     \\watcher next to it and stops it on exit. --web builds for browsers instead
@@ -302,6 +303,9 @@ pub const InitOptions = struct {
     name: ?[]const u8 = null,
     identity: ?[]const u8 = null,
     framework: []const u8,
+    /// Depend on this URL instead of `framework`; `init` then records it with
+    /// `zig fetch --save`, which downloads it and writes its hash.
+    fetch: ?[]const u8 = null,
 };
 
 fn init(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
@@ -322,12 +326,24 @@ fn init(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         } else if (std.mem.eql(u8, arg, "--framework")) {
             init_options.framework = value orelse return error.InvalidArguments;
             index += 1;
+        } else if (std.mem.eql(u8, arg, "--fetch")) {
+            init_options.fetch = value orelse return error.InvalidArguments;
+            index += 1;
         } else if (init_options.directory.len == 0 and !std.mem.startsWith(u8, arg, "--")) {
             init_options.directory = arg;
         } else return error.InvalidArguments;
     }
     if (init_options.directory.len == 0) return error.InvalidArguments;
     try createProject(allocator, std.Io.Dir.cwd(), init_options);
+    if (init_options.fetch) |url| {
+        const zig = try zigExecutable(allocator);
+        var child = try zio.spawn(.{ .argv = &.{ zig, "fetch", "--save=ziggurat", url }, .cwd = .{ .path = init_options.directory } });
+        const term = try child.wait(zio.io());
+        if (term != .exited or term.exited != 0) {
+            std.debug.print("ziggurat: zig fetch {s} failed; the project is written without the dependency, add it with `zig fetch --save=ziggurat URL` in {s}\n", .{ url, init_options.directory });
+            return 1;
+        }
+    }
     var stdout = std.Io.File.stdout();
     try stdout.writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "created {s}; next: cd {s} && ziggurat dev\n", .{ init_options.directory, init_options.directory }));
     return 0;
@@ -379,6 +395,13 @@ fn render(allocator: std.mem.Allocator, template: []const u8, replacements: []co
 
 const build_template = @embedFile("templates/build.zig.template");
 const zon_template = @embedFile("templates/build.zig.zon.template");
+// Windows WebView2 builds read the SDK headers and loader. A framework
+// checkout keeps them in its own .deps/webview2; a project that fetched the
+// framework keeps them in the project's, since the fetched package is read-only.
+const webview2_sdk_option =
+    \\    const webview2_sdk = b.option(std.Build.LazyPath, "webview2-sdk", "Path to the extracted WebView2 SDK") orelse b.path(".deps/webview2");
+    \\
+;
 const native_template = @embedFile("templates/native.zig.template");
 const web_template = @embedFile("templates/web.zig.template");
 const hybrid_template = @embedFile("templates/hybrid.zig.template");
@@ -399,14 +422,18 @@ pub fn createProject(allocator: std.mem.Allocator, cwd: std.Io.Dir, init_options
     var iterator = project.iterate();
     if (try iterator.next(zio.io()) != null) return error.DirectoryNotEmpty;
 
-    // build.zig.zon paths are relative to the project.
-    const project_absolute = try zio.realPathAlloc(cwd, init_options.directory, allocator);
-    const framework_absolute = try zio.realPathAlloc(cwd, init_options.framework, allocator);
-    var framework_check = try std.Io.Dir.openDirAbsolute(zio.io(), framework_absolute, .{});
-    framework_check.access(zio.io(), "build.zig.zon", .{}) catch return error.FrameworkNotFound;
-    framework_check.close(zio.io());
-    const relative = try std.fs.path.relativeAlloc(allocator, project_absolute, null, project_absolute, framework_absolute);
-    const framework = try std.mem.replaceOwned(u8, allocator, relative, "\\", "/");
+    // build.zig.zon paths are relative to the project. A fetched framework
+    // is added by `zig fetch --save` after the files are written.
+    const dependency = if (init_options.fetch != null) "" else dependency: {
+        const project_absolute = try zio.realPathAlloc(cwd, init_options.directory, allocator);
+        const framework_absolute = try zio.realPathAlloc(cwd, init_options.framework, allocator);
+        var framework_check = try std.Io.Dir.openDirAbsolute(zio.io(), framework_absolute, .{});
+        framework_check.access(zio.io(), "build.zig.zon", .{}) catch return error.FrameworkNotFound;
+        framework_check.close(zio.io());
+        const relative = try std.fs.path.relativeAlloc(allocator, project_absolute, null, project_absolute, framework_absolute);
+        const framework = try std.mem.replaceOwned(u8, allocator, relative, "\\", "/");
+        break :dependency try std.fmt.allocPrint(allocator, "        .ziggurat = .{{ .path = \"{s}\" }},\n", .{framework});
+    };
 
     var id: u32 = undefined;
     zio.random.bytes(std.mem.asBytes(&id));
@@ -414,6 +441,7 @@ pub fn createProject(allocator: std.mem.Allocator, cwd: std.Io.Dir, init_options
     const fingerprint = (@as(u64, std.hash.Crc32.hash(package)) << 32) | id;
 
     const web = init_options.template != .native;
+    const fetched = init_options.fetch != null;
     const imports = switch (init_options.template) {
         .native =>
         \\                .{ .name = "ziggurat", .module = ziggurat.module("ziggurat") },
@@ -440,9 +468,11 @@ pub fn createProject(allocator: std.mem.Allocator, cwd: std.Io.Dir, init_options
         .{ "ID", identity },
         .{ "EXE", executable },
         .{ "PACKAGE", package },
-        .{ "FRAMEWORK", framework },
+        .{ "DEPENDENCY", dependency },
         .{ "FINGERPRINT", try std.fmt.allocPrint(allocator, "0x{x}", .{fingerprint}) },
         .{ "WEB", if (web) "true" else "false" },
+        .{ "WEBVIEW2_SDK", if (web and fetched) webview2_sdk_option else "" },
+        .{ "WEBVIEW2_ARG", if (web and fetched) ", .@\"webview2-sdk\" = webview2_sdk" else "" },
         .{ "IMPORTS", imports },
     };
     try project.createDirPath(zio.io(), "src");
@@ -1669,9 +1699,12 @@ fn doctor(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             if ((zio.hasEnvVar(allocator, "DISPLAY") catch false) or (zio.hasEnvVar(allocator, "WAYLAND_DISPLAY") catch false)) report(.ok, "display", "available") else report(.warning, "display", "no DISPLAY or WAYLAND_DISPLAY; windows cannot open here");
         },
         .windows => {
-            const sdk = std.fs.path.join(allocator, &.{ options.framework_root, ".deps", "webview2", "build", "native", "include", "WebView2.h" }) catch unreachable;
+            // A project's own .deps/webview2 comes first, as its build.zig reads it.
+            const project_sdk = ".deps/webview2/build/native/include/WebView2.h";
+            const framework_sdk = std.fs.path.join(allocator, &.{ options.framework_root, ".deps", "webview2", "build", "native", "include", "WebView2.h" }) catch unreachable;
+            const sdk = if (std.Io.Dir.cwd().access(zio.io(), project_sdk, .{})) |_| project_sdk else |_| framework_sdk;
             if (std.Io.Dir.cwd().access(zio.io(), sdk, .{})) |_| report(.ok, "WebView2 SDK", sdk) else |_| {
-                report(if (webview) .missing else .warning, "WebView2 SDK", "not extracted; run scripts/fetch-webview2.ps1");
+                report(if (webview) .missing else .warning, "WebView2 SDK", "not extracted; run the framework's scripts/fetch-webview2.ps1 (-Destination .deps/webview2 in a project that fetched it)");
                 if (webview) failed = true;
             }
             if (webviewRuntimeVersion(allocator)) |version| report(.ok, "WebView2 Runtime", version) else {
@@ -2323,6 +2356,16 @@ test "templates render without placeholders and identifiers are sanitized" {
         try std.testing.expectError(error.DirectoryNotEmpty, createProject(allocator, temp.dir, .{ .directory = directory, .framework = "framework" }));
     }
     try std.testing.expectError(error.FrameworkNotFound, createProject(allocator, temp.dir, .{ .directory = "apps/none", .framework = "apps" }));
+    // A fetched framework leaves the dependency to `zig fetch --save`.
+    try createProject(allocator, temp.dir, .{ .directory = "apps/fetched", .framework = "missing", .fetch = "https://example.com/ziggurat.tar.gz" });
+    const fetched = try temp.dir.readFileAlloc(zio.io(), "apps/fetched/build.zig.zon", allocator, .limited(4096));
+    try std.testing.expect(std.mem.indexOf(u8, fetched, ".dependencies = .{\n    },") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try temp.dir.readFileAlloc(zio.io(), "apps/fetched/build.zig", allocator, .limited(8192)), "webview2-sdk") == null);
+    // Its pages read the WebView2 SDK from the project, not the read-only package.
+    try createProject(allocator, temp.dir, .{ .directory = "apps/fetched-web", .template = .web, .framework = "missing", .fetch = "https://example.com/ziggurat.tar.gz" });
+    const fetched_build = try temp.dir.readFileAlloc(zio.io(), "apps/fetched-web/build.zig", allocator, .limited(8192));
+    try std.testing.expect(std.mem.indexOf(u8, fetched_build, "orelse b.path(\".deps/webview2\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fetched_build, ".@\"webview2-sdk\" = webview2_sdk") != null);
 }
 
 test "snapshots change with edits and ignore build output" {

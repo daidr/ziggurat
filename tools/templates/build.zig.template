@@ -4,7 +4,7 @@ const ziggurat_build = @import("ziggurat");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const ziggurat = b.dependency("ziggurat", .{ .target = target, .optimize = optimize, .webview = @@WEB@@ });
+@@WEBVIEW2_SDK@@    const ziggurat = b.dependency("ziggurat", .{ .target = target, .optimize = optimize, .webview = @@WEB@@@@WEBVIEW2_ARG@@ });
     const exe = b.addExecutable(.{
         .name = "@@EXE@@",
         .root_module = b.createModule(.{
@@ -21,7 +21,10 @@ pub fn build(b: *std.Build) void {
         .version = .{ .major = 0, .minor = 1, .patch = 0 },
     });
     b.installArtifact(exe);
-    const run = b.addRunArtifact(exe);
+    // The installed executable, beside the libraries the build installs with it.
+    const run = b.addRunFile(b.graph.path(.install_bin, exe.out_filename));
+    run.step.dependOn(b.getInstallStep());
+    run.addPassthruArgs();
     b.step("run", "Run @@NAME@@").dependOn(&run.step);
     const tests = b.addTest(.{ .root_module = exe.root_module });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);

@@ -38,7 +38,7 @@ cd hello
 ```text
 hello/
 ├── build.zig          # 导入框架模块并嵌入应用资源
-├── build.zig.zon      # 以相对路径依赖框架检出
+├── build.zig.zon      # 以相对路径（或 --fetch 的 URL）依赖框架
 ├── ziggurat.json      # 名称、identity、版本、图标、签名等项目配置
 ├── src/main.zig       # 应用入口
 ├── .gitignore
@@ -54,6 +54,26 @@ hello/
 | `hybrid` | 同一份状态驱动一个原生视图窗口和一个页面窗口，任一侧的操作同步到另一侧 |
 
 `--framework PATH` 指定框架检出的位置，默认是构建这个 CLI 的那份源码。
+
+### 以远程依赖引入框架
+
+默认生成的项目以相对路径依赖本机的框架检出，适合同时修改框架的场合。项目要单独放进仓库、在 CI 或其他机器上构建时，改用 `--fetch`，让 Zig 下载固定版本的框架：
+
+```sh
+ziggurat init hello --template native --fetch git+https://github.com/daidr/ziggurat#<提交>
+```
+
+`init` 写完文件后运行 `zig fetch --save=ziggurat URL`，`build.zig.zon` 里记下 URL 与内容哈希；之后的构建不再需要框架检出，CLI 也可以来自任意一份检出。URL 用固定的提交，不要用分支名：分支移动后哈希不再匹配。也可以用 GitHub 的源码归档，例如 `https://github.com/daidr/ziggurat/archive/<提交>.tar.gz`。
+
+已有项目换成远程依赖时，先删掉 `build.zig.zon` 里 `.ziggurat = .{ .path = ... }` 这一项，再在项目目录运行 `zig fetch --save=ziggurat URL`。直接覆盖一个路径依赖时，Zig 会把 URL 写进 `.path` 字段。升级框架就是对新提交再运行一次这条命令。
+
+Zig 把下载的包放在项目的 `zig-pkg/` 下（`init` 生成的 `.gitignore` 已经忽略它），这些文件按哈希校验，不要修改。所以 Windows 上 `web` 与 `hybrid` 模板用到的 WebView2 SDK 放在项目自己的 `.deps/webview2`，生成的 `build.zig` 把它交给框架（`-Dwebview2-sdk=PATH` 可以改用别处的 SDK）：
+
+```powershell
+& (Resolve-Path zig-pkg/ziggurat-*/scripts/fetch-webview2.ps1) -Destination .deps/webview2
+```
+
+`WebView2Loader.dll` 和 SDK 许可文件由 `addApplicationResources` 装到 `zig-out/bin`，与可执行文件放在一起。
 
 ## 3. 开发
 

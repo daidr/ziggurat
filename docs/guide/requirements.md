@@ -11,7 +11,7 @@
 ## Windows
 
 - Windows 10 或更新版本，x86_64。原生 UI 使用 Win32/GDI，`-Dgpu=true` 启用 D3D11/DirectWrite，`-Daccessibility=true` 启用 UI Automation。
-- **WebView**：需要系统已安装的 WebView2 Runtime（不自动安装）。构建需要 WebView2 SDK，用 `./scripts/fetch-webview2.ps1` 获取；可执行文件旁需要 `WebView2Loader.dll`，构建会一并安装它和 SDK 许可文件。
+- **WebView**：需要系统已安装的 WebView2 Runtime（不自动安装）。构建需要 WebView2 SDK，在框架检出中用 `./scripts/fetch-webview2.ps1` 获取（以远程依赖引入框架的项目放在自己的 `.deps/webview2`，见 [快速开始](./getting-started.md#以远程依赖引入框架)）；可执行文件旁需要 `WebView2Loader.dll`，构建会一并安装它和 SDK 许可文件。
 
 ```powershell
 ./scripts/fetch-webview2.ps1

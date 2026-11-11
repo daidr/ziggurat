@@ -19,7 +19,7 @@ ziggurat doctor [--webview]
 
 ## init
 
-在空目录中生成 `build.zig`、`build.zig.zon`、`src/main.zig`、`.gitignore` 和 `ziggurat.json`。依赖以相对路径指向本框架检出（默认是构建 CLI 的那份源码），`build.zig.zon` 的 fingerprint 按 Zig 0.17.0 规则由包名生成。三种模板：
+在空目录中生成 `build.zig`、`build.zig.zon`、`src/main.zig`、`.gitignore` 和 `ziggurat.json`。依赖以相对路径指向本框架检出（默认是构建 CLI 的那份源码）；`--fetch URL` 改为由 `zig fetch --save=ziggurat URL` 记下框架归档或 git 地址与哈希，项目不再依赖本机检出，`web` 与 `hybrid` 模板此时从项目的 `.deps/webview2` 读 WebView2 SDK（见 [快速开始](./guide/getting-started.md#以远程依赖引入框架)）。`build.zig.zon` 的 fingerprint 按 Zig 0.17.0 规则由包名生成。三种模板：
 
 - `native`：声明式视图计数器，用到 `ziggurat` 与 `ziggurat_view`。
 - `web`：WebView 页面和嵌入的 `src/index.html`，页面与 Zig 通过同一套 `window.chrome.webview` 消息往返；Linux 在启动前由 worker 准备私有 Profile 目录。
@@ -27,7 +27,7 @@ ziggurat doctor [--webview]
 
 项目同时带上 `.agents/skills` 中的代理技能（见 [install-skills](#install-skills)）。三种模板的应用模块都导入 `ziggurat_i18n`，供生成的消息访问器使用。
 
-生成的 `build.zig` 调用本框架 `build.zig` 公开的 `addApplicationResources`，在 Windows 上嵌入清单、版本与图标资源，面向浏览器（`wasm32-wasi`）时把静态站点装到 `zig-out/web`。名称只接受不含引号、尖括号、`&`、`@` 和反斜杠的文本，identity 只接受 ASCII 字母、数字、点、下划线与连字符。
+生成的 `build.zig` 调用本框架 `build.zig` 公开的 `addApplicationResources`，在 Windows 上嵌入清单、版本与图标资源（框架启用 `-Dwebview=true` 时还把 `WebView2Loader.dll` 装到可执行文件旁），面向浏览器（`wasm32-wasi`）时把静态站点装到 `zig-out/web`。名称只接受不含引号、尖括号、`&`、`@` 和反斜杠的文本，identity 只接受 ASCII 字母、数字、点、下划线与连字符。
 
 ## dev
 
